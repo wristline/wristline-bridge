@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -216,7 +217,7 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
 
     await provider.sendPrompt(newer, 'fix the build\nthen run tests\u001b');
     assert.deepEqual(calls, [
-      ['/usr/bin/tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid}'],
+      ['/usr/bin/tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid} #{pane_in_mode}'],
       ['/usr/bin/tmux', 'send-keys', '-t', '%5', '-l', '--', 'fix the build then run tests '],
       ['/usr/bin/tmux', 'send-keys', '-t', '%5', 'Enter'],
     ]);
@@ -253,4 +254,118 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
   } finally {
     provider.stop();
   }
+});
+
+/** A live registry entry for `pid` in pane %5 and a provider whose tmux is faked (`probe` is what display-message answers). The refresh timer is stopped so the snapshot only changes on `refresh()`. */
+async function tmuxProvider(name: string, sid: string, pid: number, status = 'idle') {
+  const home = join(root, name);
+  const dir = join(home, 'sessions');
+  mkdirSync(dir, { recursive: true });
+  const entry = (patch: Record<string, unknown> = {}): void =>
+    writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: sid, cwd: '/w', tmux: 'work:@2.%5', status, updatedAt: Date.now(), ...patch }));
+  entry();
+  const calls: string[][] = [];
+  const probe = { pid, inMode: 0 };
+  const provider = new ClaudeCodeProvider({
+    home,
+    historyDays: 7,
+    tmux: 'tmux',
+    exec: async (file, args) => {
+      calls.push([file, ...args]);
+      return args[0] === 'display-message' ? `${probe.pid} ${probe.inMode}\n` : '';
+    },
+  });
+  await provider.start(recordingHub());
+  provider.stop();
+  const typed = (): string[][] => calls.filter((c) => c[1] === 'send-keys');
+  return { provider, calls, typed, entry, probe, file: join(dir, `${pid}.json`) };
+}
+
+test('claude-code: a session whose process exited since the last refresh gets no keystrokes', async (t) => {
+  const sleeper = spawn('sleep', ['30']);
+  t.after(() => sleeper.kill());
+  const sid = 'cccccccc-0000-4000-8000-000000000001';
+  const { provider, typed, probe } = await tmuxProvider('claude-dead', sid, sleeper.pid ?? 0);
+  probe.pid = process.pid; // The pane's shell is this process; the session runs inside it.
+  await provider.sendPrompt(sid, 'hi');
+  assert.equal(typed().length, 2);
+  sleeper.kill('SIGKILL');
+  await once(sleeper, 'exit');
+  // The registry still names the session and no refresh ran, but the pane now shows the shell.
+  await assert.rejects(provider.sendPrompt(sid, 'rm -rf build'), (e: unknown) => e instanceof PromptBlocked && e.code === 'not_live');
+  assert.equal(typed().length, 2);
+});
+
+test('claude-code: an alive session stays live however old its registry entry is; without procStart the 24 h cap applies', async () => {
+  const home = join(root, 'claude-old');
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const stat = readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+  const procStart = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+  const old = Date.now() - 25 * 3600_000;
+  const [guarded, unguarded] = ['dddddddd-0000-4000-8000-000000000001', 'dddddddd-0000-4000-8000-000000000002'];
+  writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: guarded, cwd: '/w', status: 'idle', procStart, updatedAt: old }));
+  writeFileSync(join(home, 'sessions', `${process.ppid}.json`), JSON.stringify({ pid: process.ppid, sessionId: unguarded, cwd: '/w', status: 'idle', updatedAt: old }));
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7 });
+  await provider.start(recordingHub());
+  provider.stop();
+  const status = (id: string): string | undefined => provider.listSessions().find((s) => s.id === `claude-code:${id}`)?.status;
+  assert.equal(status(guarded), 'idle');
+  assert.equal(status(unguarded), undefined, 'an old entry without a pid-reuse guard is not trusted');
+});
+
+test('claude-code: a dialog that opened since the last refresh blocks the prompt', async () => {
+  const sid = 'cccccccc-0000-4000-8000-000000000002';
+  const { provider, typed, entry, file } = await tmuxProvider('claude-stale', sid, process.pid, 'busy');
+  assert.equal(provider.listSessions()[0]?.promptBlock, undefined);
+  entry({ status: 'waiting' });
+  await assert.rejects(provider.sendPrompt(sid, 'also run the tests'), (e: unknown) => e instanceof PromptBlocked && e.code === 'awaiting_input');
+  entry({ tmux: 'work:@2.%9' });
+  await assert.rejects(provider.sendPrompt(sid, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'no_tmux');
+  rmSync(file);
+  await assert.rejects(provider.sendPrompt(sid, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'not_live');
+  assert.deepEqual(typed(), []);
+});
+
+test('claude-code: a pane in copy mode refuses prompts as busy', async () => {
+  const sid = 'cccccccc-0000-4000-8000-000000000003';
+  const { provider, calls, typed, probe } = await tmuxProvider('claude-copy-mode', sid, process.pid);
+  probe.inMode = 1;
+  await assert.rejects(provider.sendPrompt(sid, 'continue'), (e: unknown) => e instanceof PromptBlocked && e.code === 'busy');
+  assert.deepEqual(calls, [['tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid} #{pane_in_mode}']]);
+  probe.inMode = 0;
+  await provider.sendPrompt(sid, 'continue');
+  assert.equal(typed().length, 2);
+});
+
+test('claude-code: a trailing ";" is padded so tmux does not strip it as a command separator', async () => {
+  const sid = 'cccccccc-0000-4000-8000-000000000004';
+  const { provider, typed } = await tmuxProvider('claude-semicolon', sid, process.pid);
+  for (const text of ['a;', 'b\\;', ';', 'semi;colon']) await provider.sendPrompt(sid, text);
+  assert.deepEqual(typed().filter((c) => c[4] === '-l').map((c) => c.at(-1)), ['a; ', 'b\\; ', '; ', 'semi;colon']);
+});
+
+test('claude-code: a compaction newer than the statusLine report outdates its context', async () => {
+  const home = join(root, 'claude-compact');
+  const sid = 'eeeeeeee-0000-4000-8000-000000000001';
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  mkdirSync(join(home, 'projects', '-w'), { recursive: true });
+  const transcript = join(home, 'projects', '-w', `${sid}.jsonl`);
+  copyFileSync(new URL('./fixtures/claude/transcript.jsonl', import.meta.url), transcript);
+  let clock = Date.now();
+  writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, cwd: '/w', status: 'idle', updatedAt: clock }));
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7, now: () => clock });
+  await provider.start(recordingHub());
+  provider.stop();
+  const context = (): Session['context'] => provider.listSessions().find((s) => s.id === `claude-code:${sid}`)?.context;
+  provider.statusline({ session_id: sid, context_window: { context_window_size: 200_000, current_usage: { input_tokens: 123 } } });
+  assert.deepEqual(context(), { used: 123, window: 200_000 });
+  appendFileSync(
+    transcript,
+    `${JSON.stringify({ type: 'system', subtype: 'compact_boundary', timestamp: new Date(clock + 1000).toISOString(), compactMetadata: { preTokens: 5210, postTokens: 8387 } })}\n`,
+  );
+  await provider.refresh();
+  assert.deepEqual(context(), { used: 8387, window: 200_000 }, 'the report predates the compaction');
+  clock += 2000;
+  provider.statusline({ session_id: sid, context_window: { context_window_size: 200_000, current_usage: { input_tokens: 456 } } });
+  assert.deepEqual(context(), { used: 456, window: 200_000 });
 });

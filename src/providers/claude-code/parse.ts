@@ -154,6 +154,8 @@ export class ClaudeMetaScan implements LineHandler {
   firstPrompt: string | undefined;
   cwd: string | undefined;
   contextUsed: number | undefined;
+  /** When the last compaction happened (its record's timestamp, ms). */
+  compactedAt: number | undefined;
 
   line(line: string): void {
     if (line.includes('"custom-title"')) {
@@ -166,6 +168,12 @@ export class ClaudeMetaScan implements LineHandler {
       const rec = parseJson(line);
       if (rec?.type !== 'assistant' || rec.isSidechain === true || !isObject(rec.message)) return;
       this.contextUsed = contextTokens(rec.message) ?? this.contextUsed;
+    } else if (line.includes('"subtype":"compact_boundary"')) {
+      // /compact writes no assistant usage; the boundary carries the size the context shrank to.
+      const rec = parseJson(line);
+      if (rec?.type !== 'system' || rec.subtype !== 'compact_boundary') return;
+      this.contextUsed = isObject(rec.compactMetadata) ? num(rec.compactMetadata.postTokens) : undefined;
+      this.compactedAt = Date.parse(str(rec.timestamp) ?? '') || this.compactedAt;
     } else if ((this.firstPrompt === undefined || this.cwd === undefined) && line.includes('"type":"user"')) {
       const rec = parseJson(line);
       if (rec?.type !== 'user' || rec.isSidechain === true) return;
@@ -178,7 +186,7 @@ export class ClaudeMetaScan implements LineHandler {
 
   reset(): void {
     this.customTitle = this.aiTitle = this.firstPrompt = this.cwd = undefined;
-    this.contextUsed = undefined;
+    this.contextUsed = this.compactedAt = undefined;
   }
 }
 

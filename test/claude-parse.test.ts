@@ -125,6 +125,17 @@ test('context usage comes from the last non-synthetic assistant usage', () => {
   assert.equal(meta.contextUsed, undefined);
 });
 
+test('a compaction resets the context to its post-compaction size', () => {
+  const boundary = (extra: object): string =>
+    JSON.stringify({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', timestamp: '2026-09-29T11:00:00.000Z', uuid: 's-c', ...extra });
+  const meta = scan([...lines, boundary({ compactMetadata: { trigger: 'manual', preTokens: 5210, postTokens: 8387 } })]);
+  assert.equal(meta.contextUsed, 8387);
+  assert.equal(meta.compactedAt, Date.parse('2026-09-29T11:00:00.000Z'));
+  assert.equal(scan([...lines, boundary({})]).contextUsed, undefined);
+  meta.reset();
+  assert.equal(meta.compactedAt, undefined);
+});
+
 test('statusLine rate limits become 5h/7d usage with ISO reset times', () => {
   const input = {
     session_id: 'abc',

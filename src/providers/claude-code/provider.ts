@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -16,6 +16,8 @@ const HISTORY_MAX = 50;
 const DEFAULT_WINDOW = 200_000;
 const EXTENDED_WINDOW = 1_000_000;
 const TMUX_TIMEOUT_MS = 5000;
+/** Without procfs (macOS) the registry's pid is trusted; with it, an unreadable process has exited. */
+const HAS_PROCFS = existsSync('/proc/self/stat');
 
 interface RegistryEntry {
   pid: number;
@@ -54,6 +56,7 @@ interface Pane {
   /** `%<n>`: tmux keeps this id for the pane's whole life, wherever it moves. */
   id: string;
   pid: number;
+  procStart: string | undefined;
 }
 
 export interface ClaudeOptions {
@@ -74,8 +77,8 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly #exec: Exec;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
-  /** Context reported by the statusLine, by session id. */
-  readonly #statusContext = new Map<string, { used?: number; window?: number }>();
+  /** Context reported by the statusLine, by session id; `at` is when the report arrived. */
+  readonly #statusContext = new Map<string, { used?: number; window?: number; at: number }>();
   #sessions = new Map<string, Session>();
   /** tmux panes of live sessions that can take a prompt, by session id. */
   #panes = new Map<string, Pane>();
@@ -139,22 +142,35 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (this.#hub?.pending.hasSession(session.id)) throw new PromptBlocked('awaiting_input');
     if (/^[\s\u0000-\u001f\u007f]*!/.test(text)) throw new PromptBlocked('unsafe_prefix');
     const pane = this.#panes.get(nativeId);
-    if (!pane || !(await this.#paneRuns(pane))) throw new PromptBlocked('no_tmux');
-    // Control characters would act as keys (Enter, Esc, Ctrl-C) in the agent's input box.
-    const line = text.replace(/[\u0000-\u001f\u007f]+/g, ' ');
+    if (!pane) throw new PromptBlocked('no_tmux');
+    // The snapshot is up to 2 s old: since then the process may have exited (the pane then shows
+    // a shell) or a dialog may have opened, which Enter would answer with its default option.
+    if (!pidAlive(pane.pid) || !sameProcess(pane)) throw new PromptBlocked('not_live');
+    const entry = await readEntry(join(this.#home, 'sessions', `${pane.pid}.json`));
+    if (entry?.sessionId !== nativeId) throw new PromptBlocked('not_live');
+    const block = promptBlock(mapStatus(entry.status), tmuxPane(entry.tmux) === pane.id);
+    if (block) throw new PromptBlocked(block);
+    await this.#checkPane(pane);
+    // Control characters would act as keys (Enter, Esc, Ctrl-C) in the agent's input box. tmux
+    // strips a trailing `;` from an argument (command separator); Claude Code trims the space.
+    const line = text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/;$/, '; ');
     await this.#exec(this.#tmux, ['send-keys', '-t', pane.id, '-l', '--', line]);
     await this.#exec(this.#tmux, ['send-keys', '-t', pane.id, 'Enter']);
   }
 
-  /** Guards against typing into the wrong pane: the session's process must run inside it. */
-  async #paneRuns(pane: Pane): Promise<boolean> {
-    let panePid: number;
+  /** Guards against typing into the wrong pane (the session's process must run inside it) or into copy mode. */
+  async #checkPane(pane: Pane): Promise<void> {
+    let probe: string;
     try {
-      panePid = Number((await this.#exec(this.#tmux, ['display-message', '-p', '-t', pane.id, '#{pane_pid}'])).trim());
+      probe = await this.#exec(this.#tmux, ['display-message', '-p', '-t', pane.id, '#{pane_pid} #{pane_in_mode}']);
     } catch {
-      return false; // No tmux, no server on the default socket, or the pane is gone.
+      throw new PromptBlocked('no_tmux'); // No tmux, no server on the default socket, or the pane is gone.
     }
-    return Number.isInteger(panePid) && descendsFrom(pane.pid, panePid);
+    const [pid, inMode] = probe.trim().split(' ');
+    const panePid = Number(pid);
+    if (!Number.isInteger(panePid) || !descendsFrom(pane.pid, panePid)) throw new PromptBlocked('no_tmux');
+    // In copy mode (e.g. scrolled back) keys run copy-mode bindings and never reach the process.
+    if (inMode === '1') throw new PromptBlocked('busy');
   }
 
   /** Receives the statusLine JSON relayed to the local listener. */
@@ -165,9 +181,9 @@ export class ClaudeCodeProvider implements SessionProvider {
     const ctx = statuslineContext(input);
     if (!ctx) return;
     const window = ctx.window ?? this.#statusContext.get(ctx.sessionId)?.window;
-    this.#statusContext.set(ctx.sessionId, { used: ctx.used, window });
+    this.#statusContext.set(ctx.sessionId, { used: ctx.used, window, at: this.#now() });
     const session = this.#sessions.get(ctx.sessionId);
-    const context = this.#context(ctx.sessionId, this.#metas.get(ctx.sessionId)?.scan.contextUsed);
+    const context = this.#context(ctx.sessionId, this.#metas.get(ctx.sessionId)?.scan);
     if (session && context && JSON.stringify(session.context) !== JSON.stringify(context)) {
       session.context = context;
       this.#hub?.session(session);
@@ -175,9 +191,11 @@ export class ClaudeCodeProvider implements SessionProvider {
   }
 
   /** The statusLine's live numbers when present, else the transcript's last assistant usage. */
-  #context(id: string, transcriptUsed: number | undefined): Session['context'] {
+  #context(id: string, meta: ClaudeMetaScan | undefined): Session['context'] {
     const reported = this.#statusContext.get(id);
-    const used = reported?.used ?? transcriptUsed;
+    // A compaction since the last report outdates its count; the statusLine may not report again before the next turn.
+    const fresh = reported && reported.at > (meta?.compactedAt ?? -Infinity);
+    const used = (fresh ? reported.used : undefined) ?? meta?.contextUsed;
     if (used === undefined) return undefined;
     // Without a statusLine report, a count above 200k can only come from a 1M-context model.
     return { used, window: reported?.window ?? (used > DEFAULT_WINDOW ? EXTENDED_WINDOW : DEFAULT_WINDOW) };
@@ -214,7 +232,7 @@ export class ClaudeCodeProvider implements SessionProvider {
       const pane = tmuxPane(e.tmux);
       if (pane && (paneOwner.get(pane)?.updatedAt ?? -1) < e.updatedAt) paneOwner.set(pane, e);
     }
-    this.#panes = new Map([...paneOwner].map(([id, e]) => [e.sessionId, { id, pid: e.pid }]));
+    this.#panes = new Map([...paneOwner].map(([id, e]) => [e.sessionId, { id, pid: e.pid, procStart: e.procStart }]));
 
     const cutoff = now - this.#historyDays * DAY_MS;
     const history = [...this.#files]
@@ -294,7 +312,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     };
     const block = promptBlock(status, this.#panes.has(id));
     if (block) session.promptBlock = block;
-    const context = this.#context(id, meta?.contextUsed);
+    const context = this.#context(id, meta);
     if (context) session.context = context;
     return session;
   }
@@ -334,7 +352,7 @@ function descendsFrom(pid: number, ancestor: number): boolean {
     try {
       stat = readFileSync(`/proc/${p}/stat`, 'utf8');
     } catch {
-      return hops === 0;
+      return !HAS_PROCFS && hops === 0;
     }
     p = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
   }
@@ -357,8 +375,10 @@ function mapStatus(status: string | undefined): SessionStatus {
   }
 }
 
+/** `updatedAt` is not a heartbeat (an idle session keeps it for days), so the age cap only applies without a pid-reuse guard. */
 function isLive(entry: RegistryEntry, now: number): boolean {
-  return now - entry.updatedAt < LIVE_MAX_AGE_MS && pidAlive(entry.pid) && sameProcess(entry);
+  if (!pidAlive(entry.pid)) return false;
+  return entry.procStart && HAS_PROCFS ? sameProcess(entry) : now - entry.updatedAt < LIVE_MAX_AGE_MS;
 }
 
 function pidAlive(pid: number): boolean {
@@ -371,13 +391,13 @@ function pidAlive(pid: number): boolean {
 }
 
 /** Guards against pid reuse: `procStart` is field 22 (starttime) of /proc/<pid>/stat. */
-function sameProcess(entry: RegistryEntry): boolean {
+function sameProcess(entry: { pid: number; procStart: string | undefined }): boolean {
   if (!entry.procStart) return true;
   let stat: string;
   try {
     stat = readFileSync(`/proc/${entry.pid}/stat`, 'utf8');
   } catch {
-    return true; // No procfs (macOS): fall back to the pid check alone.
+    return !HAS_PROCFS; // No procfs (macOS): fall back to the pid check alone.
   }
   const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
   return fields[19] === entry.procStart;
@@ -392,37 +412,35 @@ async function readRegistry(dir: string): Promise<RegistryEntry[]> {
     if (isNotFound(err)) return [];
     throw err;
   }
-  const entries = await Promise.all(
-    names
-      .filter((name) => /^\d+\.json$/.test(name))
-      .map(async (name): Promise<RegistryEntry | undefined> => {
-        let raw: unknown;
-        try {
-          raw = JSON.parse(await readFile(join(dir, name), 'utf8'));
-        } catch {
-          return undefined; // Removed or half-written; the next refresh sees it.
-        }
-        if (!isObject(raw)) return undefined;
-        const pid = num(raw.pid);
-        const sessionId = str(raw.sessionId);
-        const updatedAt = num(raw.updatedAt) ?? num(raw.startedAt);
-        if (pid === undefined || !sessionId || updatedAt === undefined) return undefined;
-        return {
-          pid,
-          sessionId,
-          updatedAt,
-          statusUpdatedAt: num(raw.statusUpdatedAt) ?? updatedAt,
-          cwd: str(raw.cwd),
-          name: str(raw.name),
-          nameSource: str(raw.nameSource),
-          status: str(raw.status),
-          tmux: str(raw.tmux),
-          procStart: str(raw.procStart),
-          version: str(raw.version),
-        };
-      }),
-  );
+  const entries = await Promise.all(names.filter((name) => /^\d+\.json$/.test(name)).map((name) => readEntry(join(dir, name))));
   return entries.filter((e) => e !== undefined);
+}
+
+async function readEntry(path: string): Promise<RegistryEntry | undefined> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    return undefined; // Removed or half-written; the next refresh sees it.
+  }
+  if (!isObject(raw)) return undefined;
+  const pid = num(raw.pid);
+  const sessionId = str(raw.sessionId);
+  const updatedAt = num(raw.updatedAt) ?? num(raw.startedAt);
+  if (pid === undefined || !sessionId || updatedAt === undefined) return undefined;
+  return {
+    pid,
+    sessionId,
+    updatedAt,
+    statusUpdatedAt: num(raw.statusUpdatedAt) ?? updatedAt,
+    cwd: str(raw.cwd),
+    name: str(raw.name),
+    nameSource: str(raw.nameSource),
+    status: str(raw.status),
+    tmux: str(raw.tmux),
+    procStart: str(raw.procStart),
+    version: str(raw.version),
+  };
 }
 
 /** Maps session id to `projects/<slug>/<sessionId>.jsonl`; undefined when projects/ is missing. */
