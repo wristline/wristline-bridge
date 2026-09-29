@@ -143,7 +143,6 @@ export async function hooksUninstall(flags: Flags, options: HooksOptions): Promi
     change = await planUninstall({
       settingsPath: options.settings ?? join(config.claudeHome, 'settings.json'),
       configDir: dir,
-      hookPort: config.hookPort,
       statuslineCommand: statuslineCommand(dir),
     });
   } catch (err) {

@@ -1,7 +1,7 @@
 // settings.json merge (golden), install/uninstall on disk, and the generated statusLine relay.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -18,6 +18,7 @@ import {
   withHooks,
   withoutHooks,
   type HookSettings,
+  type InstallOptions,
 } from '../src/providers/claude-code/hooks.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-hooks-'));
@@ -92,9 +93,20 @@ test('uninstall removes only our entries and restores the statusLine', () => {
   const older = structuredClone(installed) as { hooks: Record<string, unknown[]> };
   older.hooks.Stop = [...existing.hooks.Stop, { hooks: [{ type: 'http', url: 'http://127.0.0.1:47771/hooks/stop', timeout: 5 }] }];
   assert.deepEqual(withoutHooks(older, { ...opts, statuslineOrig: 'npx -y ccstatusline@latest' }), existing);
-  // Handlers pointing at another port are someone else's.
-  const other = { hooks: { Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:9999/hooks/stop' }] }] } };
+  // Handlers installed while the bridge used another port are ours too.
+  const moved = { hooks: { Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:9999/hooks/stop' }] }] } };
+  assert.deepEqual(withoutHooks(moved, { ...opts, statuslineOrig: null }), {});
+  // A hook elsewhere on 127.0.0.1 is someone else's.
+  const other = { hooks: { Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:47771/api/hooks/stop' }] }] } };
   assert.deepEqual(withoutHooks(other, { ...opts, statuslineOrig: null }), other);
+});
+
+test('after a port change, install refreshes our handlers in place and uninstall removes them all', () => {
+  const installed = withHooks(existing, opts).settings;
+  const moved = withHooks(installed, { ...opts, hookPort: 47772 });
+  assert.deepEqual(moved.settings, withHooks(existing, { ...opts, hookPort: 47772 }).settings, 'no second set of handlers');
+  assert.equal(moved.statuslineOrig, undefined, 'statusline.orig is kept');
+  assert.deepEqual(withoutHooks(moved.settings, { ...opts, statuslineOrig: 'npx -y ccstatusline@latest' }), existing);
 });
 
 test('without a statusLine, install adds the relay alone and uninstall removes it', () => {
@@ -110,13 +122,18 @@ test('malformed settings are refused instead of rewritten', () => {
   assert.throws(() => withHooks({ statusLine: 'x' }, opts), /statusLine/);
 });
 
+/** A settings file with `existing` under `<root>/<name>/claude/`, and install options for a config dir beside it. */
+function onDisk(name: string): { settingsPath: string; configDir: string; install: InstallOptions } {
+  const configDir = join(root, name, 'config');
+  const settingsPath = join(root, name, 'claude', 'settings.json');
+  mkdirSync(join(root, name, 'claude'), { recursive: true });
+  writeFileSync(settingsPath, `${JSON.stringify(existing, null, 2)}\n`, { mode: 0o644 });
+  return { settingsPath, configDir, install: { ...opts, settingsPath, configDir, statuslineCommand: hookFiles(configDir).script, headerFile: hookFiles(configDir).header } };
+}
+
 test('install and uninstall on disk: backup, file modes, semantic round trip, one statusLine owner', async () => {
-  const configDir = join(root, 'config');
-  const settingsPath = join(root, 'claude', 'settings.json');
-  mkdirSync(join(root, 'claude'));
-  const original = `${JSON.stringify(existing, null, 2)}\n`;
-  writeFileSync(settingsPath, original, { mode: 0o644 });
-  const install = { ...opts, settingsPath, configDir, statuslineCommand: hookFiles(configDir).script, headerFile: hookFiles(configDir).header };
+  const { settingsPath, configDir, install } = onDisk('disk');
+  const original = readFileSync(settingsPath, 'utf8');
 
   const plan = await planInstall(install);
   assert.match(lineDiff(plan.before ?? '', plan.after), /^\+ {5}"PermissionRequest": \[$/m);
@@ -126,22 +143,56 @@ test('install and uninstall on disk: backup, file modes, semantic round trip, on
   const files = hookFiles(configDir);
   assert.equal(statSync(files.script).mode & 0o777, 0o700);
   assert.equal(statSync(files.header).mode & 0o777, 0o600);
-  assert.equal(statSync(settingsPath).mode & 0o777, 0o644);
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600, 'the settings file holds the hook token');
   assert.equal(readFileSync(files.header, 'utf8'), 'Authorization: Bearer tok\n');
   assert.equal(readFileSync(files.orig, 'utf8'), 'npx -y ccstatusline@latest');
 
+  chmodSync(settingsPath, 0o644);
   const again = await planInstall(install);
   assert.equal(again.after, again.before, 'second install changes nothing');
   assert.equal(await applyInstall(again, install), undefined, 'and makes no backup');
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600, 'but makes the file private again');
 
-  const otherPath = join(root, 'claude', 'other.json');
+  const otherPath = join(root, 'disk', 'claude', 'other.json');
   writeFileSync(otherPath, '{"statusLine":{"type":"command","command":"echo other"}}');
   await assert.rejects(planInstall({ ...install, settingsPath: otherPath }), /already installed for another settings file/);
 
-  const change = await planUninstall({ settingsPath, configDir, hookPort: 47771, statuslineCommand: install.statuslineCommand });
+  const change = await planUninstall({ settingsPath, configDir, statuslineCommand: install.statuslineCommand });
   await applyUninstall(change, configDir);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')), existing);
   assert.deepEqual(readdirSync(configDir), ['backups']);
+});
+
+test('apply refuses a settings file written since the plan was made', async () => {
+  const { settingsPath, configDir, install } = onDisk('changed');
+  const plan = await planInstall(install);
+  // Claude Code wrote the file (e.g. for /model) while the diff waited for an answer.
+  writeFileSync(settingsPath, '{"model":"sonnet"}\n');
+  await assert.rejects(applyInstall(plan, install), /changed since/);
+  assert.equal(readFileSync(settingsPath, 'utf8'), '{"model":"sonnet"}\n', 'the file is left alone');
+  assert.ok(!existsSync(configDir), 'and nothing is written');
+
+  const installed = await planInstall(install);
+  await applyInstall(installed, install);
+  const change = await planUninstall({ settingsPath, configDir, statuslineCommand: install.statuslineCommand });
+  writeFileSync(settingsPath, '{"model":"haiku"}\n');
+  await assert.rejects(applyUninstall(change, configDir), /changed since/);
+  assert.equal(readFileSync(settingsPath, 'utf8'), '{"model":"haiku"}\n');
+  assert.ok(existsSync(hookFiles(configDir).orig), 'the relay files stay until the settings file is restored');
+});
+
+test('re-install wraps a statusLine command that replaced the relay in the same file', async () => {
+  const { settingsPath, configDir, install } = onDisk('rewrap');
+  await applyInstall(await planInstall(install), install);
+  // Claude Code's /statusline wrote a new command over the relay.
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as { statusLine: { command: string } };
+  settings.statusLine.command = 'echo new';
+  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  const plan = await planInstall(install);
+  assert.equal(plan.statuslineOrig, 'echo new');
+  await applyInstall(plan, install);
+  assert.equal(readFileSync(hookFiles(configDir).orig, 'utf8'), 'echo new');
+  assert.equal((JSON.parse(readFileSync(settingsPath, 'utf8')) as typeof settings).statusLine.command, install.statuslineCommand);
 });
 
 test('lineDiff marks removed and added lines with context', () => {

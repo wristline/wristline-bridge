@@ -2,11 +2,11 @@
 // installs them, and the statusLine relay script. Verified against Claude Code 2.1.284.
 
 import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { PERMISSION_QUESTION, type Option, type Question } from '../../protocol.ts';
 import { sessionKey, type Hub } from '../../provider.ts';
 import type { HookHandler } from '../../server.ts';
-import { clip, isNotFound, isObject, oneLine, parseJson, str, type JsonObject } from '../../util.ts';
+import { CliError, clip, isNotFound, isObject, oneLine, parseJson, str, type JsonObject } from '../../util.ts';
 import { toolSummary } from './parse.ts';
 
 export const HOOK_NAMES = ['permission-request', 'pre-tool-use', 'notification', 'stop'] as const;
@@ -221,22 +221,23 @@ export interface Merged {
   statuslineOrig: string | null | undefined;
 }
 
-/** Our handlers are the http hooks whose url starts with this. */
+/** The URL our handlers call, followed by the hook name. */
 export function hookUrlPrefix(hookPort: number): string {
   return `http://127.0.0.1:${hookPort}/hooks/`;
 }
 
-/** The bridge URL an installed handler calls: an http hook's url, or the URL in our curl command. */
-function ourTarget(handler: unknown, prefix: string): string | undefined {
+/** Ours at any port: an installed handler keeps the port the bridge used at the time. */
+const OUR_URL = /(?:^|\s)http:\/\/127\.0\.0\.1:\d+\/hooks\/(\S+)/;
+
+/** The hook name an installed handler of ours calls: from an http hook's url, or the URL in our curl command. */
+function ourHook(handler: unknown): string | undefined {
   if (!isObject(handler)) return undefined;
-  if (handler.type === 'http') return typeof handler.url === 'string' && handler.url.startsWith(prefix) ? handler.url : undefined;
-  if (handler.type !== 'command' || typeof handler.command !== 'string') return undefined;
-  const at = handler.command.indexOf(prefix);
-  return at < 0 ? undefined : /^\S+/.exec(handler.command.slice(at))?.[0];
+  const text = handler.type === 'http' ? handler.url : handler.type === 'command' ? handler.command : undefined;
+  return typeof text === 'string' ? OUR_URL.exec(text)?.[1] : undefined;
 }
 
-function isOurs(handler: unknown, prefix: string): boolean {
-  return ourTarget(handler, prefix) !== undefined;
+function isOurs(handler: unknown): boolean {
+  return ourHook(handler) !== undefined;
 }
 
 /**
@@ -270,7 +271,7 @@ export function withHooks(original: JsonObject, opts: HookSettings): Merged {
     const groups = hooks[event];
     if (!Array.isArray(groups)) throw new Error(`"hooks.${event}" in the settings file is not an array; fix it first`);
     // Re-running install refreshes our handler where it is instead of adding another one.
-    const mine = (h: unknown): boolean => ourTarget(h, prefix) === url;
+    const mine = (h: unknown): boolean => ourHook(h) === name;
     const group = groups.find((g: unknown) => isObject(g) && Array.isArray(g.hooks) && g.hooks.some(mine));
     if (isObject(group) && Array.isArray(group.hooks)) group.hooks = group.hooks.map((h: unknown) => (mine(h) ? handler : h));
     else groups.push({ hooks: [handler] });
@@ -296,9 +297,8 @@ export function withHooks(original: JsonObject, opts: HookSettings): Merged {
  * Removes only our handlers (and arrays or groups that held nothing else) and restores the
  * statusLine command saved in statusline.orig; an empty or missing one means there was none.
  */
-export function withoutHooks(original: JsonObject, opts: { hookPort: number; statuslineCommand: string; statuslineOrig: string | null }): JsonObject {
+export function withoutHooks(original: JsonObject, opts: { statuslineCommand: string; statuslineOrig: string | null }): JsonObject {
   const settings = structuredClone(original);
-  const prefix = hookUrlPrefix(opts.hookPort);
   if (isObject(settings.hooks)) {
     const hooks = settings.hooks;
     let removed = false;
@@ -307,7 +307,7 @@ export function withoutHooks(original: JsonObject, opts: { hookPort: number; sta
       let touched = false;
       const kept = groups.flatMap((g: unknown) => {
         if (!isObject(g) || !Array.isArray(g.hooks)) return [g];
-        const rest = g.hooks.filter((h: unknown) => !isOurs(h, prefix));
+        const rest = g.hooks.filter((h: unknown) => !isOurs(h));
         if (rest.length === g.hooks.length) return [g];
         touched = true;
         return rest.length === 0 ? [] : [{ ...g, hooks: rest }];
@@ -334,12 +334,19 @@ export interface HookFiles {
   script: string;
   /** The original statusLine command (empty when there was none). */
   orig: string;
+  /** The settings file whose statusLine command `orig` holds. */
+  owner: string;
   /** `Authorization: Bearer <hookToken>` for curl's `-H @file`, so the token stays out of `ps`. */
   header: string;
 }
 
 export function hookFiles(configDir: string): HookFiles {
-  return { script: join(configDir, 'statusline.sh'), orig: join(configDir, 'statusline.orig'), header: join(configDir, 'hook-header') };
+  return {
+    script: join(configDir, 'statusline.sh'),
+    orig: join(configDir, 'statusline.orig'),
+    owner: join(configDir, 'statusline.owner'),
+    header: join(configDir, 'hook-header'),
+  };
 }
 
 export function shellQuote(word: string): string {
@@ -405,16 +412,21 @@ export interface InstallOptions extends HookSettings {
 export async function planInstall(opts: InstallOptions): Promise<InstallPlan> {
   const before = await readText(opts.settingsPath);
   const { settings, statuslineOrig } = withHooks(parseSettings(opts.settingsPath, before), opts);
-  // One statusline.orig serves one settings file; installing into a second would overwrite it.
-  if (statuslineOrig !== undefined && (await readText(hookFiles(opts.configDir).orig)) !== undefined) {
-    throw new Error(
-      `The statusLine relay is already installed for another settings file (${hookFiles(opts.configDir).orig} exists). Uninstall it there first.`,
-    );
+  // One statusline.orig serves one settings file; installing into a second would overwrite it. In
+  // the file it came from, a command that replaced the relay (e.g. via /statusline) is the new original.
+  const files = hookFiles(opts.configDir);
+  if (statuslineOrig !== undefined && (await readText(files.orig)) !== undefined) {
+    const owner = await readText(files.owner);
+    if (owner !== resolve(opts.settingsPath)) {
+      throw new Error(
+        `The statusLine relay is already installed for another settings file (${owner ?? `${files.orig} exists`}). Uninstall it there first.`,
+      );
+    }
   }
   return { path: opts.settingsPath, before, after: render(settings), statuslineOrig };
 }
 
-export async function planUninstall(opts: { settingsPath: string; configDir: string; hookPort: number; statuslineCommand: string }): Promise<SettingsChange> {
+export async function planUninstall(opts: { settingsPath: string; configDir: string; statuslineCommand: string }): Promise<SettingsChange> {
   const before = await readText(opts.settingsPath);
   if (before === undefined) return { path: opts.settingsPath, before, after: '' };
   const statuslineOrig = (await readText(hookFiles(opts.configDir).orig)) ?? null;
@@ -436,43 +448,55 @@ async function backup(configDir: string, text: string, now: Date): Promise<strin
   return path;
 }
 
-/** Atomic replace that follows a symlinked settings file and keeps its mode. */
-async function replaceFile(path: string, text: string): Promise<void> {
+/** Atomic replace that follows a symlinked settings file and keeps its mode unless one is given. */
+async function replaceFile(path: string, text: string, mode?: number): Promise<void> {
   let target = path;
-  let mode = 0o644;
+  let kept = 0o644;
   try {
     target = await realpath(path);
-    mode = (await stat(target)).mode & 0o777;
+    kept = (await stat(target)).mode & 0o777;
   } catch (err) {
     if (!isNotFound(err)) throw err;
     await mkdir(dirname(path), { recursive: true });
   }
   const tmp = `${target}.wristline-${process.pid}.tmp`;
-  await writeFile(tmp, text, { mode });
+  await writeFile(tmp, text, { mode: mode ?? kept });
   await rename(tmp, target);
+}
+
+/** Claude Code may write the settings file (e.g. for /statusline) while the diff waits for an answer. */
+async function assertUnchanged(path: string, before: string | undefined): Promise<void> {
+  if ((await readText(path)) !== before) throw new CliError(`${path} changed since the diff was made; run the command again.`);
 }
 
 /** Writes the relay files, backs up the settings file and replaces it. Resolves the backup path. */
 export async function applyInstall(plan: InstallPlan, opts: InstallOptions, now = new Date()): Promise<string | undefined> {
+  await assertUnchanged(plan.path, plan.before);
   const files = hookFiles(opts.configDir);
   await mkdir(opts.configDir, { recursive: true, mode: 0o700 });
   await writePrivate(files.header, hookHeader(opts.hookToken), 0o600);
   await writePrivate(files.script, statuslineScript(opts.configDir, opts.hookPort), 0o700);
   if (plan.statuslineOrig !== undefined) await writePrivate(files.orig, plan.statuslineOrig ?? '', 0o600);
-  if (plan.after === plan.before) return undefined;
+  await writePrivate(files.owner, resolve(opts.settingsPath), 0o600);
+  // The settings file holds the hook token, so it is private like config.json.
+  if (plan.after === plan.before) {
+    await chmod(plan.path, 0o600);
+    return undefined;
+  }
   const saved = plan.before === undefined ? undefined : await backup(opts.configDir, plan.before, now);
-  await replaceFile(plan.path, plan.after);
+  await replaceFile(plan.path, plan.after, 0o600);
   return saved;
 }
 
 export async function applyUninstall(change: SettingsChange, configDir: string, now = new Date()): Promise<string | undefined> {
+  await assertUnchanged(change.path, change.before);
   let saved: string | undefined;
   if (change.before !== undefined && change.after !== change.before) {
     saved = await backup(configDir, change.before, now);
     await replaceFile(change.path, change.after);
   }
   const files = hookFiles(configDir);
-  await Promise.all([files.script, files.orig, files.header].map((f) => rm(f, { force: true })));
+  await Promise.all([files.script, files.orig, files.owner, files.header].map((f) => rm(f, { force: true })));
   return saved;
 }
 
