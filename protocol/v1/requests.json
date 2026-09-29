@@ -1,0 +1,37 @@
+{
+  "requests": [
+    {
+      "id": "req-1",
+      "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+      "kind": "permission",
+      "title": "Bash",
+      "questions": [
+        {
+          "id": "decision",
+          "text": "rm -rf build && npm run build",
+          "multi": false,
+          "options": [
+            {
+              "id": "allow",
+              "label": "Allow"
+            },
+            {
+              "id": "always",
+              "label": "Always allow",
+              "description": "Bash(npm run build:*)"
+            },
+            {
+              "id": "deny",
+              "label": "Deny"
+            },
+            {
+              "id": "defer",
+              "label": "Answer on PC"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-09-29T10:00:00.000Z"
+    }
+  ]
+}

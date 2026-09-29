@@ -1,0 +1,16 @@
+{
+  "type": "session",
+  "session": {
+    "id": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+    "provider": "claude-code",
+    "title": "Fix failing CI build",
+    "cwd": "/home/dev/app",
+    "status": "idle",
+    "lastActivity": "2026-09-29T10:00:02.000Z",
+    "promptBlock": "unsupported",
+    "context": {
+      "used": 86000,
+      "window": 200000
+    }
+  }
+}

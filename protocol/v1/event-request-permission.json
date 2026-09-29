@@ -1,0 +1,31 @@
+{
+  "type": "request",
+  "request": {
+    "id": "req-3",
+    "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+    "kind": "permission",
+    "title": "Edit",
+    "questions": [
+      {
+        "id": "decision",
+        "text": "/home/dev/app/build.sh",
+        "multi": false,
+        "options": [
+          {
+            "id": "allow",
+            "label": "Allow"
+          },
+          {
+            "id": "deny",
+            "label": "Deny"
+          },
+          {
+            "id": "defer",
+            "label": "Answer on PC"
+          }
+        ]
+      }
+    ],
+    "createdAt": "2026-09-29T10:00:00.000Z"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "devbox",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "providers": [
+    {
+      "id": "claude-code",
+      "status": "ok",
+      "version": "2.1.284"
+    }
+  ]
+}

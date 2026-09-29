@@ -1,0 +1,9 @@
+{
+  "token": "dG9rZW4tZm9yLWRvY3VtZW50YXRpb24tb25seS0xMjM0NTY",
+  "deviceId": "9f86d081",
+  "bridge": {
+    "name": "devbox",
+    "version": "0.1.0",
+    "apiVersion": 1
+  }
+}

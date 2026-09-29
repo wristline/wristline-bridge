@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "seq": 1,
+      "kind": "user",
+      "ts": "2026-09-29T09:58:00.000Z",
+      "text": "CI 빌드가 실패해. 고쳐줘."
+    },
+    {
+      "seq": 2,
+      "kind": "assistant",
+      "ts": "2026-09-29T09:58:05.000Z",
+      "text": "Checking the build log first."
+    },
+    {
+      "seq": 3,
+      "kind": "tool",
+      "ts": "2026-09-29T09:58:06.000Z",
+      "text": "Bash(npm test)",
+      "detail": "3 passing\n1 failing",
+      "pending": false,
+      "error": true
+    },
+    {
+      "seq": 4,
+      "kind": "notice",
+      "ts": "2026-09-29T09:58:30.000Z",
+      "text": "Agent \"Review build\" finished"
+    },
+    {
+      "seq": 5,
+      "kind": "tool",
+      "ts": "2026-09-29T09:59:30.000Z",
+      "text": "Edit(/home/dev/app/build.sh)",
+      "pending": true
+    }
+  ],
+  "hasMore": false
+}

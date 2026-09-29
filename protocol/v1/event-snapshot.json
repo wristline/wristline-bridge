@@ -1,0 +1,49 @@
+{
+  "type": "snapshot",
+  "apiVersion": 1,
+  "sessions": [
+    {
+      "id": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+      "provider": "claude-code",
+      "title": "Fix failing CI build",
+      "cwd": "/home/dev/app",
+      "status": "running",
+      "lastActivity": "2026-09-29T09:59:30.000Z",
+      "promptBlock": "unsupported",
+      "context": {
+        "used": 86000,
+        "window": 200000
+      }
+    },
+    {
+      "id": "claude-code:6f1c2d3e-0000-4000-8000-000000000002",
+      "provider": "claude-code",
+      "title": "",
+      "cwd": "/home/dev/site",
+      "status": "ended",
+      "lastActivity": "2026-09-28T18:00:00.000Z",
+      "promptBlock": "not_live"
+    }
+  ],
+  "requests": [],
+  "usage": [
+    {
+      "provider": "codex",
+      "updatedAt": "2026-09-29T09:59:00.000Z",
+      "windows": [
+        {
+          "id": "primary",
+          "usedPercent": 12.5,
+          "resetsAt": "2026-09-29T13:00:00.000Z",
+          "minutes": 300
+        },
+        {
+          "id": "secondary",
+          "usedPercent": 40,
+          "resetsAt": "2026-10-05T00:00:00.000Z",
+          "minutes": 10080
+        }
+      ]
+    }
+  ]
+}

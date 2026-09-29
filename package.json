@@ -1,0 +1,42 @@
+{
+  "name": "wristline-bridge",
+  "version": "0.1.0",
+  "description": "Local bridge that lets the Wristline watch app browse and control Claude Code and Codex CLI sessions",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "wristline-bridge": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "protocol"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wristline/wristline-bridge.git"
+  },
+  "keywords": [
+    "wear-os",
+    "claude-code",
+    "codex",
+    "bridge"
+  ],
+  "scripts": {
+    "dev": "node --watch src/cli.ts run",
+    "build": "tsc",
+    "typecheck": "tsc -p test",
+    "test": "node --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2"
+  }
+}

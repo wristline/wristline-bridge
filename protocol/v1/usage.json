@@ -1,0 +1,22 @@
+{
+  "usage": [
+    {
+      "provider": "codex",
+      "updatedAt": "2026-09-29T09:59:00.000Z",
+      "windows": [
+        {
+          "id": "primary",
+          "usedPercent": 12.5,
+          "resetsAt": "2026-09-29T13:00:00.000Z",
+          "minutes": 300
+        },
+        {
+          "id": "secondary",
+          "usedPercent": 40,
+          "resetsAt": "2026-10-05T00:00:00.000Z",
+          "minutes": 10080
+        }
+      ]
+    }
+  ]
+}

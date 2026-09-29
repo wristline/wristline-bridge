@@ -1,0 +1,49 @@
+{
+  "type": "request",
+  "request": {
+    "id": "req-2",
+    "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+    "kind": "question",
+    "title": "Question",
+    "questions": [
+      {
+        "id": "q1",
+        "header": "Package manager",
+        "text": "Which package manager should the build use?",
+        "multi": false,
+        "options": [
+          {
+            "id": "0",
+            "label": "npm",
+            "description": "Keep package-lock.json"
+          },
+          {
+            "id": "1",
+            "label": "pnpm",
+            "description": "Faster installs"
+          }
+        ]
+      },
+      {
+        "id": "q2",
+        "text": "Which checks should run in CI?",
+        "multi": true,
+        "options": [
+          {
+            "id": "0",
+            "label": "lint"
+          },
+          {
+            "id": "1",
+            "label": "test"
+          },
+          {
+            "id": "2",
+            "label": "typecheck"
+          }
+        ]
+      }
+    ],
+    "createdAt": "2026-09-29T10:00:00.000Z"
+  }
+}
