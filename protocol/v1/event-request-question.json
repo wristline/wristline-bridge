@@ -2,44 +2,49 @@
   "type": "request",
   "request": {
     "id": "req-2",
-    "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+    "sessionId": "codex:019a0000-0000-7000-8000-000000000001",
     "kind": "question",
     "title": "Question",
     "questions": [
       {
         "id": "q1",
-        "header": "Package manager",
-        "text": "Which package manager should the build use?",
+        "header": "Counter store",
+        "text": "Where should the rate-limit counters live?",
         "multi": false,
         "options": [
           {
             "id": "0",
-            "label": "npm",
-            "description": "Keep package-lock.json"
+            "label": "In memory",
+            "description": "Per process; resets on restart"
           },
           {
             "id": "1",
-            "label": "pnpm",
-            "description": "Faster installs"
+            "label": "Redis",
+            "description": "Shared by all instances"
+          },
+          {
+            "id": "2",
+            "label": "Postgres",
+            "description": "No new dependency"
           }
         ]
       },
       {
         "id": "q2",
-        "text": "Which checks should run in CI?",
+        "text": "Which routes should be limited?",
         "multi": true,
         "options": [
           {
             "id": "0",
-            "label": "lint"
+            "label": "/login"
           },
           {
             "id": "1",
-            "label": "test"
+            "label": "/api/search"
           },
           {
             "id": "2",
-            "label": "typecheck"
+            "label": "/api/upload"
           }
         ]
       }

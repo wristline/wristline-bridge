@@ -5,9 +5,8 @@
     "provider": "claude-code",
     "title": "Fix failing CI build",
     "cwd": "/home/dev/app",
-    "status": "idle",
-    "lastActivity": "2026-09-29T10:00:02.000Z",
-    "promptBlock": "unsupported",
+    "status": "running",
+    "lastActivity": "2026-09-29T09:59:30.000Z",
     "context": {
       "used": 86000,
       "window": 200000

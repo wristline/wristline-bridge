@@ -7,7 +7,6 @@
       "cwd": "/home/dev/app",
       "status": "running",
       "lastActivity": "2026-09-29T09:59:30.000Z",
-      "promptBlock": "unsupported",
       "context": {
         "used": 86000,
         "window": 200000
@@ -16,6 +15,22 @@
         "id": "acc-school",
         "label": "school",
         "estimated": true
+      }
+    },
+    {
+      "id": "codex:019a0000-0000-7000-8000-000000000001",
+      "provider": "codex",
+      "title": "Add rate limiting to the API",
+      "cwd": "/home/dev/api",
+      "status": "idle",
+      "lastActivity": "2026-09-29T09:52:00.000Z",
+      "context": {
+        "used": 38500,
+        "window": 272000
+      },
+      "account": {
+        "id": "c0a1b2c3-0000-4000-8000-000000000001",
+        "label": "dev@example.com"
       }
     },
     {

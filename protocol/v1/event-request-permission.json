@@ -1,19 +1,24 @@
 {
   "type": "request",
   "request": {
-    "id": "req-3",
+    "id": "req-1",
     "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
     "kind": "permission",
-    "title": "Edit",
+    "title": "Bash",
     "questions": [
       {
         "id": "decision",
-        "text": "/home/dev/app/build.sh",
+        "text": "rm -rf build && npm run build",
         "multi": false,
         "options": [
           {
             "id": "allow",
             "label": "Allow"
+          },
+          {
+            "id": "always",
+            "label": "Always allow",
+            "description": "Bash(npm run build:*)"
           },
           {
             "id": "deny",

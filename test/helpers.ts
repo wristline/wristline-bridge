@@ -3,22 +3,26 @@ import { WebSocket } from 'ws';
 import { Auth, type AuthOptions } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
 import { PendingRegistry } from '../src/pending.ts';
-import type { Item, ItemPage, ProviderHealth, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
+import type { Item, ItemPage, ProviderHealth, ProviderId, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.ts';
 import { hookHandlers } from '../src/providers/claude-code/hooks.ts';
 import { startServer, type RunningServer } from '../src/server.ts';
 
 /** In-memory provider with deterministic data. */
 export class FakeProvider implements SessionProvider {
-  readonly id = 'claude-code';
+  readonly id: ProviderId;
   sessions: Session[] = [];
   items = new Map<string, Item[]>();
   #watchers = new Map<string, Set<(item: Item) => void>>();
 
+  constructor(id: ProviderId = 'claude-code') {
+    this.id = id;
+  }
+
   async start(_hub: Hub): Promise<void> {}
   stop(): void {}
   health(): ProviderHealth {
-    return { id: this.id, status: 'ok', version: '2.1.284' };
+    return { id: this.id, status: 'ok', version: this.id === 'codex' ? '0.159.0' : '2.1.284' };
   }
   listSessions(): Session[] {
     return this.sessions;

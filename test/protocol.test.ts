@@ -1,9 +1,11 @@
 // Generates protocol/v1/*.json from a fake provider through the real server and checks that the
 // committed fixtures match. Regenerate with `UPDATE_FIXTURES=1 npm test`.
+// The watch app's demo mode loads event-snapshot.json and items.json, so the snapshot carries a
+// session of every status and one request of each kind.
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
-import type { ClientEvent, Item, Session, Usage } from '../src/protocol.ts';
+import type { Answers, ClientEvent, Item, Session, Usage } from '../src/protocol.ts';
 import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
 
 const DIR = new URL('../protocol/v1/', import.meta.url);
@@ -35,9 +37,18 @@ const running: Session = {
   cwd: '/home/dev/app',
   status: 'running',
   lastActivity: '2026-09-29T09:59:30.000Z',
-  promptBlock: 'unsupported',
   context: { used: 86000, window: 200000 },
   account: { id: 'acc-school', label: 'school', estimated: true },
+};
+const codex: Session = {
+  id: 'codex:019a0000-0000-7000-8000-000000000001',
+  provider: 'codex',
+  title: 'Add rate limiting to the API',
+  cwd: '/home/dev/api',
+  status: 'idle',
+  lastActivity: '2026-09-29T09:52:00.000Z',
+  context: { used: 38500, window: 272000 },
+  account: { id: 'c0a1b2c3-0000-4000-8000-000000000001', label: 'dev@example.com' },
 };
 const ended: Session = {
   id: 'claude-code:6f1c2d3e-0000-4000-8000-000000000002',
@@ -91,9 +102,15 @@ const provider = new FakeProvider();
 provider.sessions = [running, ended];
 provider.items.set('6f1c2d3e-0000-4000-8000-000000000001', items);
 provider.items.set('6f1c2d3e-0000-4000-8000-000000000002', []);
+const codexProvider = new FakeProvider('codex');
+codexProvider.sessions = [codex];
+/** Opened before the snapshot is taken and resolved after it, one from the watch and one in the terminal. */
+let permission: Promise<Answers | null>;
+let question: Promise<Answers | null>;
+const terminal = new AbortController();
 
 before(async () => {
-  bridge = await startBridge(provider);
+  bridge = await startBridge([provider, codexProvider]);
   for (const u of claudeUsage) bridge.hub.usage(u);
   bridge.hub.usage(usage);
 });
@@ -146,8 +163,13 @@ test('REST responses', async () => {
   fixture('error-409-unsafe-prefix', await unsafe.json());
 });
 
-test('requests: list, answer, already resolved', async () => {
-  const answer = bridge.hub.pending.open(
+test('requests: open and list', async () => {
+  // A connected watch receives each request as it opens and the session that now waits on it.
+  const ws = new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token);
+  await ws.open();
+  await ws.next();
+
+  permission = bridge.hub.pending.open(
     {
       sessionId: running.id,
       kind: 'permission',
@@ -168,14 +190,46 @@ test('requests: list, answer, already resolved', async () => {
     },
     { timeoutMs: 60_000 },
   );
+  fixture('event-request-permission', await ws.next());
+  assert.deepEqual(await ws.next(), { type: 'session', session: { ...running, status: 'needs_input', promptBlock: 'awaiting_input' } });
+
+  question = bridge.hub.pending.open(
+    {
+      sessionId: codex.id,
+      kind: 'question',
+      title: 'Question',
+      questions: [
+        {
+          id: 'q1',
+          header: 'Counter store',
+          text: 'Where should the rate-limit counters live?',
+          multi: false,
+          options: [
+            { id: '0', label: 'In memory', description: 'Per process; resets on restart' },
+            { id: '1', label: 'Redis', description: 'Shared by all instances' },
+            { id: '2', label: 'Postgres', description: 'No new dependency' },
+          ],
+        },
+        {
+          id: 'q2',
+          text: 'Which routes should be limited?',
+          multi: true,
+          options: [
+            { id: '0', label: '/login' },
+            { id: '1', label: '/api/search' },
+            { id: '2', label: '/api/upload' },
+          ],
+        },
+      ],
+    },
+    { signal: terminal.signal },
+  );
+  fixture('event-request-question', await ws.next());
+  assert.deepEqual(await ws.next(), { type: 'session', session: { ...codex, status: 'needs_input', promptBlock: 'awaiting_input' } });
+  ws.close();
+
   fixture('requests', await (await get('/api/requests')).json());
   assert.equal((await post('/api/requests/req-1', { answers: { decision: ['nope'] } })).status, 400);
-  const ok = await post('/api/requests/req-1', { answers: { decision: ['allow'] } });
-  assert.equal(ok.status, 200);
-  assert.deepEqual(await answer, { decision: ['allow'] });
-  const again = await post('/api/requests/req-1', { answers: { decision: ['deny'] } });
-  assert.equal(again.status, 409);
-  fixture('error-409-already-resolved', await again.json());
 });
 
 test('WebSocket events', async () => {
@@ -201,8 +255,15 @@ test('WebSocket events', async () => {
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(other.pending(), 0, 'items only reach subscribers of that session');
 
-  bridge.hub.session({ ...running, status: 'idle', lastActivity: '2026-09-29T10:00:02.000Z' });
+  // The watch allows the command: the request resolves and the session goes back to running.
+  assert.equal((await post('/api/requests/req-1', { answers: { decision: ['allow'] } })).status, 200);
+  assert.deepEqual(await permission, { decision: ['allow'] });
+  fixture('event-resolved', await ws.next());
   fixture('event-session', await ws.next());
+  const again = await post('/api/requests/req-1', { answers: { decision: ['deny'] } });
+  assert.equal(again.status, 409);
+  fixture('error-409-already-resolved', await again.json());
+
   bridge.hub.removed(ended.id);
   fixture('event-session-removed', await ws.next());
   bridge.hub.usage({ ...usage, updatedAt: '2026-09-29T10:00:03.000Z', windows: [{ id: 'primary', usedPercent: 13, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 }] });
@@ -210,63 +271,11 @@ test('WebSocket events', async () => {
   bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.');
   fixture('event-alert', await ws.next());
 
-  const question = bridge.hub.pending.open({
-    sessionId: running.id,
-    kind: 'question',
-    title: 'Question',
-    questions: [
-      {
-        id: 'q1',
-        header: 'Package manager',
-        text: 'Which package manager should the build use?',
-        multi: false,
-        options: [
-          { id: '0', label: 'npm', description: 'Keep package-lock.json' },
-          { id: '1', label: 'pnpm', description: 'Faster installs' },
-        ],
-      },
-      {
-        id: 'q2',
-        text: 'Which checks should run in CI?',
-        multi: true,
-        options: [
-          { id: '0', label: 'lint' },
-          { id: '1', label: 'test' },
-          { id: '2', label: 'typecheck' },
-        ],
-      },
-    ],
-  });
-  fixture('event-request-question', await ws.next());
-  bridge.hub.pending.answer('req-2', { q1: ['1'], q2: ['0', '1'] });
-  fixture('event-resolved', await ws.next());
-  assert.deepEqual(await question, { q1: ['1'], q2: ['0', '1'] });
-
-  const ctrl = new AbortController();
-  const permission = bridge.hub.pending.open(
-    {
-      sessionId: running.id,
-      kind: 'permission',
-      title: 'Edit',
-      questions: [
-        {
-          id: 'decision',
-          text: '/home/dev/app/build.sh',
-          multi: false,
-          options: [
-            { id: 'allow', label: 'Allow' },
-            { id: 'deny', label: 'Deny' },
-            { id: 'defer', label: 'Answer on PC' },
-          ],
-        },
-      ],
-    },
-    { signal: ctrl.signal },
-  );
-  fixture('event-request-permission', await ws.next());
-  ctrl.abort();
-  assert.equal(await permission, null);
-  assert.deepEqual(await ws.next(), { type: 'resolved', requestId: 'req-3', by: 'terminal' });
+  // The question is answered in the Codex terminal instead.
+  terminal.abort();
+  assert.equal(await question, null);
+  assert.deepEqual(await ws.next(), { type: 'resolved', requestId: 'req-2', by: 'terminal' });
+  assert.deepEqual(await ws.next(), { type: 'session', session: codex });
 
   ws.close();
   other.close();

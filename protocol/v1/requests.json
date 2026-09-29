@@ -32,6 +32,57 @@
         }
       ],
       "createdAt": "2026-09-29T10:00:00.000Z"
+    },
+    {
+      "id": "req-2",
+      "sessionId": "codex:019a0000-0000-7000-8000-000000000001",
+      "kind": "question",
+      "title": "Question",
+      "questions": [
+        {
+          "id": "q1",
+          "header": "Counter store",
+          "text": "Where should the rate-limit counters live?",
+          "multi": false,
+          "options": [
+            {
+              "id": "0",
+              "label": "In memory",
+              "description": "Per process; resets on restart"
+            },
+            {
+              "id": "1",
+              "label": "Redis",
+              "description": "Shared by all instances"
+            },
+            {
+              "id": "2",
+              "label": "Postgres",
+              "description": "No new dependency"
+            }
+          ]
+        },
+        {
+          "id": "q2",
+          "text": "Which routes should be limited?",
+          "multi": true,
+          "options": [
+            {
+              "id": "0",
+              "label": "/login"
+            },
+            {
+              "id": "1",
+              "label": "/api/search"
+            },
+            {
+              "id": "2",
+              "label": "/api/upload"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-09-29T10:00:00.000Z"
     }
   ]
 }
