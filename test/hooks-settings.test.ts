@@ -1,11 +1,11 @@
 // settings.json merge (golden), install/uninstall on disk, and the generated statusLine relay.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import {
   applyInstall,
@@ -19,7 +19,7 @@ import {
   withoutHooks,
   type HookSettings,
   type InstallOptions,
-} from '../src/providers/claude-code/hooks.ts';
+} from '../src/providers/claude-code/settings.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-hooks-'));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -42,6 +42,7 @@ const opts: HookSettings = {
   permissionTimeoutSec: 600,
   statuslineCommand: '/home/dev/.config/wristline/statusline.sh',
   headerFile: '/home/dev/.config/wristline/hook-header',
+  configDir: '/home/dev/.config/wristline',
 };
 
 const permission = {
@@ -114,6 +115,17 @@ test('without a statusLine, install adds the relay alone and uninstall removes i
   assert.equal(statuslineOrig, null);
   assert.deepEqual(settings.statusLine, { type: 'command', command: opts.statuslineCommand });
   assert.deepEqual(withoutHooks(settings, { ...opts, statuslineOrig: null }), {});
+});
+
+test('a statusLine already pointing at a relay of ours (a settings file copied from another home) is replaced, not saved as the original', () => {
+  const relay = (command: string): unknown => withHooks({ statusLine: { type: 'command', command } }, opts);
+  const school = { ...opts, statuslineCommand: '/home/dev/.config/wristline/statusline--home-dev--claude-school.sh' };
+  const copied = withHooks(withHooks(existing, opts).settings, school);
+  assert.equal(copied.statuslineOrig, undefined, 'the primary relay is not the user\'s command');
+  assert.equal((copied.settings.statusLine as { command: string }).command, school.statuslineCommand);
+  assert.equal((relay("'/home/dev/.config/wristline/statusline-a b.sh'") as { statuslineOrig: unknown }).statuslineOrig, undefined, 'quoted too');
+  assert.equal((relay('/home/dev/.config/wristline/other.sh') as { statuslineOrig: unknown }).statuslineOrig, '/home/dev/.config/wristline/other.sh');
+  assert.equal((relay('/home/dev/statusline.sh') as { statuslineOrig: unknown }).statuslineOrig, '/home/dev/statusline.sh');
 });
 
 test('malformed settings are refused instead of rewritten', () => {
@@ -193,6 +205,36 @@ test('re-install wraps a statusLine command that replaced the relay in the same 
   await applyInstall(plan, install);
   assert.equal(readFileSync(hookFiles(configDir).orig, 'utf8'), 'echo new');
   assert.equal((JSON.parse(readFileSync(settingsPath, 'utf8')) as typeof settings).statusLine.command, install.statuslineCommand);
+});
+
+test('a second home gets relay files of its own; a copied settings file is re-pointed; uninstalling one home leaves the other', async () => {
+  const { settingsPath, configDir, install } = onDisk('multi');
+  await applyInstall(await planInstall(install), install);
+  const suffix = '-school';
+  const files = hookFiles(configDir, suffix);
+  assert.deepEqual([files.script, files.orig, files.owner, files.header].map((f) => basename(f)), ['statusline-school.sh', 'statusline-school.orig', 'statusline-school.owner', 'hook-header']);
+  // The user copied the primary's settings.json (pointing at the primary relay) into the second home.
+  const second = join(root, 'multi', 'school', 'settings.json');
+  mkdirSync(dirname(second));
+  copyFileSync(settingsPath, second);
+  const school: InstallOptions = { ...install, settingsPath: second, suffix, statuslineCommand: files.script };
+  const plan = await planInstall(school); // Not "already installed for another settings file": the owner check is per suffix.
+  assert.equal(plan.statuslineOrig, undefined);
+  await applyInstall(plan, school);
+  assert.equal((JSON.parse(readFileSync(second, 'utf8')) as { statusLine: { command: string } }).statusLine.command, files.script);
+  assert.equal(existsSync(files.orig), false, 'no original command for this home');
+  assert.equal(readFileSync(hookFiles(configDir).orig, 'utf8'), 'npx -y ccstatusline@latest', 'the primary relay keeps its original');
+  assert.match(readFileSync(files.script, 'utf8'), /statusline-school\.orig/);
+  assert.equal(statSync(files.script).mode & 0o777, 0o700);
+
+  const change = await planUninstall({ settingsPath: second, configDir, statuslineCommand: files.script, suffix });
+  await applyUninstall(change, configDir, suffix);
+  const { statusLine: _, ...rest } = existing;
+  assert.deepEqual(JSON.parse(readFileSync(second, 'utf8')), rest);
+  assert.equal(existsSync(files.script), false);
+  assert.ok(existsSync(hookFiles(configDir).script) && existsSync(hookFiles(configDir).header), 'the primary relay and the shared header stay');
+  await applyUninstall(await planUninstall({ settingsPath, configDir, statuslineCommand: install.statuslineCommand }), configDir);
+  assert.deepEqual(readdirSync(configDir), ['backups'], 'the header goes with the last relay');
 });
 
 test('lineDiff marks removed and added lines with context', () => {

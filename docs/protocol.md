@@ -131,7 +131,10 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
 - `POST /local/statusline` — the Claude Code statusLine JSON; `rate_limits` becomes `5h`/`7d`
   usage (`resets_at` epoch seconds → ISO) and `context_window` the session's context
-  (`context_window_size`, and `current_usage` input tokens when present).
+  (`context_window_size`, and `current_usage` input tokens when present). With several Claude
+  Code homes, the report goes to the home whose `projects/` holds `transcript_path` (real paths
+  compared), else to the home that lists `session_id`, else to the only home; otherwise it is
+  dropped (logged once per session). The usage entry carries the home's `account`.
 - `POST /hooks/permission-request` — Claude Code's PermissionRequest hook input. Answers an empty
   `200` at once when no watch is present (connected now or within 90 s); otherwise opens a
   request and answers when the watch does: `allow` → `{"hookSpecificOutput": {"hookEventName":

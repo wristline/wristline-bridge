@@ -87,13 +87,13 @@ export interface Bridge {
 }
 
 export async function startBridge(
-  provider: SessionProvider,
+  provider: SessionProvider | SessionProvider[],
   now = () => Date.parse('2026-09-29T10:00:00Z'),
   waitMs = 60_000,
   save: AuthOptions['save'] = async () => {},
 ): Promise<Bridge> {
   let n = 0;
-  const hub = new BridgeHub({ providers: [provider], pending: { now, newId: () => `req-${++n}` } });
+  const hub = new BridgeHub({ providers: Array.isArray(provider) ? provider : [provider], pending: { now, newId: () => `req-${++n}` } });
   const auth = new Auth({ devices: [], save, now });
   const hookToken = 'hook-token';
   const server = await startServer({

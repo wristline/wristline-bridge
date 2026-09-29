@@ -144,6 +144,43 @@ Limits:
   without a terminal showing them.
 - Free-text and secret questions are answered in the terminal only.
 
+## Accounts
+
+The bridge can follow several Claude Code and Codex accounts at once. Each account lives in its
+own agent home (the directory Claude Code takes from `CLAUDE_CONFIG_DIR` and Codex from
+`CODEX_HOME`), and the bridge runs one provider per home:
+
+```sh
+wristline-bridge accounts add --claude-home ~/.claude-school --label school
+wristline-bridge accounts add --codex-home ~/.codex-school --label school
+wristline-bridge accounts                                   # homes, logins and labels
+wristline-bridge accounts remove --claude-home ~/.claude-school
+```
+
+`add` creates the directory (mode 0700) if needed, records it in `config.json` and prints the
+exact next steps: log in there (`CLAUDE_CONFIG_DIR=$HOME/.claude-school claude auth login`), an
+alias for your shell profile (`alias claude-school='CLAUDE_CONFIG_DIR=$HOME/.claude-school claude'`;
+the bridge never edits your profile), then `hooks install` and a bridge restart. `--label` gives
+the account a short name (up to 12 characters) shown on the watch instead of its email; if the
+home was not logged in yet, run the same `add` again afterwards. `setup` also proposes homes it
+finds (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `~/.claude*`, `~/.codex*`). Each Claude Code home
+has its own `settings.json`, `CLAUDE.md`, memory and plugins; copy what you need.
+
+`hooks install` goes through every registered Claude Code home and gives each its own relay
+script (`~/.config/wristline/statusline-<home>.sh`, e.g. `statusline--home-u--claude-school.sh`),
+so every home's status line reaches the bridge. A `settings.json` copied from another home is
+recognised: its relay entry is replaced rather than saved as your original status line command
+(set that again with `/statusline` in the new home if you want one).
+
+Sessions and plan usage then carry `account` (id and label). For Codex the attribution is exact
+(rollouts record the creating account, the daemon reports whose limits it sends). For Claude Code
+the bridge keeps a timeline of which account each home was logged into (`claudeLogins` in
+`config.json`; ids and emails only) and attributes a session to the login in effect at its last
+activity; a session whose status line the bridge has seen since its process started is attributed
+for certain. Anything else is marked `estimated` (shown with `~` on the watch), in particular after
+you switch accounts inside one home with `/login`: that works, but stays an estimate and shares one
+usage entry per login. For exact, concurrent use, give each account its own home.
+
 ## Reach it from the watch: Tailscale Funnel
 
 The watch talks to the bridge over HTTPS. The simplest way without extra apps on the watch is
@@ -199,7 +236,10 @@ wristline-bridge devices --revoke <id>   # revoke one; its connections close imm
   Windows where a web page could otherwise reach it. It is never meant to be published.
 - `~/.config/wristline/` is created with mode 0700 and `config.json` with 0600; `hooks install`
   sets the settings file it writes the local token into to 0600.
-- The bridge reads agent files; it never opens Claude Code's `~/.claude/sessions/*.key` files.
+- The bridge reads agent files; it never opens Claude Code's `~/.claude/sessions/*.key` or
+  `.credentials.json` files. For accounts it reads only `oauthAccount` (id, email, organization)
+  from `.claude.json`, and only the `email` and `chatgpt_account_id` claims of the id_token in
+  Codex's `auth.json`; token values are never stored, logged or sent anywhere.
 - Nothing is sent to the Wristline developers. There is no telemetry.
 
 ## Development

@@ -2,12 +2,14 @@
 import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
+import { accountsAdd, accountsList, accountsRemove, type AccountTarget } from './accounts.ts';
 import { Auth, newToken } from './auth.ts';
 import { configDir, readStored, resolveConfig, updateStored, type Config, type Flags } from './config.ts';
 import { BridgeHub } from './hub.ts';
 import { API_VERSION } from './protocol.ts';
 import { hookHandlers } from './providers/claude-code/hooks.ts';
 import { ClaudeCodeProvider } from './providers/claude-code/provider.ts';
+import { statuslineRouter } from './providers/claude-code/statusline.ts';
 import { CodexProvider } from './providers/codex/provider.ts';
 import { CodexRpc } from './providers/codex/rpc.ts';
 import { startServer, type LocalDevices, type LocalPairResponse } from './server.ts';
@@ -23,8 +25,11 @@ Commands:
   pair [--token] [--name <name>]  Show a 6-digit pairing code, or issue a token to type in manually
   devices [--revoke <id>]         List paired watches, or revoke one
   hooks install|uninstall [--yes] [--settings <file>]
-                                  Add or remove the Claude Code hooks and statusLine relay
-                                  (default file: <claude-home>/settings.json); shows the diff first
+                                  Add or remove the Claude Code hooks and statusLine relay in every
+                                  Claude Code home's settings.json (or the given file); shows the diff first
+  accounts [list]                 Show the agent homes (one account each) and what they are logged into
+  accounts add|remove --claude-home <dir> | --codex-home <dir> [--label <name>]
+                                  Watch another agent home (a second account), or stop watching it
   service install|uninstall [--yes] [--dry-run] [--force]
                                   Run the bridge as a systemd user service (--force: even from
                                   the npx cache)
@@ -34,6 +39,7 @@ Options:
   --hook-port <port>    Local API port (default 47771)
   --claude-home <dir>   Claude Code directory (default $CLAUDE_CONFIG_DIR or ~/.claude)
   --codex-home <dir>    Codex directory (default $CODEX_HOME or ~/.codex)
+  --label <name>        Short name for the account on the watch, up to 12 characters (accounts add)
   -y, --yes             Apply without asking
   -h, --help            Show this help
   -v, --version         Show the version`;
@@ -56,16 +62,40 @@ async function run(flags: Flags): Promise<void> {
   const hookToken = stored.hookToken ?? newToken();
   if (!stored.hookToken) stored = await updateStored(dir, { hookToken });
   const config = resolveConfig(stored, flags);
-
-  const claude = new ClaudeCodeProvider({
-    home: config.claudeHome,
-    historyDays: config.historyDays,
-    ...(config.bins.tmux ? { tmux: config.bins.tmux } : {}),
-  });
   const version = packageVersion();
-  const rpc = new CodexRpc({ codexHome: config.codexHome, clientVersion: version, ...(config.bins.codex ? { bin: config.bins.codex } : {}) });
-  const codex = new CodexProvider({ home: config.codexHome, historyDays: config.historyDays, rpc });
-  const providers = [claude, codex];
+
+  // One instance per home. The running bridge owns these two keys; updateStored keeps the others as other commands wrote them.
+  const claudeLogins = { ...config.claudeLogins };
+  let codexAccounts = config.codexAccounts;
+  const claudes = config.claudeHomes.map(
+    (home) =>
+      new ClaudeCodeProvider({
+        home,
+        historyDays: config.historyDays,
+        ...(config.bins.tmux ? { tmux: config.bins.tmux } : {}),
+        logins: claudeLogins[home] ?? [],
+        labels: config.labels,
+        saveLogins: async (logins) => {
+          claudeLogins[home] = logins;
+          await updateStored(dir, { claudeLogins: { ...claudeLogins } });
+        },
+      }),
+  );
+  const codexes = config.codexHomes.map(
+    (home) =>
+      new CodexProvider({
+        home,
+        historyDays: config.historyDays,
+        rpc: new CodexRpc({ codexHome: home, clientVersion: version, ...(config.bins.codex ? { bin: config.bins.codex } : {}) }),
+        accounts: codexAccounts,
+        labels: config.labels,
+        saveAccounts: async (accounts) => {
+          codexAccounts = { ...codexAccounts, ...accounts };
+          await updateStored(dir, { codexAccounts });
+        },
+      }),
+  );
+  const providers = [...claudes, ...codexes];
   const hub = new BridgeHub({ providers });
   const auth = new Auth({
     devices: config.devices,
@@ -87,7 +117,7 @@ async function run(flags: Flags): Promise<void> {
     hookToken,
     apiPort: config.apiPort,
     hookPort: config.hookPort,
-    onStatusline: (body) => claude.statusline(body),
+    onStatusline: statuslineRouter(claudes),
     hooks: hookHandlers(hub, config.permissionWaitSec * 1000),
   }).catch((err: unknown) => {
     for (const p of providers) p.stop();
@@ -101,7 +131,7 @@ async function run(flags: Flags): Promise<void> {
   console.log(`  local API   http://127.0.0.1:${server.hookPort}  (hooks and CLI only; never publish)`);
   for (const p of providers) {
     const h = p.health();
-    console.log(`  ${h.id.padEnd(11)} ${h.status === 'ok' ? `${p.listSessions().length} sessions` : 'not found'}${h.version ? ` (v${h.version})` : ''}`);
+    console.log(`  ${h.id.padEnd(11)} ${p.home}  ${h.status === 'ok' ? `${p.listSessions().length} sessions` : 'not found'}${h.version ? ` (v${h.version})` : ''}`);
     if (h.detail) console.log(`              ${h.detail}`);
   }
   console.log(`  ${config.devices.length} paired device(s); run \`wristline-bridge pair\` to add one`);
@@ -180,6 +210,7 @@ async function main(argv: string[]): Promise<void> {
       name: { type: 'string' },
       revoke: { type: 'string' },
       settings: { type: 'string' },
+      label: { type: 'string' },
       'dry-run': { type: 'boolean' },
       force: { type: 'boolean' },
       yes: { type: 'boolean', short: 'y' },
@@ -194,28 +225,39 @@ async function main(argv: string[]): Promise<void> {
   const hookPort = port(values['hook-port'], '--hook-port');
   if (apiPort) flags.apiPort = apiPort;
   if (hookPort) flags.hookPort = hookPort;
-  if (values['claude-home']) flags.claudeHome = values['claude-home'];
-  if (values['codex-home']) flags.codexHome = values['codex-home'];
+  // For `accounts` the home options name the account, not the primary home.
+  const homes: Flags = { ...flags };
+  if (values['claude-home']) homes.claudeHome = values['claude-home'];
+  if (values['codex-home']) homes.codexHome = values['codex-home'];
 
   const command = positionals[0] ?? 'run';
   switch (command) {
+    case 'accounts': {
+      const sub = positionals[1] ?? 'list';
+      if (sub === 'list') return accountsList(resolveConfig(await readStored(configDir()), flags));
+      const usage = 'Usage: wristline-bridge accounts add|remove --claude-home <dir> | --codex-home <dir> [--label <name>]';
+      if (sub !== 'add' && sub !== 'remove') throw new CliError(usage);
+      if ((values['claude-home'] === undefined) === (values['codex-home'] === undefined)) throw new CliError(usage);
+      const target: AccountTarget = values['claude-home'] ? { provider: 'claude-code', home: values['claude-home'] } : { provider: 'codex', home: values['codex-home'] ?? '' };
+      return sub === 'add' ? accountsAdd(configDir(), target, values.label, values.yes === true) : accountsRemove(configDir(), target);
+    }
     case 'run':
-      return run(flags);
+      return run(homes);
     case 'setup':
-      return setup(flags, values.yes === true);
+      return setup(homes, values.yes === true);
     case 'pair':
-      return pair(resolveConfig(await readStored(configDir()), flags), values.token === true, values.name);
+      return pair(resolveConfig(await readStored(configDir()), homes), values.token === true, values.name);
     case 'devices':
-      return devices(resolveConfig(await readStored(configDir()), flags), values.revoke);
+      return devices(resolveConfig(await readStored(configDir()), homes), values.revoke);
     case 'hooks': {
       const options = { yes: values.yes === true, ...(values.settings ? { settings: values.settings } : {}) };
-      if (positionals[1] === 'install') return void (await hooksInstall(flags, options));
-      if (positionals[1] === 'uninstall') return hooksUninstall(flags, options);
+      if (positionals[1] === 'install') return void (await hooksInstall(homes, options));
+      if (positionals[1] === 'uninstall') return hooksUninstall(homes, options);
       throw new CliError('Usage: wristline-bridge hooks install|uninstall [--yes] [--settings <file>]');
     }
     case 'service':
       if (positionals[1] === 'install') {
-        return void (await serviceInstall(flags, { yes: values.yes === true, dryRun: values['dry-run'] === true, force: values.force === true }));
+        return void (await serviceInstall(homes, { yes: values.yes === true, dryRun: values['dry-run'] === true, force: values.force === true }));
       }
       if (positionals[1] === 'uninstall') return serviceUninstall();
       throw new CliError('Usage: wristline-bridge service install|uninstall [--yes] [--dry-run] [--force]');

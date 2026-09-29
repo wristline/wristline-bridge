@@ -36,7 +36,13 @@ export interface Target {
   nativeId: string;
 }
 
+/** The identity of a usage entry: its provider and account (see the header of protocol.ts). */
+export function usageKey(usage: Pick<Usage, 'provider' | 'account'>): string {
+  return `${usage.provider}:${usage.account?.id ?? ''}`;
+}
+
 export interface HubOptions {
+  /** May hold several instances of one provider id (one per agent home). */
   providers: SessionProvider[];
   /** Overrides for deterministic request ids and timestamps in tests. */
   pending?: Pick<PendingOptions, 'now' | 'newId'>;
@@ -95,8 +101,11 @@ export class BridgeHub implements Hub {
   }
 
   usage(usage: Usage): void {
-    const previous = this.#usage.get(usage.provider);
-    this.#usage.set(usage.provider, usage);
+    const key = usageKey(usage);
+    const previous = this.#usage.get(key);
+    this.#usage.set(key, usage);
+    // Once the provider names an account, its unlabelled entry is stale; a watch drops it with the next snapshot.
+    if (usage.account) this.#usage.delete(usageKey({ provider: usage.provider }));
     // Unchanged numbers are not worth waking the watch radio for; GET /api/usage has the fresh timestamp.
     if (!previous || JSON.stringify(previous.windows) !== JSON.stringify(usage.windows)) this.#broadcast({ type: 'usage', usage });
   }
@@ -127,13 +136,13 @@ export class BridgeHub implements Hub {
     return { type: 'snapshot', apiVersion: API_VERSION, sessions: this.sessions(), requests: this.pending.list(), usage: this.usageList() };
   }
 
-  /** Finds the provider of a listed session. */
+  /** Finds the provider instance that lists the session. */
   resolve(sessionId: string): Target | undefined {
     const colon = sessionId.indexOf(':');
     if (colon < 0) return undefined;
-    const provider = this.#providers.find((p) => p.id === sessionId.slice(0, colon));
-    if (!provider?.listSessions().some((s) => s.id === sessionId)) return undefined;
-    return { provider, nativeId: sessionId.slice(colon + 1) };
+    const id = sessionId.slice(0, colon);
+    const provider = this.#providers.find((p) => p.id === id && p.listSessions().some((s) => s.id === sessionId));
+    return provider && { provider, nativeId: sessionId.slice(colon + 1) };
   }
 
   // WebSocket clients

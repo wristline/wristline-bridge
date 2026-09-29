@@ -37,6 +37,7 @@ const running: Session = {
   lastActivity: '2026-09-29T09:59:30.000Z',
   promptBlock: 'unsupported',
   context: { used: 86000, window: 200000 },
+  account: { id: 'acc-school', label: 'school', estimated: true },
 };
 const ended: Session = {
   id: 'claude-code:6f1c2d3e-0000-4000-8000-000000000002',
@@ -61,7 +62,29 @@ const usage: Usage = {
     { id: 'primary', usedPercent: 12.5, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 },
     { id: 'secondary', usedPercent: 40, resetsAt: '2026-10-05T00:00:00.000Z', minutes: 10080 },
   ],
+  account: { id: 'c0a1b2c3-0000-4000-8000-000000000001', label: 'dev@example.com' },
 };
+/** Two Claude Code accounts: one attributed for certain, one estimated from the home's login timeline. */
+const claudeUsage: Usage[] = [
+  {
+    provider: 'claude-code',
+    updatedAt: '2026-09-29T09:58:00.000Z',
+    windows: [
+      { id: '5h', usedPercent: 42, resetsAt: '2026-09-29T14:00:00.000Z' },
+      { id: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z' },
+    ],
+    account: { id: 'acc-school', label: 'school', estimated: true },
+  },
+  {
+    provider: 'claude-code',
+    updatedAt: '2026-09-29T09:57:00.000Z',
+    windows: [
+      { id: '5h', usedPercent: 10, resetsAt: '2026-09-29T12:00:00.000Z' },
+      { id: '7d', usedPercent: 3, resetsAt: '2026-10-02T00:00:00.000Z' },
+    ],
+    account: { id: 'acc-me', label: 'dev@example.com' },
+  },
+];
 
 let bridge: Bridge;
 const provider = new FakeProvider();
@@ -71,6 +94,7 @@ provider.items.set('6f1c2d3e-0000-4000-8000-000000000002', []);
 
 before(async () => {
   bridge = await startBridge(provider);
+  for (const u of claudeUsage) bridge.hub.usage(u);
   bridge.hub.usage(usage);
 });
 after(() => bridge.close());

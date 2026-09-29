@@ -50,7 +50,7 @@ export interface CodexOptions extends AccountsOptions {
  */
 export class CodexProvider implements SessionProvider {
   readonly id = 'codex';
-  readonly #home: string;
+  readonly home: string;
   readonly #historyDays: number;
   readonly #now: () => number;
   readonly #accounts: CodexAccounts;
@@ -81,10 +81,10 @@ export class CodexProvider implements SessionProvider {
   #refreshing = false;
 
   constructor(options: CodexOptions) {
-    this.#home = options.home;
+    this.home = options.home;
     this.#historyDays = options.historyDays;
     this.#now = options.now ?? Date.now;
-    this.#indexTail = new JsonlTail(join(this.#home, 'session_index.jsonl'), this.#index);
+    this.#indexTail = new JsonlTail(join(this.home, 'session_index.jsonl'), this.#index);
     this.#rpc = options.rpc;
     this.#accounts = new CodexAccounts(options);
   }
@@ -158,11 +158,11 @@ export class CodexProvider implements SessionProvider {
   }
 
   async #refresh(): Promise<void> {
-    const files = await scanRollouts(join(this.#home, 'sessions'));
+    const files = await scanRollouts(join(this.home, 'sessions'));
     this.#found = files !== undefined;
     this.#files = files ?? new Map();
     await this.#indexTail.sync();
-    await this.#accounts.poll(this.#home);
+    await this.#accounts.poll(this.home);
     const now = this.#now();
 
     const cutoff = now - this.#historyDays * DAY_MS;

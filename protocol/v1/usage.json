@@ -1,6 +1,47 @@
 {
   "usage": [
     {
+      "provider": "claude-code",
+      "updatedAt": "2026-09-29T09:58:00.000Z",
+      "windows": [
+        {
+          "id": "5h",
+          "usedPercent": 42,
+          "resetsAt": "2026-09-29T14:00:00.000Z"
+        },
+        {
+          "id": "7d",
+          "usedPercent": 12,
+          "resetsAt": "2026-10-03T00:00:00.000Z"
+        }
+      ],
+      "account": {
+        "id": "acc-school",
+        "label": "school",
+        "estimated": true
+      }
+    },
+    {
+      "provider": "claude-code",
+      "updatedAt": "2026-09-29T09:57:00.000Z",
+      "windows": [
+        {
+          "id": "5h",
+          "usedPercent": 10,
+          "resetsAt": "2026-09-29T12:00:00.000Z"
+        },
+        {
+          "id": "7d",
+          "usedPercent": 3,
+          "resetsAt": "2026-10-02T00:00:00.000Z"
+        }
+      ],
+      "account": {
+        "id": "acc-me",
+        "label": "dev@example.com"
+      }
+    },
+    {
       "provider": "codex",
       "updatedAt": "2026-09-29T09:59:00.000Z",
       "windows": [
@@ -16,7 +57,11 @@
           "resetsAt": "2026-10-05T00:00:00.000Z",
           "minutes": 10080
         }
-      ]
+      ],
+      "account": {
+        "id": "c0a1b2c3-0000-4000-8000-000000000001",
+        "label": "dev@example.com"
+      }
     }
   ]
 }

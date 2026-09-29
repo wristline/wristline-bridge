@@ -1,11 +1,14 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access } from 'node:fs/promises';
-import { delimiter, join, sep } from 'node:path';
+import { access, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { newToken } from './auth.ts';
-import { configDir, configPath, readStored, resolveConfig, updateStored, type Bins, type Config, type Flags } from './config.ts';
+import { configDir, configPath, readStored, resolveConfig, updateStored, type Bins, type Config, type Env, type Flags } from './config.ts';
+import type { Account, ProviderId } from './protocol.ts';
+import { readClaudeAccount } from './providers/claude-code/account.ts';
 import {
   applyInstall,
   applyUninstall,
@@ -15,7 +18,8 @@ import {
   planUninstall,
   shellQuote,
   type InstallOptions,
-} from './providers/claude-code/hooks.ts';
+} from './providers/claude-code/settings.ts';
+import { readCodexLogin } from './providers/codex/account.ts';
 import { builtCliExists, cliPath, installService, SERVICE_NAME, uninstallService, unitFile, unitPath } from './service.ts';
 import { CliError, isObject, str } from './util.ts';
 
@@ -69,13 +73,26 @@ export async function confirm(question: string): Promise<boolean> {
 }
 
 /** Asks unless `--yes`; without a terminal to ask on, says how to apply and declines. */
-async function approve(question: string, yes: boolean, rerun: string): Promise<boolean> {
+export async function approve(question: string, yes: boolean, rerun: string): Promise<boolean> {
   if (yes) return true;
   if (!process.stdin.isTTY) {
     console.log(`Not applied. Run \`${rerun} --yes\` to apply without asking.`);
     return false;
   }
   return confirm(question);
+}
+
+/** The home's login: undefined when logged out (or using an API key), null when its login file cannot be read. */
+export async function readLogin(provider: ProviderId, home: string): Promise<Account | undefined | null> {
+  try {
+    return await (provider === 'claude-code' ? readClaudeAccount(home) : readCodexLogin(home));
+  } catch {
+    return null;
+  }
+}
+
+export function loginText(login: Account | undefined | null): string {
+  return login === null ? 'unreadable' : login ? login.label : 'not logged in';
 }
 
 /** The hook token must exist before it is written into settings.json. */
@@ -87,27 +104,57 @@ async function hookConfig(flags: Flags): Promise<Config & { hookToken: string }>
   return { ...config, hookToken: config.hookToken ?? '' };
 }
 
-function statuslineCommand(dir: string): string {
-  return shellQuote(hookFiles(dir).script);
+function statuslineCommand(dir: string, suffix: string): string {
+  return shellQuote(hookFiles(dir, suffix).script);
+}
+
+/** Relay files are `statusline<suffix>.*`: no suffix for the primary home (an existing install stays as it is), `-<slug>` of the path otherwise. */
+export function relaySuffix(home: string, primary: string): string {
+  return resolve(home) === resolve(primary) ? '' : `-${resolve(home).replace(/[^a-zA-Z0-9]/g, '-')}`;
 }
 
 export interface HooksOptions {
-  /** Settings file to change (default `<claudeHome>/settings.json`). */
+  /** Settings file to change (default `<home>/settings.json` of every Claude Code home). */
   settings?: string;
   yes: boolean;
 }
 
-/** Shows the settings.json diff, asks, backs the file up and installs hooks and the statusLine relay. */
+interface HookTarget {
+  settingsPath: string;
+  suffix: string;
+}
+
+/** Every Claude home's settings file, or the given one (its relay is named after the directory it lies in). */
+function hookTargets(config: Config, settings: string | undefined): HookTarget[] {
+  const primary = config.claudeHomes[0] ?? config.claudeHome;
+  if (settings !== undefined) return [{ settingsPath: settings, suffix: relaySuffix(dirname(resolve(settings)), primary) }];
+  return config.claudeHomes.map((home) => ({ settingsPath: join(home, 'settings.json'), suffix: relaySuffix(home, primary) }));
+}
+
+/** Shows each settings.json diff, asks, backs the file up and installs hooks and the home's statusLine relay. */
 export async function hooksInstall(flags: Flags, options: HooksOptions): Promise<boolean> {
   const dir = configDir();
   const config = await hookConfig(flags);
+  let all = true;
+  for (const target of hookTargets(config, options.settings)) {
+    if (options.settings === undefined && !(await exists(dirname(target.settingsPath)))) {
+      console.log(`Skipped ${target.settingsPath}: the home does not exist.`);
+      continue;
+    }
+    all = (await installInto(dir, config, target, options.yes)) && all;
+  }
+  return all;
+}
+
+async function installInto(dir: string, config: Config & { hookToken: string }, target: HookTarget, yes: boolean): Promise<boolean> {
   const install: InstallOptions = {
-    settingsPath: options.settings ?? join(config.claudeHome, 'settings.json'),
+    settingsPath: target.settingsPath,
+    suffix: target.suffix,
     configDir: dir,
     hookPort: config.hookPort,
     hookToken: config.hookToken,
     permissionTimeoutSec: config.permissionWaitSec + 10,
-    statuslineCommand: statuslineCommand(dir),
+    statuslineCommand: statuslineCommand(dir, target.suffix),
     headerFile: hookFiles(dir).header,
   };
   let plan;
@@ -125,10 +172,10 @@ export async function hooksInstall(flags: Flags, options: HooksOptions): Promise
   console.log(lineDiff(plan.before ?? '', plan.after));
   console.log(
     '\nAdds hooks for PermissionRequest, Notification and Stop that call the bridge on' +
-      `\n127.0.0.1:${config.hookPort}, and routes the statusLine through ${hookFiles(dir).script}` +
+      `\n127.0.0.1:${config.hookPort}, and routes the statusLine through ${hookFiles(dir, target.suffix).script}` +
       '\n(it relays plan usage to the bridge and still runs your statusLine command).',
   );
-  if (!(await approve(`Apply these changes to ${plan.path}?`, options.yes, 'wristline-bridge hooks install'))) return false;
+  if (!(await approve(`Apply these changes to ${plan.path}?`, yes, 'wristline-bridge hooks install'))) return false;
   const saved = await applyInstall(plan, install);
   if (saved) console.log(`Backed up the previous file to ${saved}`);
   console.log(`Installed. New Claude Code sessions use the hooks; restart running sessions to include them.`);
@@ -138,25 +185,25 @@ export async function hooksInstall(flags: Flags, options: HooksOptions): Promise
 export async function hooksUninstall(flags: Flags, options: HooksOptions): Promise<void> {
   const dir = configDir();
   const config = resolveConfig(await readStored(dir), flags);
+  for (const target of hookTargets(config, options.settings)) await uninstallFrom(dir, target, options.yes);
+}
+
+async function uninstallFrom(dir: string, target: HookTarget, yes: boolean): Promise<void> {
   let change;
   try {
-    change = await planUninstall({
-      settingsPath: options.settings ?? join(config.claudeHome, 'settings.json'),
-      configDir: dir,
-      statuslineCommand: statuslineCommand(dir),
-    });
+    change = await planUninstall({ ...target, configDir: dir, statuslineCommand: statuslineCommand(dir, target.suffix) });
   } catch (err) {
     throw new CliError(err instanceof Error ? err.message : String(err));
   }
   if (change.before === undefined || change.after === change.before) {
-    await applyUninstall(change, dir);
+    await applyUninstall(change, dir, target.suffix);
     console.log(`No Wristline hooks in ${change.path}; removed the generated relay files.`);
     return;
   }
   console.log(`Changes to ${change.path}:\n`);
   console.log(lineDiff(change.before, change.after));
-  if (!(await approve(`\nApply these changes to ${change.path}?`, options.yes, 'wristline-bridge hooks uninstall'))) return;
-  const saved = await applyUninstall(change, dir);
+  if (!(await approve(`\nApply these changes to ${change.path}?`, yes, 'wristline-bridge hooks uninstall'))) return;
+  const saved = await applyUninstall(change, dir, target.suffix);
   if (saved) console.log(`Backed up the previous file to ${saved}`);
   console.log('Uninstalled.');
 }
@@ -215,6 +262,39 @@ export async function serviceUninstall(): Promise<void> {
   console.log(`Stopped and removed ${SERVICE_NAME}.`);
 }
 
+/**
+ * Agent homes on this machine: `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, and the `~/.claude*` and
+ * `~/.codex*` directories that hold agent data (a login file or session data).
+ */
+export async function detectHomes(homeDir: string, env: Env): Promise<{ claude: string[]; codex: string[] }> {
+  const names = (await readdir(homeDir).catch(() => [])).sort();
+  const scan = async (envHome: string | undefined, prefix: string, marks: string[]): Promise<string[]> => {
+    const out: string[] = [];
+    if (envHome && (await exists(envHome))) out.push(envHome);
+    for (const name of names.filter((n) => n.startsWith(prefix))) {
+      const dir = join(homeDir, name);
+      const marked = await Promise.all(marks.map((m) => exists(join(dir, m))));
+      if (marked.some(Boolean) && !out.some((h) => resolve(h) === resolve(dir))) out.push(dir);
+    }
+    return out;
+  };
+  return {
+    claude: await scan(env.CLAUDE_CONFIG_DIR, '.claude', ['.claude.json', 'projects']),
+    codex: await scan(env.CODEX_HOME, '.codex', ['auth.json', 'sessions']),
+  };
+}
+
+/** Proposes each detected home that is not registered yet; resolves the extras to store. */
+async function proposeHomes(provider: ProviderId, detected: string[], registered: string[], extras: string[], yes: boolean): Promise<string[]> {
+  const out = [...extras];
+  for (const dir of detected) {
+    if (registered.some((h) => resolve(h) === resolve(dir))) continue;
+    const login = loginText(await readLogin(provider, dir));
+    if (yes || (process.stdin.isTTY && (await confirm(`Add ${dir} (login: ${login}) as another account?`)))) out.push(dir);
+  }
+  return out;
+}
+
 export async function setup(flags: Flags, yes: boolean): Promise<void> {
   const dir = configDir();
   const stored = await readStored(dir);
@@ -229,8 +309,15 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
 
   const found = async (path: string): Promise<string> => ((await exists(path)) ? 'found' : 'not found');
   console.log('Agents');
-  console.log(`  Claude Code  ${config.claudeHome}  ${await found(join(config.claudeHome, 'projects'))}`);
-  console.log(`  Codex        ${config.codexHome}  ${await found(join(config.codexHome, 'sessions'))}`);
+  for (const home of config.claudeHomes) {
+    console.log(`  Claude Code  ${home}  ${await found(join(home, 'projects'))}  login ${loginText(await readLogin('claude-code', home))}`);
+  }
+  for (const home of config.codexHomes) {
+    console.log(`  Codex        ${home}  ${await found(join(home, 'sessions'))}  login ${loginText(await readLogin('codex', home))}`);
+  }
+  const detected = await detectHomes(homedir(), process.env);
+  const extraClaudeHomes = await proposeHomes('claude-code', detected.claude, config.claudeHomes, stored.extraClaudeHomes ?? [], yes);
+  const extraCodexHomes = await proposeHomes('codex', detected.codex, config.codexHomes, stored.extraCodexHomes ?? [], yes);
   console.log('Tools');
   for (const name of ['codex', 'tmux', 'tailscale'] as const) console.log(`  ${name.padEnd(10)} ${bins[name] ?? 'not found'}`);
 
@@ -249,6 +336,8 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
     hookPort: config.hookPort,
     claudeHome: config.claudeHome,
     codexHome: config.codexHome,
+    extraClaudeHomes,
+    extraCodexHomes,
     bins,
     hookToken: config.hookToken ?? newToken(),
     permissionWaitSec: config.permissionWaitSec,
@@ -260,8 +349,7 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
   console.log(`Permission wait (permissionWaitSec): ${config.permissionWaitSec} s; edit config.json to change it, then rerun \`hooks install\``);
 
   console.log('\nClaude Code hooks (permission prompts, alerts and plan usage on the watch)');
-  if (await exists(config.claudeHome)) await hooksInstall(flags, { yes });
-  else console.log(`  Skipped: ${config.claudeHome} not found.`);
+  await hooksInstall(flags, { yes });
 
   console.log('\nBackground service');
   let service = false;
