@@ -62,7 +62,7 @@ export function resolveConfig(stored: StoredConfig, flags: Flags = {}, env: Env 
     claudeHome: flags.claudeHome ?? (env.CLAUDE_CONFIG_DIR || undefined) ?? stored.claudeHome ?? join(home, '.claude'),
     codexHome: flags.codexHome ?? (env.CODEX_HOME || undefined) ?? stored.codexHome ?? join(home, '.codex'),
     bins: stored.bins ?? {},
-    permissionWaitSec: stored.permissionWaitSec ?? 300,
+    permissionWaitSec: stored.permissionWaitSec ?? 590,
     historyDays: stored.historyDays ?? 7,
   };
 }

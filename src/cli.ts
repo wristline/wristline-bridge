@@ -6,30 +6,35 @@ import { Auth, newToken } from './auth.ts';
 import { configDir, readStored, resolveConfig, updateStored, type Config, type Flags } from './config.ts';
 import { BridgeHub } from './hub.ts';
 import { API_VERSION } from './protocol.ts';
+import { hookHandlers } from './providers/claude-code/hooks.ts';
 import { ClaudeCodeProvider } from './providers/claude-code/provider.ts';
 import { CodexProvider } from './providers/codex/provider.ts';
 import { startServer, type LocalDevices, type LocalPairResponse } from './server.ts';
-import { setup } from './setup.ts';
-import { isObject, str } from './util.ts';
+import { hooksInstall, hooksUninstall, serviceInstall, serviceUninstall, setup } from './setup.ts';
+import { CliError, isObject, str } from './util.ts';
 
 const HELP = `Usage: wristline-bridge [command] [options]
 
 Commands:
   run                             Start the bridge (default)
-  setup [--yes]                   Detect agents and tools, write the config file
+  setup [--yes]                   Detect agents and tools, write the config file, then offer
+                                  the hooks and service installs below
   pair [--token] [--name <name>]  Show a 6-digit pairing code, or issue a token to type in manually
   devices [--revoke <id>]         List paired watches, or revoke one
-  hooks, service                  Not available yet
+  hooks install|uninstall [--yes] [--settings <file>]
+                                  Add or remove the Claude Code hooks and statusLine relay
+                                  (default file: <claude-home>/settings.json); shows the diff first
+  service install|uninstall [--yes] [--dry-run]
+                                  Run the bridge as a systemd user service
 
 Options:
   --api-port <port>     Public API port (default 47770)
   --hook-port <port>    Local API port (default 47771)
   --claude-home <dir>   Claude Code directory (default $CLAUDE_CONFIG_DIR or ~/.claude)
   --codex-home <dir>    Codex directory (default $CODEX_HOME or ~/.codex)
+  -y, --yes             Apply without asking
   -h, --help            Show this help
   -v, --version         Show the version`;
-
-class CliError extends Error {}
 
 function packageVersion(): string {
   const pkg: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -50,7 +55,11 @@ async function run(flags: Flags): Promise<void> {
   if (!stored.hookToken) stored = await updateStored(dir, { hookToken });
   const config = resolveConfig(stored, flags);
 
-  const claude = new ClaudeCodeProvider({ home: config.claudeHome, historyDays: config.historyDays });
+  const claude = new ClaudeCodeProvider({
+    home: config.claudeHome,
+    historyDays: config.historyDays,
+    ...(config.bins.tmux ? { tmux: config.bins.tmux } : {}),
+  });
   const codex = new CodexProvider({ home: config.codexHome, historyDays: config.historyDays });
   const providers = [claude, codex];
   const hub = new BridgeHub({ providers });
@@ -70,6 +79,7 @@ async function run(flags: Flags): Promise<void> {
     apiPort: config.apiPort,
     hookPort: config.hookPort,
     onStatusline: (body) => claude.statusline(body),
+    hooks: hookHandlers(hub, config.permissionWaitSec * 1000),
   }).catch((err: unknown) => {
     for (const p of providers) p.stop();
     hub.close();
@@ -159,6 +169,8 @@ async function main(argv: string[]): Promise<void> {
       token: { type: 'boolean' },
       name: { type: 'string' },
       revoke: { type: 'string' },
+      settings: { type: 'string' },
+      'dry-run': { type: 'boolean' },
       yes: { type: 'boolean', short: 'y' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -184,9 +196,16 @@ async function main(argv: string[]): Promise<void> {
       return pair(resolveConfig(await readStored(configDir()), flags), values.token === true, values.name);
     case 'devices':
       return devices(resolveConfig(await readStored(configDir()), flags), values.revoke);
-    case 'hooks':
+    case 'hooks': {
+      const options = { yes: values.yes === true, ...(values.settings ? { settings: values.settings } : {}) };
+      if (positionals[1] === 'install') return void (await hooksInstall(flags, options));
+      if (positionals[1] === 'uninstall') return hooksUninstall(flags, options);
+      throw new CliError('Usage: wristline-bridge hooks install|uninstall [--yes] [--settings <file>]');
+    }
     case 'service':
-      throw new CliError(`\`wristline-bridge ${command}\` is not available yet in this version.`);
+      if (positionals[1] === 'install') return void (await serviceInstall(flags, { yes: values.yes === true, dryRun: values['dry-run'] === true }));
+      if (positionals[1] === 'uninstall') return serviceUninstall();
+      throw new CliError('Usage: wristline-bridge service install|uninstall [--yes] [--dry-run]');
     default:
       throw new CliError(`Unknown command: ${command}\n\n${HELP}`);
   }

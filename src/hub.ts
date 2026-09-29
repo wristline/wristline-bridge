@@ -202,8 +202,11 @@ export class BridgeHub implements Hub {
     }
   }
 
+  /** An open request means the session waits on an answer; a prompt would have to wait too. */
   #overlay(session: Session): Session {
-    return this.pending.hasSession(session.id) ? { ...session, status: 'needs_input' } : session;
+    if (!this.pending.hasSession(session.id)) return session;
+    const lasting = session.promptBlock !== undefined && session.promptBlock !== 'busy';
+    return { ...session, status: 'needs_input', promptBlock: lasting ? session.promptBlock : 'awaiting_input' };
   }
 
   #refreshSession(request: PendingRequest): void {

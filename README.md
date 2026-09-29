@@ -10,8 +10,9 @@ terminal. It never sends your data anywhere except to the watches you pair with 
 
 ## Status
 
-Early development. This version is **read-only**: session list, live conversation, context and
-plan usage. Answering permission prompts and sending prompts from the watch come next.
+Early development. For Claude Code the watch can follow sessions live, answer permission prompts
+and questions, and send prompts (sessions running in tmux). Codex sessions are read-only for now.
+Context and plan usage are shown for both.
 
 Verified with Claude Code 2.1.284 and Codex CLI 0.159.0 on Linux (WSL2). Requires Node.js 22 or
 newer.
@@ -27,8 +28,9 @@ wristline-bridge setup
 `setup` finds Claude Code (`$CLAUDE_CONFIG_DIR` or `~/.claude`) and Codex (`$CODEX_HOME` or
 `~/.codex`), records the paths and tools it found in `~/.config/wristline/config.json` (so a
 background service works without your shell profile), and proposes the bridge address from
-Tailscale. Run it again after changing `CODEX_HOME` or installing tools. `--yes` accepts the
-proposals without asking.
+Tailscale. It then offers the two installs below: the Claude Code hooks (it shows the exact
+`settings.json` diff first) and the background service. Run it again after changing
+`CODEX_HOME` or installing tools. `--yes` accepts everything without asking.
 
 ## Run
 
@@ -42,6 +44,65 @@ The bridge listens on two loopback ports:
 - `127.0.0.1:47771` — the local API for the CLI and agent hooks. Never publish it.
 
 Use `--api-port`, `--hook-port`, `--claude-home` and `--codex-home` to override the defaults.
+
+### Background service (systemd)
+
+```sh
+wristline-bridge service install --dry-run   # print the unit file and commands only
+wristline-bridge service install             # write ~/.config/systemd/user/wristline-bridge.service, enable --now
+wristline-bridge service uninstall
+loginctl enable-linger "$USER"               # optional: keep it running while logged out, start at boot
+```
+
+The unit runs the current `node` binary on this package's `dist/cli.js` and restarts it on
+failure. Install the package globally first (`npm i -g wristline-bridge`); a copy in the npx
+cache can disappear. Logs: `journalctl --user -u wristline-bridge -f`.
+
+## Claude Code hooks
+
+Claude Code does not write permission prompts or plan limits to disk, so answering from the watch
+needs hooks. `wristline-bridge hooks install` shows the diff, asks, backs up
+`~/.claude/settings.json` to `~/.config/wristline/backups/`, and then **adds** (never removes or
+reorders your entries):
+
+- `PermissionRequest`: an http hook to `http://127.0.0.1:47771/hooks/permission-request` with the
+  local token in an `Authorization` header (the file is otherwise private to you; tell us if you
+  publish your settings as dotfiles). Its timeout is `permissionWaitSec + 10` seconds.
+- `Notification` and `Stop`: asynchronous `curl … || true` commands that tell the bridge a session
+  waits for you or finished. They never delay Claude Code and stay quiet while the bridge is
+  stopped.
+- `statusLine`: your command is replaced by `~/.config/wristline/statusline.sh` (your original is
+  saved in `statusline.orig`; `padding` and `refreshInterval` are kept). The script sends the
+  status JSON to the bridge in the background (plan usage 5h/7d and context size) and then runs
+  your original command unchanged. If you had no status line, it prints nothing, but Claude Code
+  still keeps an empty row for it.
+
+Restart running Claude Code sessions to pick the hooks up. `wristline-bridge hooks uninstall`
+removes exactly these entries, restores your status line and deletes the generated files; the
+result is the same JSON as before the install. Both accept `--yes` and `--settings <file>` (for
+another settings file, e.g. a project's `.claude/settings.json`).
+
+How requests behave:
+
+- **No watch connected** (monitoring off, and none connected in the last 90 s): the hook answers
+  at once and Claude Code shows its terminal dialog exactly as without the bridge.
+- **Watch connected:** the request appears on the watch *and* the terminal dialog appears as usual.
+  Whichever answers first wins. Answering in the terminal clears it from the watch within ~2 s.
+  "Answer on PC", or no answer within `permissionWaitSec` (default 590 s), leaves it to the
+  terminal. "Always allow" applies Claude Code's own suggestion for that prompt.
+- **Questions** (AskUserQuestion) work the same way; multi-select answers are supported. Free-text
+  answers ("Type something") are only available in the terminal.
+
+### Sending prompts from the watch
+
+Prompts are typed into the session's terminal with `tmux send-keys`, so this works only for
+Claude Code sessions **running inside tmux** (on the same tmux server as the bridge's user). The
+bridge checks that the session really runs in that pane before typing. A session waiting on a
+dialog refuses prompts (`awaiting_input`) until it is answered; a busy session queues them.
+
+Known limitation: the prompt is typed after whatever is already in the session's input box. If
+you left half-typed text there, it becomes part of the prompt; if you left the input in `!`
+(shell) mode, the prompt runs as a shell command. Clear the input box before walking away.
 
 ## Reach it from the watch: Tailscale Funnel
 
@@ -110,7 +171,7 @@ node scripts/fake-watch.ts --url http://127.0.0.1:47770 --code 123456
 ```
 
 `scripts/fake-watch.ts` behaves like the watch: it prints events and reads `subscribe <sid>`,
-`answer <rid> <optionId>`, `prompt <sid> <text>` from stdin.
+`answer <rid> <optionIds,...> [...]` (one argument per question), `prompt <sid> <text>` from stdin.
 
 The wire protocol is specified in [docs/protocol.md](docs/protocol.md); example payloads are in
 `protocol/v1/` and ship in the npm package. After changing `src/protocol.ts`, run

@@ -2,6 +2,9 @@
 
 export type JsonObject = Record<string, unknown>;
 
+/** An error the CLI prints as a plain message, without a stack trace. */
+export class CliError extends Error {}
+
 export function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

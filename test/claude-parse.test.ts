@@ -9,7 +9,7 @@ import {
   parseClaudeLine,
   sessionTitle,
   statuslineUsage,
-  statuslineWindow,
+  statuslineContext,
   toolText,
 } from '../src/providers/claude-code/parse.ts';
 
@@ -107,6 +107,8 @@ test('title precedence: custom-title > registry name > ai-title > first prompt',
 
   const noCustom = scan(lines.filter((l) => !l.includes('"custom-title"')));
   assert.equal(sessionTitle(noCustom, 'registry-name'), 'registry-name');
+  assert.equal(sessionTitle(noCustom, 'registry-name', 'user'), 'registry-name');
+  assert.equal(sessionTitle(noCustom, 'project-2a', 'derived'), 'Fix failing CI build', 'a derived name is a placeholder');
   assert.equal(sessionTitle(noCustom, undefined), 'Fix failing CI build');
 
   const promptOnly = scan(lines.filter((l) => !l.includes('"custom-title"') && !l.includes('"ai-title"')));
@@ -140,6 +142,48 @@ test('statusLine rate limits become 5h/7d usage with ISO reset times', () => {
       { id: '7d', usedPercent: 12.5, resetsAt: '2026-10-05T00:00:00.000Z', minutes: 10080 },
     ],
   });
-  assert.deepEqual(statuslineWindow(input), { sessionId: 'abc', window: 1_000_000 });
+  assert.deepEqual(statuslineContext(input), { sessionId: 'abc', window: 1_000_000 });
   assert.equal(statuslineUsage({ rate_limits: null }, 0), undefined);
+});
+
+// Shape recorded from Claude Code 2.1.284 (docs/spikes.md); paths shortened.
+const realStatusline = {
+  session_id: 'eeba9f38-1111-44d6-b54f-db8b9d506da0',
+  transcript_path: '/home/dev/.claude/projects/-work/eeba9f38-1111-44d6-b54f-db8b9d506da0.jsonl',
+  cwd: '/work',
+  model: { id: 'claude-haiku-4-5-20251001', display_name: 'Haiku 4.5' },
+  workspace: { current_dir: '/work', project_dir: '/work', added_dirs: [] },
+  version: '2.1.284',
+  output_style: { name: 'default' },
+  cost: { total_cost_usd: 0, total_duration_ms: 11937, total_api_duration_ms: 0, total_lines_added: 0, total_lines_removed: 0 },
+  context_window: {
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    context_window_size: 200000,
+    current_usage: null,
+    used_percentage: null,
+    remaining_percentage: null,
+  },
+  exceeds_200k_tokens: false,
+  fast_mode: false,
+  thinking: { enabled: true },
+  rate_limits: { five_hour: { used_percentage: 9, resets_at: 1790701800 }, seven_day: { used_percentage: 5, resets_at: 1791244800 } },
+};
+
+test('real statusLine JSON: rate limits to 5h/7d with ISO resets, context before and after the first call', () => {
+  assert.deepEqual(statuslineUsage(realStatusline, Date.parse('2026-09-29T14:09:41Z'))?.windows, [
+    { id: '5h', usedPercent: 9, resetsAt: '2026-09-29T17:10:00.000Z', minutes: 300 },
+    { id: '7d', usedPercent: 5, resetsAt: '2026-10-06T00:00:00.000Z', minutes: 10080 },
+  ]);
+  assert.deepEqual(statuslineContext(realStatusline), { sessionId: realStatusline.session_id, window: 200000 });
+  const after = {
+    ...realStatusline,
+    context_window: {
+      ...realStatusline.context_window,
+      current_usage: { input_tokens: 8500, output_tokens: 1200, cache_creation_input_tokens: 5000, cache_read_input_tokens: 2000 },
+    },
+  };
+  assert.deepEqual(statuslineContext(after), { sessionId: realStatusline.session_id, window: 200000, used: 15500 });
+  const { rate_limits: _, ...noLimits } = realStatusline;
+  assert.equal(statuslineUsage(noLimits, 0), undefined);
 });

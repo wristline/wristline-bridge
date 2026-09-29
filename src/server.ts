@@ -34,6 +34,12 @@ export interface LocalDevices {
   devices: Pick<Device, 'id' | 'name' | 'createdAt'>[];
 }
 
+/**
+ * Serves `POST /hooks/<name>` on the local listener. Resolves the hook's JSON output, or undefined
+ * for an empty 200 ("no decision"). `signal` aborts when the agent drops the request.
+ */
+export type HookHandler = (input: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, unknown> | undefined>;
+
 export interface ServerOptions {
   hub: BridgeHub;
   auth: Auth;
@@ -44,6 +50,7 @@ export interface ServerOptions {
   hookPort: number;
   host?: string;
   onStatusline(body: unknown): void;
+  hooks?: ReadonlyMap<string, HookHandler>;
 }
 
 export interface RunningServer {
@@ -231,6 +238,24 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!input) return;
       options.onStatusline(input);
       return send(res, 204);
+    }
+    const hook = /^\/hooks\/([a-z-]+)$/.exec(path);
+    const handler = hook && options.hooks?.get(hook[1] ?? '');
+    if (method === 'POST' && handler) {
+      const input = await body(req, res, LOCAL_BODY_MAX);
+      if (!input) return;
+      // An agent that stops waiting may drop the connection. (Claude Code 2.1.284 keeps it open after a
+      // terminal answer; the claude-code provider detects that from its session registry.)
+      const ctrl = new AbortController();
+      res.on('close', () => {
+        if (!res.writableFinished) ctrl.abort();
+      });
+      const output = await handler(input, ctrl.signal);
+      if (res.destroyed) return;
+      if (output) return send(res, 200, output);
+      res.writeHead(200, { 'cache-control': 'no-store', 'content-length': 0 });
+      res.end();
+      return;
     }
     if (method === 'POST' && path === '/local/pair') {
       const input = (await readJson(req, PUBLIC_BODY_MAX)) ?? {};

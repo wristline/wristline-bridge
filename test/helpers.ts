@@ -4,6 +4,7 @@ import { Auth } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
 import type { Item, ItemPage, ProviderHealth, ServerEvent, Session } from '../src/protocol.ts';
 import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.ts';
+import { hookHandlers } from '../src/providers/claude-code/hooks.ts';
 import { startServer, type RunningServer } from '../src/server.ts';
 
 /** In-memory provider with deterministic data. */
@@ -54,7 +55,7 @@ export interface Bridge {
   close(): Promise<void>;
 }
 
-export async function startBridge(provider: SessionProvider, now = () => Date.parse('2026-09-29T10:00:00Z')): Promise<Bridge> {
+export async function startBridge(provider: SessionProvider, now = () => Date.parse('2026-09-29T10:00:00Z'), waitMs = 60_000): Promise<Bridge> {
   let n = 0;
   const hub = new BridgeHub({ providers: [provider], pending: { now, newId: () => `req-${++n}` } });
   const auth = new Auth({ devices: [], save: async () => {}, now });
@@ -67,6 +68,7 @@ export async function startBridge(provider: SessionProvider, now = () => Date.pa
     apiPort: 0,
     hookPort: 0,
     onStatusline: () => {},
+    hooks: hookHandlers(hub, waitMs),
   });
   const { token } = await auth.issue('test watch');
   return {

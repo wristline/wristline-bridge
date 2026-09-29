@@ -23,7 +23,7 @@ test('precedence: flag > env > config.json > default', () => {
   assert.equal(resolveConfig({ claudeHome: '/cfg' }, {}, { CLAUDE_CONFIG_DIR: '/env' }, home).claudeHome, '/env');
   assert.equal(resolveConfig({ apiPort: 1234 }, { apiPort: 4321 }, {}, home).apiPort, 4321);
   const defaults = resolveConfig({}, {}, {}, home);
-  assert.deepEqual([defaults.apiPort, defaults.hookPort, defaults.permissionWaitSec, defaults.historyDays], [47770, 47771, 300, 7]);
+  assert.deepEqual([defaults.apiPort, defaults.hookPort, defaults.permissionWaitSec, defaults.historyDays], [47770, 47771, 590, 7]);
 });
 
 test('updateStored merges keys and writes 0600 in a 0700 dir', async () => {

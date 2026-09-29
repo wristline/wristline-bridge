@@ -1,30 +1,33 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { PendingRegistry } from '../src/pending.ts';
-import type { Item, Session, Usage } from '../src/protocol.ts';
-import type { Hub } from '../src/provider.ts';
-import { ClaudeCodeProvider } from '../src/providers/claude-code/provider.ts';
+import type { Item, ResolvedBy, Session, Usage } from '../src/protocol.ts';
+import { PromptBlocked, type Hub } from '../src/provider.ts';
+import { ClaudeCodeProvider, tmuxPane } from '../src/providers/claude-code/provider.ts';
 import { CodexProvider } from '../src/providers/codex/provider.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-providers-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 
-function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; removedIds: string[] } {
+function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; removedIds: string[]; resolved: string[] } {
   const sessions: Session[] = [];
   const usages: Usage[] = [];
   const removedIds: string[] = [];
+  const resolved: string[] = [];
   return {
     sessions,
     usages,
     removedIds,
+    resolved,
     session: (s) => sessions.push(s),
     removed: (id) => removedIds.push(id),
     usage: (u) => usages.push(u),
     alert: () => {},
-    pending: new PendingRegistry({ onRequest: () => {}, onResolved: () => {} }),
+    pending: new PendingRegistry({ onRequest: () => {}, onResolved: (r, by: ResolvedBy) => resolved.push(`${r.id}:${by}`) }),
   };
 }
 
@@ -143,4 +146,82 @@ test('a missing agent home is reported as not_found', async () => {
   provider.stop();
   assert.deepEqual(provider.health(), { id: 'codex', status: 'not_found' });
   assert.deepEqual(provider.listSessions(), []);
+});
+
+test('tmux target: the %pane id after the last dot', () => {
+  assert.equal(tmuxPane('work:@2.%15'), '%15');
+  assert.equal(tmuxPane('my.session:@2.%4'), '%4');
+  assert.equal(tmuxPane('%7'), '%7');
+  assert.equal(tmuxPane('work:@2'), undefined);
+  assert.equal(tmuxPane(undefined), undefined);
+});
+
+test('claude-code: prompts go to the newest live owner of a tmux pane; answered dialogs are dismissed', async (t) => {
+  const home = join(root, 'claude-tmux');
+  const dir = join(home, 'sessions');
+  mkdirSync(dir, { recursive: true });
+  const sleeper = spawn('sleep', ['30']);
+  t.after(() => sleeper.kill());
+  const now = Date.now();
+  const [older, newer, waiting] = ['aaaaaaaa-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000002', 'aaaaaaaa-0000-4000-8000-000000000003'];
+  const entry = (pid: number, sessionId: string, tmux: string, status: string, at: number): void =>
+    writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId, cwd: '/w', tmux, status, updatedAt: at, statusUpdatedAt: at }));
+  // Two live entries claim pane %5 (a stale one left behind); only the newer may type there.
+  entry(process.pid, older, 'old:@1.%5', 'idle', now - 60_000);
+  entry(process.ppid, newer, 'work:@2.%5', 'idle', now);
+  entry(sleeper.pid ?? 0, waiting, 'work:@3.%9', 'waiting', now);
+
+  const calls: string[][] = [];
+  let panePid = process.ppid;
+  const provider = new ClaudeCodeProvider({
+    home,
+    historyDays: 7,
+    tmux: '/usr/bin/tmux',
+    exec: async (file, args) => {
+      calls.push([file, ...args]);
+      return args[0] === 'display-message' ? `${panePid}\n` : '';
+    },
+  });
+  const hub = recordingHub();
+  await provider.start(hub);
+  try {
+    const block = (id: string): string | undefined => provider.listSessions().find((s) => s.id === `claude-code:${id}`)?.promptBlock;
+    assert.deepEqual([block(older), block(newer), block(waiting)], ['no_tmux', undefined, 'awaiting_input']);
+    await assert.rejects(provider.sendPrompt(older, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'no_tmux');
+    await assert.rejects(provider.sendPrompt(waiting, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'awaiting_input');
+    assert.deepEqual(calls, []);
+
+    await provider.sendPrompt(newer, 'fix the build\nthen run tests\u001b');
+    assert.deepEqual(calls, [
+      ['/usr/bin/tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid}'],
+      ['/usr/bin/tmux', 'send-keys', '-t', '%5', '-l', '--', 'fix the build then run tests '],
+      ['/usr/bin/tmux', 'send-keys', '-t', '%5', 'Enter'],
+    ]);
+
+    // A pane whose process tree does not contain the session is someone else's.
+    calls.length = 0;
+    panePid = 1;
+    await assert.rejects(provider.sendPrompt(newer, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'no_tmux');
+    assert.equal(calls.length, 1);
+    panePid = process.ppid;
+
+    // An open request blocks prompts; the terminal answering the dialog (status leaves "waiting") resolves it.
+    const answer = hub.pending.open({ sessionId: `claude-code:${waiting}`, kind: 'permission', title: 'Bash', questions: [] });
+    const [request] = hub.pending.list();
+    await provider.refresh();
+    assert.equal(hub.pending.list().length, 1, 'still waiting');
+    entry(sleeper.pid ?? 0, waiting, 'work:@3.%9', 'busy', Date.now() + 1000);
+    await provider.refresh();
+    assert.equal(await answer, null);
+    assert.deepEqual(hub.resolved, [`${request?.id}:terminal`]);
+
+    // statusLine context replaces the transcript estimate.
+    provider.statusline({
+      session_id: newer,
+      context_window: { context_window_size: 1_000_000, current_usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 3 } },
+    });
+    assert.deepEqual(provider.listSessions().find((s) => s.id === `claude-code:${newer}`)?.context, { used: 123, window: 1_000_000 });
+  } finally {
+    provider.stop();
+  }
 });

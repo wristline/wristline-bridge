@@ -85,6 +85,11 @@ export class PendingRegistry {
     return 'ok';
   }
 
+  /** Resolves a request the agent stopped waiting on without telling us (e.g. answered in the terminal). */
+  dismiss(id: string, by: ResolvedBy): void {
+    this.#open.get(id)?.finish(null, by);
+  }
+
   list(): PendingRequest[] {
     return [...this.#open.values()].map((e) => e.request);
   }

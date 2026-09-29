@@ -4,7 +4,8 @@
 //   node scripts/fake-watch.ts --url http://127.0.0.1:47770 --token <token>
 //
 // Prints one line per event (prefixed with the local time) and reads commands from stdin:
-//   subscribe <sessionId> | unsubscribe | answer <requestId> <optionId> | prompt <sessionId> <text> | quit
+//   subscribe <sessionId> | unsubscribe | prompt <sessionId> <text> | quit
+//   answer <requestId> <optionIds> [<optionIds> ...]   one argument per question, ids joined by ","
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { WebSocket } from 'ws';
@@ -67,7 +68,10 @@ async function main(): Promise<void> {
         break;
       case 'request':
         requests.set(event.request.id, event.request);
-        log(`request ${event.request.id} ${event.request.kind} "${event.request.title}" options=${event.request.questions[0]?.options.map((o) => o.id).join(',')}`);
+        log(`request ${event.request.id} ${event.request.kind} "${event.request.title}" in ${event.request.sessionId}`);
+        for (const q of event.request.questions) {
+          log(`  ${q.id}${q.multi ? ' (multi)' : ''}: ${q.text.slice(0, 200).replace(/\s+/g, ' ')}  [${q.options.map((o) => `${o.id}=${o.label}`).join(' | ')}]`);
+        }
         break;
       default:
         log(JSON.stringify(event));
@@ -83,14 +87,15 @@ async function main(): Promise<void> {
       if (command === 'subscribe' && arg) send({ type: 'subscribe', sessionId: arg });
       else if (command === 'unsubscribe') send({ type: 'subscribe', sessionId: null });
       else if (command === 'answer' && arg && rest[0]) {
-        const question = requests.get(arg)?.questions[0];
-        const { status, data } = await api('POST', `/api/requests/${arg}`, token, { answers: { [question?.id ?? 'decision']: [rest[0]] } });
+        const questions = requests.get(arg)?.questions ?? [{ id: 'decision' }];
+        const answers = Object.fromEntries(questions.map((q, i) => [q.id, (rest[i] ?? '').split(',').filter(Boolean)]));
+        const { status, data } = await api('POST', `/api/requests/${arg}`, token, { answers });
         log(`answer -> ${status} ${JSON.stringify(data)}`);
       } else if (command === 'prompt' && arg && rest.length > 0) {
         const { status, data } = await api('POST', `/api/sessions/${encodeURIComponent(arg)}/prompt`, token, { text: rest.join(' ') });
         log(`prompt -> ${status} ${JSON.stringify(data)}`);
       } else if (command === 'quit') ws.close();
-      else if (command) log('commands: subscribe <sid> | unsubscribe | answer <rid> <optionId> | prompt <sid> <text> | quit');
+      else if (command) log('commands: subscribe <sid> | unsubscribe | answer <rid> <ids,..> [<ids,..> ...] | prompt <sid> <text> | quit');
     })();
   });
 }

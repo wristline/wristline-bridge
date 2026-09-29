@@ -32,6 +32,12 @@ export function classifyUserText(raw: string): UserText | undefined {
 }
 
 export function toolText(name: string, input: unknown): string {
+  const summary = toolSummary(name, input, TOOL_JSON_MAX);
+  return summary ? `${name}(${summary})` : name;
+}
+
+/** The most telling argument of a tool call, or its JSON input cut to `jsonMax`. */
+export function toolSummary(name: string, input: unknown, jsonMax: number): string | undefined {
   const args = isObject(input) ? input : {};
   let summary: string | undefined;
   switch (name) {
@@ -52,8 +58,8 @@ export function toolText(name: string, input: unknown): string {
       summary = str(args.description);
       break;
   }
-  if (summary === undefined && Object.keys(args).length > 0) summary = clip(JSON.stringify(args), TOOL_JSON_MAX);
-  return summary ? `${name}(${summary})` : name;
+  if (summary === undefined && Object.keys(args).length > 0) summary = clip(JSON.stringify(args), jsonMax);
+  return summary || undefined;
 }
 
 /** Applies one transcript line to the session's items. */
@@ -176,9 +182,13 @@ export class ClaudeMetaScan implements LineHandler {
   }
 }
 
-/** custom-title > registry name > ai-title > first prompt (40 chars). */
-export function sessionTitle(meta: ClaudeMetaScan | undefined, registryName: string | undefined): string {
-  return meta?.customTitle || registryName || meta?.aiTitle || meta?.firstPrompt || '';
+/**
+ * custom-title > registry name > ai-title > first prompt (40 chars). A registry name with
+ * `nameSource: "derived"` is a generated placeholder such as `project-2a` and is skipped.
+ */
+export function sessionTitle(meta: ClaudeMetaScan | undefined, registryName: string | undefined, nameSource?: string): string {
+  const name = nameSource === 'derived' ? undefined : registryName;
+  return meta?.customTitle || name || meta?.aiTitle || meta?.firstPrompt || '';
 }
 
 const LIMITS = [
@@ -203,8 +213,22 @@ export function statuslineUsage(input: JsonObject, now: number): Usage | undefin
   return { provider: 'claude-code', updatedAt: new Date(now).toISOString(), windows };
 }
 
-export function statuslineWindow(input: JsonObject): { sessionId: string; window: number } | undefined {
+export interface StatuslineContext {
+  sessionId: string;
+  window?: number;
+  /** Input tokens of the last API call; absent before the first call and right after /compact. */
+  used?: number;
+}
+
+/** `context_window` of the statusLine JSON: the window size and, when known, the tokens in it. */
+export function statuslineContext(input: JsonObject): StatuslineContext | undefined {
   const sessionId = str(input.session_id);
-  const window = isObject(input.context_window) ? num(input.context_window.context_window_size) : undefined;
-  return sessionId && window ? { sessionId, window } : undefined;
+  const ctx = input.context_window;
+  if (!sessionId || !isObject(ctx)) return undefined;
+  const out: StatuslineContext = { sessionId };
+  const window = num(ctx.context_window_size);
+  if (window) out.window = window;
+  const used = isObject(ctx.current_usage) ? contextTokens({ usage: ctx.current_usage }) : undefined;
+  if (used !== undefined) out.used = used;
+  return out.window || out.used !== undefined ? out : undefined;
 }

@@ -43,7 +43,8 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   (the watch shows a localised placeholder). `status` is `running`, `idle`, `needs_input` or
   `ended`; a session with an open request is always `needs_input`. `promptBlock`, when present,
   says why a prompt would be refused: `not_live`, `no_tmux`, `awaiting_input`, `busy`,
-  `unsupported`. `context` is `{used, window}` in tokens.
+  `unsupported`; a session with an open request reports `awaiting_input` unless a lasting reason
+  applies. `context` is `{used, window}` in tokens.
 - **Item** — one entry of a conversation: `kind` is `user`, `assistant`, `tool` or `notice`.
   `seq` starts at 1 and orders items within a session; an updated item (e.g. a tool that finished)
   is sent again with the same `seq`. `text` is at most 4000 UTF-16 code units, `detail` (tool
@@ -115,4 +116,19 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   (closed after 5 wrong codes). `{"token": true, "name": "..."}` → `{token, deviceId}` instead.
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
 - `POST /local/statusline` — the Claude Code statusLine JSON; `rate_limits` becomes `5h`/`7d`
-  usage and `context_window.context_window_size` the session's context window.
+  usage (`resets_at` epoch seconds → ISO) and `context_window` the session's context
+  (`context_window_size`, and `current_usage` input tokens when present).
+- `POST /hooks/permission-request` — Claude Code's PermissionRequest hook input. Answers an empty
+  `200` at once when no watch is present (connected now or within 90 s); otherwise opens a
+  request and answers when the watch does: `allow` → `{"hookSpecificOutput": {"hookEventName":
+  "PermissionRequest", "decision": {"behavior": "allow"}}}`, `always` → the same plus
+  `"updatedPermissions": <permission_suggestions>`, `deny` → `{"behavior": "deny", "message":
+  "Denied from watch"}`, `defer`/timeout/answered in the terminal → empty `200`. For
+  `AskUserQuestion` the request is a question and the answer is `{"behavior": "allow",
+  "updatedInput": {...tool_input, "answers": {"<question>": "<label>[, <label>...]"}}}`.
+- `POST /hooks/pre-tool-use` — answers `AskUserQuestion` the same way with `"permissionDecision":
+  "allow"` + `updatedInput`; empty `200` for other tools. Not installed by default (see
+  [spikes.md](spikes.md), S2).
+- `POST /hooks/notification`, `POST /hooks/stop` — empty `200`; `permission_prompt` and
+  `agent_needs_input` notifications raise `alert needs_input` when no request of that session is
+  open; Stop raises `alert done` with `last_assistant_message` (120 characters).
