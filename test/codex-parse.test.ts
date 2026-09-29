@@ -90,6 +90,7 @@ test('token_count gives context and primary/secondary usage windows', () => {
   });
   const rpcLimits = normalizeRateLimits({ limitId: 'codex', primary: { usedPercent: 2, windowDurationMins: 10080, resetsAt: null }, secondary: null });
   assert.deepEqual(rpcLimits && usageOf(rpcLimits, 'x').windows, [{ id: 'primary', usedPercent: 2, minutes: 10080 }]);
+  assert.deepEqual(rpcLimits && usageOf(rpcLimits, 'x', { id: 'acct', label: 'me' }).account, { id: 'acct', label: 'me' });
   assert.equal(normalizeRateLimits({ primary: null, secondary: null }), undefined);
 });
 
@@ -101,15 +102,19 @@ test('meta scan reads id, cwd, first prompt, turn state and latest rate limits',
   assert.equal(meta.id, '019a0000-0000-7000-8000-000000000001');
   assert.equal(meta.cwd, '/work/api');
   assert.equal(meta.version, '0.159.0');
+  assert.equal(meta.accountId, 'a1a1a1a1-0000-4000-8000-00000000000a');
   assert.equal(meta.subagent, false);
   assert.equal(meta.firstPrompt, '테스트가 왜 실패하는지 확인하고 고쳐줘');
   assert.equal(meta.turnOpen, false);
   assert.deepEqual(meta.context, { used: 40500, window: 258400 });
   assert.equal(meta.rateLimits?.at, '2026-09-29T09:00:09.000Z');
+  meta.reset();
+  assert.equal(meta.accountId, undefined);
 
   const sub = new CodexMetaScan();
   sub.line(JSON.stringify({ type: 'session_meta', payload: { id: 'x', cwd: '/w', source: { subagent: { thread_spawn: { depth: 1 } } } } }));
   assert.equal(sub.subagent, true);
+  assert.equal(sub.accountId, undefined, 'an older codex names no creator');
 });
 
 test('session_index: the last name per thread wins', () => {

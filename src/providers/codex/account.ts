@@ -2,10 +2,11 @@
 // claims of the id_token payload are read, and no token value leaves this module or gets logged.
 // Verified against Codex CLI 0.159.0.
 
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Account } from '../../protocol.ts';
 import { isNotFound, isObject, parseJson, str } from '../../util.ts';
+import type { CodexRpc } from './rpc.ts';
 
 const AUTH_CLAIM = 'https://api.openai.com/auth';
 
@@ -32,4 +33,77 @@ function jwtClaims(idToken: string): Account | undefined {
   const id = str(auth?.chatgpt_account_id);
   if (!id) return undefined;
   return { id, label: str(claims?.email) || id.slice(0, 8) };
+}
+
+export interface AccountsOptions {
+  /** Account id → email learned so far (`config.codexAccounts`). */
+  accounts?: Record<string, string>;
+  /** Called with the whole map whenever an email is learned. */
+  saveAccounts?: (accounts: Record<string, string>) => Promise<void>;
+  /** Account id → label chosen by the user (`config.labels`). */
+  labels?: Record<string, string>;
+}
+
+/** Labels for the account ids rollouts and the daemon name, learned from the home's login and kept in the config. */
+export class CodexAccounts {
+  readonly #labels: Record<string, string>;
+  readonly #save: ((accounts: Record<string, string>) => Promise<void>) | undefined;
+  #accounts: Record<string, string>;
+  /** mtime and size of `auth.json` as last read; it is re-read only when these change. */
+  #authStat: string | undefined;
+
+  constructor(options: AccountsOptions) {
+    this.#labels = options.labels ?? {};
+    this.#accounts = options.accounts ?? {};
+    this.#save = options.saveAccounts;
+  }
+
+  account(id: string): Account {
+    return { id, label: this.#labels[id] ?? this.#accounts[id] ?? id.slice(0, 8) };
+  }
+
+  /** Remembers an account's email so its threads keep their label after a restart. */
+  learn(id: string, email: string): void {
+    if (this.#accounts[id] === email) return;
+    this.#accounts = { ...this.#accounts, [id]: email };
+    this.#save?.(this.#accounts).catch((err: unknown) => console.error('wristline: codex: saving accounts failed:', err));
+  }
+
+  /** Learns the home's login from `auth.json` when the file changed. Never rejects. */
+  async poll(home: string): Promise<void> {
+    const path = join(home, 'auth.json');
+    let key = 'missing';
+    try {
+      const st = await stat(path);
+      key = `${st.mtimeMs}:${st.size}`;
+    } catch (err) {
+      if (!isNotFound(err)) key = 'unreadable';
+    }
+    if (key === this.#authStat) return;
+    this.#authStat = key; // Set first: an unreadable file is reported once, not every 2 s.
+    try {
+      const login = await readCodexLogin(home);
+      if (login) this.learn(login.id, login.label);
+    } catch (err) {
+      console.error(`wristline: codex: reading the login of ${home} failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * Who the daemon is logged in as, with its full rate limits: `account` is null for a login
+   * without an account id (API key); undefined when the limits could not be read.
+   */
+  async daemon(rpc: CodexRpc): Promise<{ account: Account | null; rateLimits: unknown } | undefined> {
+    // `account/read` only adds the email; a daemon without it still reports whose limits these are.
+    const [read, limits] = await Promise.allSettled([rpc.request('account/read'), rpc.request('account/rateLimits/read')]);
+    if (limits.status === 'rejected') {
+      console.error('wristline: codex account/rateLimits/read failed:', limits.reason instanceof Error ? limits.reason.message : limits.reason);
+      return undefined;
+    }
+    const response = isObject(limits.value) ? limits.value : {};
+    const id = str(response.accountId);
+    const email = read.status === 'fulfilled' && isObject(read.value) && isObject(read.value.account) ? str(read.value.account.email) : undefined;
+    if (id && email) this.learn(id, email);
+    return { account: id ? this.account(id) : null, rateLimits: response.rateLimits };
+  }
 }

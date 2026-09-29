@@ -1,14 +1,16 @@
-import { readdir, stat } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
-import type { Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
+import type { Account, Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
-import { isNotFound, isObject, str } from '../../util.ts';
+import { isObject, str } from '../../util.ts';
+import { CodexAccounts, type AccountsOptions } from './account.ts';
+import { codexAsk } from './ask.ts';
+import { daemonStatus, loadedThreadIds, type Ask, type Loaded } from './daemon.ts';
+import { scanRollouts, type RolloutFile } from './home.ts';
 import {
   CodexMetaScan,
   SessionIndex,
   applyItemCompleted,
-  codexAsk,
   itemDraft,
   mergeRateLimits,
   normalizeItem,
@@ -18,19 +20,12 @@ import {
   parseCodexLine,
   usageOf,
 } from './parse.ts';
-import type { CodexRpc, RateLimitSnapshot, RequestId, ServerRequest, ThreadStatus } from './rpc.ts';
+import type { CodexRpc, RateLimitSnapshot, RequestId, ServerRequest } from './rpc.ts';
 
 const REFRESH_MS = 2000;
 const DAY_MS = 24 * 3600_000;
 const IDLE_MS = 10 * 60_000;
 const HISTORY_MAX = 50;
-const ROLLOUT = /^rollout-.*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
-
-interface RolloutFile {
-  path: string;
-  mtimeMs: number;
-  size: number;
-}
 
 interface Meta {
   path: string;
@@ -39,25 +34,7 @@ interface Meta {
   tail: JsonlTail;
 }
 
-/** What the app-server daemon reports about a thread it has loaded. */
-interface Loaded {
-  status: ThreadStatus;
-  /** The thread that spawned this one (sub-agents); requests are shown on the parent's session. */
-  parent: string | undefined;
-  /** True once this client rejoined the thread (`thread/resume`) and receives its requests. */
-  joined: boolean;
-  joining?: Promise<boolean>;
-}
-
-/** An approval or question the watch was asked; aborted when the agent stops waiting. */
-interface Ask {
-  threadId: string;
-  turnId: string;
-  itemId: string;
-  abort: AbortController;
-}
-
-export interface CodexOptions {
+export interface CodexOptions extends AccountsOptions {
   home: string;
   historyDays: number;
   now?: () => number;
@@ -76,6 +53,7 @@ export class CodexProvider implements SessionProvider {
   readonly #home: string;
   readonly #historyDays: number;
   readonly #now: () => number;
+  readonly #accounts: CodexAccounts;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   readonly #index = new SessionIndex();
@@ -91,8 +69,11 @@ export class CodexProvider implements SessionProvider {
   #sessions = new Map<string, Session>();
   #files = new Map<string, RolloutFile>();
   #recent: [string, RolloutFile][] = [];
-  #usage: Usage | undefined;
+  /** Last usage published per account id (`''` without one). */
+  readonly #usage = new Map<string, Usage>();
   #daemonLimits: RateLimitSnapshot | undefined;
+  /** The daemon's login: null without an account id, undefined while unknown (disconnected, or being re-read). */
+  #daemonAccount: Account | null | undefined;
   #version: string | undefined;
   #found = false;
   #hub: Hub | undefined;
@@ -105,6 +86,7 @@ export class CodexProvider implements SessionProvider {
     this.#now = options.now ?? Date.now;
     this.#indexTail = new JsonlTail(join(this.#home, 'session_index.jsonl'), this.#index);
     this.#rpc = options.rpc;
+    this.#accounts = new CodexAccounts(options);
   }
 
   async start(hub: Hub): Promise<void> {
@@ -180,6 +162,7 @@ export class CodexProvider implements SessionProvider {
     this.#found = files !== undefined;
     this.#files = files ?? new Map();
     await this.#indexTail.sync();
+    await this.#accounts.poll(this.#home);
     const now = this.#now();
 
     const cutoff = now - this.#historyDays * DAY_MS;
@@ -190,21 +173,26 @@ export class CodexProvider implements SessionProvider {
     const ids = new Set(recent.map(([id]) => id));
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
 
-    let latest: CodexMetaScan['rateLimits'];
+    // The newest rate-limit snapshot per account (the thread's creator; `''` for rollouts naming none).
+    const latest = new Map<string, NonNullable<CodexMetaScan['rateLimits']>>();
     this.#version = undefined;
     for (const [id, file] of recent) {
       const meta = await this.#scan(id, file);
       if (meta.subagent) continue;
       this.#version ??= meta.version;
-      if (meta.rateLimits && (!latest || latest.at < meta.rateLimits.at)) latest = meta.rateLimits;
+      const key = meta.accountId ?? '';
+      if (meta.rateLimits && (latest.get(key)?.at ?? '') < meta.rateLimits.at) latest.set(key, meta.rateLimits);
     }
     this.#recent = recent;
     this.#publish();
 
-    // The daemon's numbers are live; rollouts only fill in while it is not connected.
-    if (latest && !this.#daemonLimits && (!this.#usage || latest.at > this.#usage.updatedAt)) {
-      this.#usage = usageOf(latest.snapshot, latest.at);
-      this.#hub?.usage(this.#usage);
+    // The daemon's numbers are live for its own account; rollouts fill in the others and while it is not connected.
+    const daemonKey = this.#daemonLimits ? (this.#daemonAccount?.id ?? '') : undefined;
+    for (const [key, limits] of latest) {
+      if (key === daemonKey || limits.at <= (this.#usage.get(key)?.updatedAt ?? '')) continue;
+      const usage = usageOf(limits.snapshot, limits.at, key ? this.#accounts.account(key) : undefined);
+      this.#usage.set(key, usage);
+      this.#hub?.usage(usage);
     }
     // A thread created by a TUI has no rollout until its first turn, so rejoining waits for it.
     for (const id of this.#loaded.keys()) if (this.#files.has(id)) void this.#join(id);
@@ -266,6 +254,7 @@ export class CodexProvider implements SessionProvider {
     };
     if (promptBlock) session.promptBlock = promptBlock;
     if (meta.context) session.context = meta.context;
+    if (meta.accountId) session.account = this.#accounts.account(meta.accountId);
     return session;
   }
 
@@ -274,14 +263,7 @@ export class CodexProvider implements SessionProvider {
   async #connected(): Promise<void> {
     const rpc = this.#rpc;
     if (!rpc) return;
-    const ids: string[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await rpc.request('thread/loaded/list', cursor ? { cursor } : {});
-      if (!isObject(page)) break;
-      if (Array.isArray(page.data)) ids.push(...page.data.filter((x): x is string => typeof x === 'string'));
-      cursor = str(page.nextCursor);
-    } while (cursor);
+    const ids = await loadedThreadIds(rpc);
     this.#loaded.clear();
     for (const id of ids) {
       let read: unknown;
@@ -292,12 +274,7 @@ export class CodexProvider implements SessionProvider {
       }
       this.#track(id, isObject(read) ? read.thread : undefined);
     }
-    try {
-      const limits = await rpc.request('account/rateLimits/read');
-      if (isObject(limits)) this.#limits(limits.rateLimits);
-    } catch (err) {
-      console.error('wristline: codex account/rateLimits/read failed:', err instanceof Error ? err.message : err);
-    }
+    await this.#syncAccount();
     this.#publish();
     for (const id of this.#loaded.keys()) if (this.#files.has(id)) void this.#join(id);
   }
@@ -309,7 +286,23 @@ export class CodexProvider implements SessionProvider {
     for (const ask of this.#asks.values()) ask.abort.abort();
     this.#asks.clear();
     this.#daemonLimits = undefined;
+    this.#daemonAccount = undefined;
     this.#publish();
+  }
+
+  /**
+   * Re-reads the daemon's login and its full limits. Meanwhile the login is unknown, so a sparse
+   * `account/rateLimits/updated` that arrives cannot be attributed and is dropped; the full
+   * snapshot read here carries its numbers again.
+   */
+  async #syncAccount(): Promise<void> {
+    if (!this.#rpc) return;
+    this.#daemonAccount = undefined;
+    this.#daemonLimits = undefined;
+    const daemon = await this.#accounts.daemon(this.#rpc);
+    if (!daemon) return;
+    this.#daemonAccount = daemon.account;
+    this.#limits(daemon.rateLimits);
   }
 
   /** Records a loaded thread from a Thread object (or just its id); ephemeral threads are skipped. */
@@ -354,12 +347,18 @@ export class CodexProvider implements SessionProvider {
     const snapshot = normalizeRateLimits(raw);
     // Other limit ids (e.g. a reserve model) are not the plan windows the TUI shows.
     if (!snapshot || (snapshot.limitId !== null && snapshot.limitId !== 'codex')) return;
+    if (this.#daemonAccount === undefined) return; // Whose limits these are is being re-read.
     this.#daemonLimits = mergeRateLimits(this.#daemonLimits, snapshot);
-    this.#usage = usageOf(this.#daemonLimits, new Date(this.#now()).toISOString());
-    this.#hub?.usage(this.#usage);
+    const usage = usageOf(this.#daemonLimits, new Date(this.#now()).toISOString(), this.#daemonAccount ?? undefined);
+    this.#usage.set(this.#daemonAccount?.id ?? '', usage);
+    this.#hub?.usage(usage);
   }
 
   #notification(method: string, params: unknown): void {
+    if (method === 'account/updated' || method === 'account/login/completed') {
+      this.#syncAccount().catch((err: unknown) => console.error('wristline: codex account sync failed:', err));
+      return;
+    }
     if (!isObject(params)) return;
     const threadId = str(params.threadId);
     switch (method) {
@@ -458,33 +457,4 @@ export class CodexProvider implements SessionProvider {
     const file = this.#sessions.has(nativeId) ? this.#files.get(nativeId) : undefined;
     return file && this.#transcripts.get(nativeId, () => new Transcript(file.path, parseCodexLine));
   }
-}
-
-function daemonStatus(status: ThreadStatus): SessionStatus {
-  if (status.type !== 'active') return 'idle';
-  return status.activeFlags.length > 0 ? 'needs_input' : 'running';
-}
-
-/** Maps thread id to its rollout; undefined when sessions/ is missing. */
-async function scanRollouts(dir: string): Promise<Map<string, RolloutFile> | undefined> {
-  let names: string[];
-  try {
-    names = await readdir(dir, { recursive: true });
-  } catch (err) {
-    if (isNotFound(err)) return undefined;
-    throw err;
-  }
-  const files = new Map<string, RolloutFile>();
-  for (const name of names) {
-    const id = ROLLOUT.exec(basename(name))?.[1];
-    if (!id) continue;
-    const path = join(dir, name);
-    try {
-      const st = await stat(path);
-      files.set(id.toLowerCase(), { path, mtimeMs: st.mtimeMs, size: st.size });
-    } catch {
-      // Deleted between readdir and stat.
-    }
-  }
-  return files;
 }

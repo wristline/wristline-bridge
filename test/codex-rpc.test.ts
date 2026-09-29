@@ -6,7 +6,7 @@ import { after, test } from 'node:test';
 import { PendingRegistry } from '../src/pending.ts';
 import type { PendingRequest, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub } from '../src/provider.ts';
-import { codexAsk } from '../src/providers/codex/parse.ts';
+import { codexAsk } from '../src/providers/codex/ask.ts';
 import { CodexProvider } from '../src/providers/codex/provider.ts';
 import { CodexRpc, RpcError, type ServerRequest } from '../src/providers/codex/rpc.ts';
 
@@ -313,4 +313,44 @@ test('codex provider: daemon status, usage, approvals, questions and prompts for
   await waitFor(() => session(loaded)?.promptBlock === undefined);
 
   assert.ok(!resumes().includes(other), 'a thread the daemon has not loaded is never resumed');
+});
+
+test('codex provider: daemon usage carries the login\'s account; an update during a login change waits for the re-read', async (t) => {
+  const home = join(root, 'codex-accounts');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const thread = '019a0000-0000-7000-8000-00000000000c';
+  copyFileSync(new URL('./fixtures/codex/rollout.jsonl', import.meta.url), join(day, `rollout-2026-09-29T09-00-00-${thread}.jsonl`));
+  const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
+  const limits = (usedPercent: number): unknown => ({ limitId: 'codex', primary: { usedPercent, windowDurationMins: 10080, resetsAt: null }, secondary: null });
+  const sparse = { rateLimits: { limitId: 'codex', primary: null, secondary: { usedPercent: 40, windowDurationMins: 300, resetsAt: null } } };
+  const { rpc } = fakeRpc('accounts', { account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' }, accountId: A, rateLimits: limits(2), accountDelayMs: 150 });
+  const saved: Record<string, string>[] = [];
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, labels: { [B]: 'school' }, saveAccounts: async (a) => void saved.push(a) });
+  const hub = recordingHub();
+  t.after(() => provider.stop());
+  await provider.start(hub);
+  const brief = (u: Usage): unknown => [u.account?.id ?? '', u.account?.label, u.windows.map((w) => [w.id, w.usedPercent])];
+  // The rollout's snapshot goes out first (the email is not known yet), then the daemon's, labelled with account/read's email.
+  await waitFor(() => hub.usages.length >= 2);
+  assert.deepEqual(hub.usages.map(brief), [
+    [A, 'a1a1a1a1', [['primary', 12.5], ['secondary', 40]]],
+    [A, 'a@example.com', [['primary', 2]]],
+  ]);
+  assert.deepEqual(saved, [{ [A]: 'a@example.com' }]);
+  await waitFor(() => provider.listSessions()[0]?.account?.label === 'a@example.com');
+
+  // Another login: the sparse update that arrives before the new login is read is dropped rather than attributed to A.
+  await rpc.request('fake/state', { account: { type: 'chatgpt', email: 'b@example.com', planType: 'plus' }, accountId: B, rateLimits: limits(50) });
+  const notify = (method: string, params: unknown): Promise<unknown> => rpc.request('fake/notify', { method, params });
+  await notify('account/updated', { authMode: 'chatgpt' });
+  await notify('account/rateLimits/updated', sparse);
+  await waitFor(() => hub.usages.at(-1)?.account?.id === B);
+  assert.deepEqual(hub.usages.slice(2).map(brief), [[B, 'school', [['primary', 50]]]]);
+  await notify('account/rateLimits/updated', sparse);
+  assert.deepEqual(hub.usages.slice(2).map(brief), [
+    [B, 'school', [['primary', 50]]],
+    [B, 'school', [['primary', 50], ['secondary', 40]]],
+  ]);
+  assert.deepEqual(saved.at(-1), { [A]: 'a@example.com', [B]: 'b@example.com' });
 });

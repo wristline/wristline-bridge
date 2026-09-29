@@ -74,7 +74,31 @@ test('claude-code: live registry entries, history, titles and live items', async
   }
 });
 
-test('codex: rollouts with index titles, sub-agents hidden, usage from token_count', async () => {
+/** The `creator_account_id` of the fixture rollout. */
+const CODEX_A = 'a1a1a1a1-0000-4000-8000-00000000000a';
+const CODEX_B = 'b2b2b2b2-0000-4000-8000-00000000000b';
+
+/** A rollout of one thread with one rate-limit snapshot; `creator` is absent in rollouts of codex < 0.157. */
+function codexRollout(id: string, creator: string | undefined, usedPercent: number): string {
+  const lines = [
+    { timestamp: '2026-09-29T09:10:00.000Z', type: 'session_meta', payload: { id, cwd: '/w', cli_version: '0.159.0', ...(creator ? { creator_account_id: creator } : {}) } },
+    {
+      timestamp: '2026-09-29T09:10:01.000Z',
+      type: 'event_msg',
+      payload: { type: 'token_count', info: null, rate_limits: { limit_id: 'codex', primary: { used_percent: usedPercent, window_minutes: 300, resets_at: 1790683200 }, secondary: null } },
+    },
+  ];
+  return lines.map((l) => `${JSON.stringify(l)}\n`).join('');
+}
+
+/** An `auth.json` like Codex writes for a ChatGPT login, with an unsigned id_token; the other token values must never surface. */
+function codexAuth(accountId: string, email: string): string {
+  const segment = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const idToken = `${segment({ alg: 'none', typ: 'JWT' })}.${segment({ email, 'https://api.openai.com/auth': { chatgpt_account_id: accountId } })}.signature`;
+  return JSON.stringify({ auth_mode: 'chatgpt', tokens: { id_token: idToken, access_token: 'ACCESS-SECRET', refresh_token: 'REFRESH-SECRET' } });
+}
+
+test('codex: rollouts with index titles, sub-agents hidden, threads and usage labelled by creator account', async () => {
   const home = join(root, 'codex');
   const day = join(home, 'sessions', '2026', '09', '29');
   mkdirSync(day, { recursive: true });
@@ -85,16 +109,22 @@ test('codex: rollouts with index titles, sub-agents hidden, usage from token_cou
     join(day, `rollout-2026-09-29T09-05-00-${sub}.jsonl`),
     `${JSON.stringify({ type: 'session_meta', payload: { id: sub, cwd: '/work/api', source: { subagent: { thread_spawn: { depth: 1 } } } } })}\n`,
   );
+  // A thread of a second account (the home's current login) and one from an older codex that names no creator.
+  const [other, legacy] = ['019a0000-0000-7000-8000-000000000003', '019a0000-0000-7000-8000-000000000004'];
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${other}.jsonl`), codexRollout(other, CODEX_B, 55));
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${legacy}.jsonl`), codexRollout(legacy, undefined, 7));
+  writeFileSync(join(home, 'auth.json'), codexAuth(CODEX_B, 'b@example.com'));
   writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id, thread_name: 'Fix API tests', updated_at: '2026-09-29T09:00:00Z' })}\n`);
 
-  const provider = new CodexProvider({ home, historyDays: 7 });
+  const saved: Record<string, string>[] = [];
+  const provider = new CodexProvider({ home, historyDays: 7, accounts: { [CODEX_A]: 'a@example.com' }, labels: { [CODEX_A]: 'me' }, saveAccounts: async (a) => void saved.push(a) });
   const hub = recordingHub();
   await provider.start(hub);
   try {
     const sessions = provider.listSessions();
-    assert.equal(sessions.length, 1);
+    assert.equal(sessions.length, 3);
     assert.deepEqual(
-      { ...sessions[0], lastActivity: undefined },
+      { ...sessions.find((s) => s.id === `codex:${id}`), lastActivity: undefined },
       {
         id: `codex:${id}`,
         provider: 'codex',
@@ -104,10 +134,24 @@ test('codex: rollouts with index titles, sub-agents hidden, usage from token_cou
         lastActivity: undefined,
         promptBlock: 'unsupported',
         context: { used: 40500, window: 258400 },
+        account: { id: CODEX_A, label: 'me' },
       },
     );
+    const account = (tid: string): Session['account'] => sessions.find((s) => s.id === `codex:${tid}`)?.account;
+    assert.deepEqual(account(other), { id: CODEX_B, label: 'b@example.com' }, 'the email learned from auth.json');
+    assert.equal(account(legacy), undefined, 'no creator id: no guess');
+    assert.deepEqual(saved, [{ [CODEX_A]: 'a@example.com', [CODEX_B]: 'b@example.com' }]);
     assert.deepEqual(provider.health(), { id: 'codex', status: 'ok', version: '0.159.0' });
-    assert.deepEqual(hub.usages.map((u) => u.windows.map((w) => w.id)), [['primary', 'secondary']]);
+    // One usage entry per account, from that account's newest snapshot.
+    const usages = hub.usages.map((u) => [u.account?.id ?? '', u.account?.label, u.windows.map((w) => [w.id, w.usedPercent])]).sort();
+    assert.deepEqual(usages, [
+      ['', undefined, [['primary', 7]]],
+      [CODEX_A, 'me', [['primary', 12.5], ['secondary', 40]]],
+      [CODEX_B, 'b@example.com', [['primary', 55]]],
+    ]);
+    assert.equal(JSON.stringify([sessions, hub.usages, saved]).includes('SECRET'), false, 'no token value leaves auth.json');
+    await provider.refresh();
+    assert.equal(hub.usages.length, 3, 'unchanged snapshots are not re-published');
     const page = await provider.readItems(id, undefined, 40);
     assert.equal(page?.items.length, 6);
   } finally {

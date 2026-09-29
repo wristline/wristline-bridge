@@ -1,7 +1,8 @@
 // Stands in for `codex app-server proxy` in tests: a WebSocket server on stdio that answers like
 // the Codex app-server daemon. argv: <state JSON> <log file>. Every message it receives is
 // appended to the log file. Test-only methods: fake/notify {method, params} sends a notification,
-// fake/request {method, params} sends a server request and returns its id, fake/exit quits.
+// fake/request {method, params} sends a server request and returns its id, fake/state {...} changes
+// the state (e.g. the login) for later requests, fake/exit quits.
 import { appendFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { Duplex } from 'node:stream';
@@ -11,9 +12,14 @@ interface State {
   loaded: string[];
   threads: Record<string, Record<string, unknown>>;
   rateLimits: unknown;
+  /** `account/read`'s account and `account/rateLimits/read`'s accountId. */
+  account: unknown;
+  accountId: string | null;
+  /** Delays the two account reads, for what arrives while a login is being re-read. */
+  accountDelayMs: number;
 }
 
-const state: State = { loaded: [], threads: {}, rateLimits: null, ...(JSON.parse(process.argv[2] ?? '{}') as Partial<State>) };
+const state: State = { loaded: [], threads: {}, rateLimits: null, account: null, accountId: null, accountDelayMs: 0, ...(JSON.parse(process.argv[2] ?? '{}') as Partial<State>) };
 const logFile = process.argv[3];
 let nextServerId = 0;
 
@@ -42,8 +48,13 @@ wss.on('connection', (ws) => {
         return reply({ thread: { id: threadId } });
       case 'turn/start':
         return reply({ turn: { id: 'turn-new', items: [], status: 'inProgress' } });
+      case 'account/read':
+        return void setTimeout(() => reply({ account: state.account }), state.accountDelayMs);
       case 'account/rateLimits/read':
-        return reply({ rateLimits: state.rateLimits });
+        return void setTimeout(() => reply({ rateLimits: state.rateLimits, accountId: state.accountId }), state.accountDelayMs);
+      case 'fake/state':
+        Object.assign(state, p);
+        return reply({});
       case 'fake/notify':
         ws.send(JSON.stringify({ method: p.method, params: p.params, emittedAtMs: Date.now() }));
         return reply({});
