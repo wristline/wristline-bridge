@@ -49,3 +49,42 @@ test('invalid values in config.json are ignored, invalid JSON is an error', asyn
   writeFileSync(join(dir, 'config.json'), '{');
   await assert.rejects(readStored(dir), /not valid JSON/);
 });
+
+test('claudeHomes/codexHomes: primary first, extras deduplicated by resolved path; env and flag only move the primary', () => {
+  const home = '/home/u';
+  const stored = {
+    claudeHome: '/home/u/.claude',
+    extraClaudeHomes: ['/home/u/.claude-school', '/home/u/.claude/', '/home/u/.claude-school'],
+    extraCodexHomes: ['/home/u/.codex-school'],
+  };
+  assert.deepEqual(resolveConfig(stored, {}, {}, home).claudeHomes, ['/home/u/.claude', '/home/u/.claude-school']);
+  assert.deepEqual(resolveConfig(stored, {}, {}, home).codexHomes, ['/home/u/.codex', '/home/u/.codex-school']);
+  const env = resolveConfig(stored, {}, { CLAUDE_CONFIG_DIR: '/env' }, home);
+  assert.deepEqual([env.claudeHome, env.claudeHomes], ['/env', ['/env', '/home/u/.claude-school', '/home/u/.claude/']], 'the old primary is now a distinct extra');
+  const flag = resolveConfig(stored, { claudeHome: '/home/u/.claude-school' }, { CLAUDE_CONFIG_DIR: '/env' }, home);
+  assert.deepEqual(flag.claudeHomes, ['/home/u/.claude-school', '/home/u/.claude/']);
+  const defaults = resolveConfig({}, {}, {}, home);
+  assert.deepEqual(
+    [defaults.claudeHomes, defaults.codexHomes, defaults.claudeLogins, defaults.codexAccounts, defaults.labels],
+    [['/home/u/.claude'], ['/home/u/.codex'], {}, {}, {}],
+  );
+});
+
+test('account lists round-trip through config.json; malformed shapes are dropped', async () => {
+  const dir = join(root, 'accounts');
+  const claudeLogins = { '/home/u/.claude': [{ at: '2026-09-30T01:00:00.000Z', id: 'acc-a', label: 'a@example.com' }] };
+  const stored = { extraClaudeHomes: ['/home/u/.claude-school'], extraCodexHomes: [], claudeLogins, codexAccounts: { 'acc-x': 'x@example.com' }, labels: { 'acc-a': 'me' } };
+  await updateStored(dir, stored);
+  assert.deepEqual(await readStored(dir), stored);
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      extraClaudeHomes: ['/ok', 1, null],
+      extraCodexHomes: 'no',
+      claudeLogins: { '/ok': [{ at: 't', id: 'i', label: 'l' }, { at: 1, id: 'i', label: 'l' }, 'x'], '/bad': 'no' },
+      codexAccounts: { ok: 'e', bad: 1 },
+      labels: ['x'],
+    }),
+  );
+  assert.deepEqual(await readStored(dir), { extraClaudeHomes: ['/ok'], claudeLogins: { '/ok': [{ at: 't', id: 'i', label: 'l' }] }, codexAccounts: { ok: 'e' } });
+});

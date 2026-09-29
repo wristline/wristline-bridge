@@ -84,6 +84,17 @@ export interface RateLimitSnapshot {
   secondary: RateLimitWindow | null;
 }
 
+/** `account/read`: `null` before a login. Only `chatgpt` logins have an account id (from `account/rateLimits/read`). */
+export interface GetAccountResponse {
+  account: { type: 'chatgpt'; email: string; planType: string } | { type: 'apiKey' } | { type: 'amazonBedrock' } | null;
+}
+
+/** `account/rateLimits/read`: `accountId` is the `chatgpt_account_id` the limits belong to, `null` for API-key logins. */
+export interface GetAccountRateLimitsResponse {
+  rateLimits: RateLimitSnapshot;
+  accountId: string | null;
+}
+
 // JSON-RPC client
 
 const REQUEST_TIMEOUT_MS = 30_000;

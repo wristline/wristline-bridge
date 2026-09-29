@@ -48,7 +48,12 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   applies. `context` is `{used, window}` in tokens. A further code, `unsafe_prefix`, is only
   returned by `POST …/prompt` (never as `promptBlock`): Claude Code prompts whose first
   non-space character is `!` would run as a shell command and are refused. Clients show unknown
-  codes with a generic message.
+  codes with a generic message. `account`, when present, is the account the session belongs to.
+- **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
+  `label` is a short name for people (a label set with `accounts add --label`, else the email,
+  else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
+  (Claude Code only) marks an attribution inferred from the home's login timeline rather than
+  known for certain. A missing `account` means a single or unknown account.
 - **Item** — one entry of a conversation: `kind` is `user`, `assistant`, `tool` or `notice`.
   `seq` starts at 1 and orders items within a session; an updated item (e.g. a tool that finished)
   is sent again with the same `seq`. `text` is at most 4000 UTF-16 code units, `detail` (tool
@@ -62,8 +67,11 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   when answered in the terminal or when the agent stops waiting.
 - **Answers** — `{ "<questionId>": ["<optionId>", ...] }`, every question answered, exactly one
   option for a question with `multi: false`.
-- **Usage** — per provider: `windows[]` with `id` (`5h`/`7d` for Claude Code,
+- **Usage** — per provider and account: `windows[]` with `id` (`5h`/`7d` for Claude Code,
   `primary`/`secondary` for Codex), `usedPercent`, optional `resetsAt` (ISO 8601) and `minutes`.
+  A usage entry is identified by `provider` plus `account.id` (empty when `account` is absent); a
+  `usage` event replaces the entry with the same key. Once a provider reports a labelled entry, the
+  bridge drops that provider's unlabelled one (a watch sees it go on its next `snapshot`).
 
 All timestamps are ISO 8601 in UTC.
 

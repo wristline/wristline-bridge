@@ -1,6 +1,9 @@
 // Wire format of the Wristline protocol, apiVersion 1.
 // This file is the single source of truth: a change here must update docs/protocol.md and
 // protocol/v1/*.json (`UPDATE_FIXTURES=1 npm test`) in the same commit.
+//
+// Usage identity: a Usage is identified by `provider` plus `account?.id ?? ''`; a `usage` event
+// replaces the entry with the same key. No `account` means a single or unknown account.
 
 export const API_VERSION = 1;
 /** Upper bounds (UTF-16 code units) the bridge enforces before sending text to the watch. */
@@ -11,6 +14,15 @@ export type ProviderId = 'claude-code' | 'codex';
 export type SessionStatus = 'running' | 'idle' | 'needs_input' | 'ended';
 /** `unsafe_prefix` is only ever a prompt error (409), never a session's `promptBlock`. */
 export type PromptBlock = 'not_live' | 'no_tmux' | 'awaiting_input' | 'busy' | 'unsupported' | 'unsafe_prefix';
+
+export interface Account {
+  /** Claude Code: `oauthAccount.accountUuid`; Codex: `chatgpt_account_id` (a rollout's `creator_account_id`, `account/rateLimits/read`'s `accountId`). */
+  id: string;
+  /** `config.labels[id]`, else the email, else the organization name, else `id.slice(0, 8)`. Never empty. */
+  label: string;
+  /** Claude Code only: inferred from the home's login timeline rather than known for certain. */
+  estimated?: boolean;
+}
 
 export interface Session {
   /** `<provider>:<nativeId>` */
@@ -25,6 +37,8 @@ export interface Session {
   /** Present when `POST /api/sessions/:sid/prompt` would be refused. */
   promptBlock?: PromptBlock;
   context?: { used: number; window: number };
+  /** Absent for a single or unknown account. */
+  account?: Account;
 }
 
 export type ItemKind = 'user' | 'assistant' | 'tool' | 'notice';
@@ -84,6 +98,8 @@ export interface Usage {
   provider: ProviderId;
   updatedAt: string;
   windows: UsageWindow[];
+  /** Absent for a single or unknown account (see the identity rule in the header). */
+  account?: Account;
 }
 
 export type ResolvedBy = 'watch' | 'terminal' | 'timeout';

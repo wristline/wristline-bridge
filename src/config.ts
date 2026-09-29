@@ -1,6 +1,6 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { isNotFound, isObject, num, str, type JsonObject } from './util.ts';
 
 export interface Device {
@@ -16,6 +16,13 @@ export interface Bins {
   tailscale?: string;
 }
 
+/** A login the bridge saw in a Claude Code home; `at` is when the bridge first observed it (not a file mtime). */
+export interface LoginEntry {
+  at: string;
+  id: string;
+  label: string;
+}
+
 export interface Config {
   apiPort: number;
   hookPort: number;
@@ -24,13 +31,25 @@ export interface Config {
   devices: Device[];
   claudeHome: string;
   codexHome: string;
+  /** `[claudeHome, ...extraClaudeHomes]` without duplicates; one provider instance runs per home. */
+  claudeHomes: string[];
+  codexHomes: string[];
+  /** Claude home → logins observed there, oldest first. */
+  claudeLogins: Record<string, LoginEntry[]>;
+  /** Codex `chatgpt_account_id` → email. */
+  codexAccounts: Record<string, string>;
+  /** Account id → short label chosen by the user. */
+  labels: Record<string, string>;
   bins: Bins;
   permissionWaitSec: number;
   historyDays: number;
 }
 
 /** What `config.json` holds; every key is optional. */
-export type StoredConfig = Partial<Config>;
+export interface StoredConfig extends Partial<Omit<Config, 'claudeHomes' | 'codexHomes'>> {
+  extraClaudeHomes?: string[];
+  extraCodexHomes?: string[];
+}
 
 /** Values given on the command line; they beat env, config.json and defaults. */
 export interface Flags {
@@ -53,18 +72,34 @@ export function configPath(dir: string): string {
 
 /** Precedence: CLI flag > env (CLAUDE_CONFIG_DIR, CODEX_HOME) > config.json > default. */
 export function resolveConfig(stored: StoredConfig, flags: Flags = {}, env: Env = process.env, home = homedir()): Config {
+  const claudeHome = flags.claudeHome ?? (env.CLAUDE_CONFIG_DIR || undefined) ?? stored.claudeHome ?? join(home, '.claude');
+  const codexHome = flags.codexHome ?? (env.CODEX_HOME || undefined) ?? stored.codexHome ?? join(home, '.codex');
   return {
     apiPort: flags.apiPort ?? stored.apiPort ?? 47770,
     hookPort: flags.hookPort ?? stored.hookPort ?? 47771,
     publicUrl: stored.publicUrl,
     hookToken: stored.hookToken,
     devices: stored.devices ?? [],
-    claudeHome: flags.claudeHome ?? (env.CLAUDE_CONFIG_DIR || undefined) ?? stored.claudeHome ?? join(home, '.claude'),
-    codexHome: flags.codexHome ?? (env.CODEX_HOME || undefined) ?? stored.codexHome ?? join(home, '.codex'),
+    claudeHome,
+    codexHome,
+    claudeHomes: homes(claudeHome, stored.extraClaudeHomes),
+    codexHomes: homes(codexHome, stored.extraCodexHomes),
+    claudeLogins: stored.claudeLogins ?? {},
+    codexAccounts: stored.codexAccounts ?? {},
+    labels: stored.labels ?? {},
     bins: stored.bins ?? {},
     permissionWaitSec: stored.permissionWaitSec ?? 590,
     historyDays: stored.historyDays ?? 7,
   };
+}
+
+/** The primary first, then the extras that name a different directory (compared as resolved paths). */
+function homes(primary: string, extra: string[] | undefined): string[] {
+  const out: string[] = [];
+  for (const home of [primary, ...(extra ?? [])]) {
+    if (!out.some((h) => resolve(h) === resolve(home))) out.push(home);
+  }
+  return out;
 }
 
 export async function readStored(dir: string): Promise<StoredConfig> {
@@ -128,6 +163,11 @@ function pickStored(raw: JsonObject): StoredConfig {
   set('permissionWaitSec', positive(raw.permissionWaitSec));
   set('historyDays', positive(raw.historyDays));
   if (Array.isArray(raw.devices)) set('devices', raw.devices.filter(isDevice));
+  if (Array.isArray(raw.extraClaudeHomes)) set('extraClaudeHomes', raw.extraClaudeHomes.filter(isString));
+  if (Array.isArray(raw.extraCodexHomes)) set('extraCodexHomes', raw.extraCodexHomes.filter(isString));
+  if (isObject(raw.claudeLogins)) set('claudeLogins', pickRecord(raw.claudeLogins, (v) => (Array.isArray(v) ? v.filter(isLoginEntry) : undefined)));
+  if (isObject(raw.codexAccounts)) set('codexAccounts', pickRecord(raw.codexAccounts, str));
+  if (isObject(raw.labels)) set('labels', pickRecord(raw.labels, str));
   if (isObject(raw.bins)) {
     const bins = raw.bins;
     const picked: Bins = {};
@@ -148,4 +188,22 @@ function isDevice(value: unknown): value is Device {
     typeof value.tokenSha256 === 'string' &&
     typeof value.createdAt === 'string'
   );
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isLoginEntry(value: unknown): value is LoginEntry {
+  return isObject(value) && typeof value.at === 'string' && typeof value.id === 'string' && typeof value.label === 'string';
+}
+
+/** Keeps the keys whose value `pick` accepts. */
+function pickRecord<T>(raw: JsonObject, pick: (value: unknown) => T | undefined): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const picked = pick(value);
+    if (picked !== undefined) out[key] = picked;
+  }
+  return out;
 }
