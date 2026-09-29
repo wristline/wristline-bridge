@@ -2,7 +2,8 @@ import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { Auth, type AuthOptions } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
-import type { Item, ItemPage, ProviderHealth, ServerEvent, Session } from '../src/protocol.ts';
+import { PendingRegistry } from '../src/pending.ts';
+import type { Item, ItemPage, ProviderHealth, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.ts';
 import { hookHandlers } from '../src/providers/claude-code/hooks.ts';
 import { startServer, type RunningServer } from '../src/server.ts';
@@ -42,6 +43,35 @@ export class FakeProvider implements SessionProvider {
     if (text.startsWith('!')) throw new PromptBlocked('unsafe_prefix');
     const block = this.sessions.find((s) => s.id.endsWith(nativeId))?.promptBlock;
     if (block) throw new PromptBlocked(block);
+  }
+}
+
+/** A hub that records what a provider publishes. */
+export function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; removedIds: string[]; resolved: string[] } {
+  const sessions: Session[] = [];
+  const usages: Usage[] = [];
+  const removedIds: string[] = [];
+  const resolved: string[] = [];
+  return {
+    sessions,
+    usages,
+    removedIds,
+    resolved,
+    session: (s) => sessions.push(s),
+    removed: (id) => removedIds.push(id),
+    usage: (u) => usages.push(u),
+    alert: () => {},
+    pending: new PendingRegistry({ onRequest: () => {}, onResolved: (r, by: ResolvedBy) => resolved.push(`${r.id}:${by}`) }),
+  };
+}
+
+export async function waitFor<T>(get: () => T | undefined, ms = 5000): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = get();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error('timed out');
+    await new Promise((r) => setTimeout(r, 20));
   }
 }
 

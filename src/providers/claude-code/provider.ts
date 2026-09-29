@@ -1,43 +1,34 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
+import type { LoginEntry } from '../../config.ts';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
-import type { Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
+import type { Account, Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
-import { isNotFound, isObject, num, str } from '../../util.ts';
+import { isNotFound, isObject, str } from '../../util.ts';
+import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, statuslineFingerprint } from './account.ts';
 import { ClaudeMetaScan, parseClaudeLine, sessionTitle, statuslineContext, statuslineUsage } from './parse.ts';
+import {
+  descendsFrom,
+  isLive,
+  mapStatus,
+  pidAlive,
+  readEntry,
+  readRegistry,
+  sameProcess,
+  scanTranscripts,
+  tmuxPane,
+  type RegistryEntry,
+  type TranscriptFile,
+} from './home.ts';
 
 const REFRESH_MS = 2000;
-const LIVE_MAX_AGE_MS = 24 * 3600_000;
 const DAY_MS = 24 * 3600_000;
 const HISTORY_MAX = 50;
 const DEFAULT_WINDOW = 200_000;
 const EXTENDED_WINDOW = 1_000_000;
 const TMUX_TIMEOUT_MS = 5000;
-/** Without procfs (macOS) the registry's pid is trusted; with it, an unreadable process has exited. */
-const HAS_PROCFS = existsSync('/proc/self/stat');
-
-interface RegistryEntry {
-  pid: number;
-  sessionId: string;
-  cwd: string | undefined;
-  name: string | undefined;
-  nameSource: string | undefined;
-  status: string | undefined;
-  tmux: string | undefined;
-  updatedAt: number;
-  statusUpdatedAt: number;
-  procStart: string | undefined;
-  version: string | undefined;
-}
-
-interface TranscriptFile {
-  path: string;
-  mtimeMs: number;
-  size: number;
-}
 
 interface Meta {
   path: string;
@@ -66,19 +57,37 @@ export interface ClaudeOptions {
   tmux?: string;
   exec?: Exec;
   now?: () => number;
+  /** Logins observed in this home so far (`config.claudeLogins[home]`), oldest first. */
+  logins?: LoginEntry[];
+  /** Called with the whole list whenever a login is added or relabelled. */
+  saveLogins?: (logins: LoginEntry[]) => Promise<void>;
+  /** Account id → label chosen by the user (`config.labels`). */
+  labels?: Record<string, string>;
 }
 
 export class ClaudeCodeProvider implements SessionProvider {
   readonly id = 'claude-code';
-  readonly #home: string;
+  readonly home: string;
   readonly #historyDays: number;
   readonly #now: () => number;
   readonly #tmux: string;
   readonly #exec: Exec;
+  readonly #saveLogins: ((logins: LoginEntry[]) => Promise<void>) | undefined;
+  readonly #labels: Record<string, string>;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   /** Context reported by the statusLine, by session id; `at` is when the report arrived. */
   readonly #statusContext = new Map<string, { used?: number; window?: number; at: number }>();
+  /** statusLine fingerprint (`resets_at`) → account id, learned from processes born after the login was observed. */
+  readonly #fingerprints = new Map<string, string>();
+  /** Session id → account id known for certain (via a learned fingerprint). */
+  readonly #sessionAccounts = new Map<string, string>();
+  #logins: LoginEntry[];
+  /** Path, mtime and size of `.claude.json` as last read; it is re-parsed only when these change. */
+  #loginStat: string | undefined;
+  #polling: Promise<void> | undefined;
+  /** Newest registry entry per session id, from the last refresh. */
+  #registry = new Map<string, RegistryEntry>();
   #sessions = new Map<string, Session>();
   /** tmux panes of live sessions that can take a prompt, by session id. */
   #panes = new Map<string, Pane>();
@@ -91,11 +100,14 @@ export class ClaudeCodeProvider implements SessionProvider {
   #refreshing = false;
 
   constructor(options: ClaudeOptions) {
-    this.#home = options.home;
+    this.home = options.home;
     this.#historyDays = options.historyDays;
     this.#now = options.now ?? Date.now;
     this.#tmux = options.tmux ?? 'tmux';
     this.#exec = options.exec ?? defaultExec;
+    this.#logins = options.logins ?? [];
+    this.#saveLogins = options.saveLogins;
+    this.#labels = options.labels ?? {};
   }
 
   async start(hub: Hub): Promise<void> {
@@ -119,6 +131,10 @@ export class ClaudeCodeProvider implements SessionProvider {
 
   listSessions(): Session[] {
     return [...this.#sessions.values()];
+  }
+
+  hasSession(nativeId: string): boolean {
+    return this.#sessions.has(nativeId);
   }
 
   async readItems(nativeId: string, before: number | undefined, limit: number): Promise<ItemPage | undefined> {
@@ -146,7 +162,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     // The snapshot is up to 2 s old: since then the process may have exited (the pane then shows
     // a shell) or a dialog may have opened, which Enter would answer with its default option.
     if (!pidAlive(pane.pid) || !sameProcess(pane)) throw new PromptBlocked('not_live');
-    const entry = await readEntry(join(this.#home, 'sessions', `${pane.pid}.json`));
+    const entry = await readEntry(join(this.home, 'sessions', `${pane.pid}.json`));
     if (entry?.sessionId !== nativeId) throw new PromptBlocked('not_live');
     const block = promptBlock(mapStatus(entry.status), tmuxPane(entry.tmux) === pane.id);
     if (block) throw new PromptBlocked(block);
@@ -173,11 +189,16 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (inMode === '1') throw new PromptBlocked('busy');
   }
 
-  /** Receives the statusLine JSON relayed to the local listener. */
-  statusline(input: unknown): void {
+  /** Receives the statusLine JSON relayed to the local listener. Never rejects. */
+  async statusline(input: unknown): Promise<void> {
     if (!isObject(input)) return;
+    await this.#pollLogin();
     const usage = statuslineUsage(input, this.#now());
-    if (usage) this.#hub?.usage(usage);
+    if (usage) {
+      const account = this.#usageAccount(str(input.session_id), statuslineFingerprint(input));
+      if (account) usage.account = account;
+      this.#hub?.usage(usage);
+    }
     const ctx = statuslineContext(input);
     if (!ctx) return;
     const window = ctx.window ?? this.#statusContext.get(ctx.sessionId)?.window;
@@ -188,6 +209,59 @@ export class ClaudeCodeProvider implements SessionProvider {
       session.context = context;
       this.#hub?.session(session);
     }
+  }
+
+  /** A learned fingerprint names the account for certain; otherwise the report goes to the home's current login. */
+  #usageAccount(sessionId: string | undefined, fingerprint: string | undefined): Account | undefined {
+    let id = fingerprint === undefined ? undefined : this.#fingerprints.get(fingerprint);
+    let exact = id !== undefined;
+    if (id === undefined) {
+      const current = this.#logins.at(-1);
+      if (!current) return undefined;
+      id = current.id;
+      const startedAt = sessionId === undefined ? undefined : this.#registry.get(sessionId)?.startedAt;
+      // Only a process born after the login was observed teaches its fingerprint; an older one may still run under an earlier login.
+      if (fingerprint !== undefined && startedAt !== undefined && startedAt >= Date.parse(current.at)) {
+        this.#fingerprints.set(fingerprint, id);
+        exact = true;
+      }
+    }
+    if (exact && sessionId !== undefined) this.#sessionAccounts.set(sessionId, id);
+    return this.#account(id, !exact);
+  }
+
+  #account(id: string, estimated: boolean): Account {
+    const label = this.#labels[id] ?? this.#logins.findLast((login) => login.id === id)?.label ?? id.slice(0, 8);
+    return estimated ? { id, label, estimated: true } : { id, label };
+  }
+
+  /** Records a changed login in the home's timeline; one poll at a time, and a failure keeps the previous value. */
+  #pollLogin(): Promise<void> {
+    this.#polling ??= this.#readLogin()
+      .catch((err: unknown) => console.error(`wristline: claude-code: login poll of ${this.home} failed:`, err))
+      .finally(() => {
+        this.#polling = undefined;
+      });
+    return this.#polling;
+  }
+
+  async #readLogin(): Promise<void> {
+    const path = await claudeJsonPath(this.home);
+    let key = `${path}:missing`;
+    try {
+      const st = await stat(path);
+      key = `${path}:${st.mtimeMs}:${st.size}`;
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    if (key === this.#loginStat) return;
+    this.#loginStat = key; // Set first: a broken file is reported once, not every 2 s.
+    const account = await readClaudeAccount(this.home);
+    if (!account) return;
+    const logins = appendLogin(this.#logins, account, this.#now());
+    if (logins === this.#logins) return;
+    this.#logins = logins;
+    await this.#saveLogins?.(logins);
   }
 
   /** The statusLine's live numbers when present, else the transcript's last assistant usage. */
@@ -213,7 +287,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   }
 
   async #refresh(): Promise<void> {
-    const [registry, files] = await Promise.all([readRegistry(join(this.#home, 'sessions')), scanTranscripts(join(this.#home, 'projects'))]);
+    const [registry, files] = await Promise.all([readRegistry(join(this.home, 'sessions')), scanTranscripts(join(this.home, 'projects')), this.#pollLogin()]);
     const now = this.#now();
     this.#found = files !== undefined;
     this.#files = files ?? new Map();
@@ -224,6 +298,7 @@ export class ClaudeCodeProvider implements SessionProvider {
       if ((newest.get(entry.sessionId)?.updatedAt ?? -1) < entry.updatedAt) newest.set(entry.sessionId, entry);
       if (isLive(entry, now) && (live.get(entry.sessionId)?.updatedAt ?? -1) < entry.updatedAt) live.set(entry.sessionId, entry);
     }
+    this.#registry = newest;
     this.#version = [...newest.values()].sort((a, b) => b.updatedAt - a.updatedAt).find((e) => e.version)?.version;
     this.#liveCwd = new Map([...live].flatMap(([id, e]) => (e.cwd ? [[id, e.cwd] as const] : [])));
     // Several live entries can name the same pane (e.g. a stale one); only the newest may type there.
@@ -244,6 +319,7 @@ export class ClaudeCodeProvider implements SessionProvider {
 
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
     for (const id of this.#statusContext.keys()) if (!ids.has(id)) this.#statusContext.delete(id);
+    for (const id of this.#sessionAccounts.keys()) if (!ids.has(id)) this.#sessionAccounts.delete(id);
     const next = new Map<string, Session>();
     for (const id of ids) {
       const file = this.#files.get(id);
@@ -314,6 +390,13 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (block) session.promptBlock = block;
     const context = this.#context(id, meta);
     if (context) session.context = context;
+    const known = this.#sessionAccounts.get(id);
+    if (known) session.account = this.#account(known, false);
+    else {
+      // The login observed at the session's last activity; none for activity before the first observation.
+      const login = loginAt(this.#logins, lastActivity);
+      if (login) session.account = this.#account(login.id, isEstimated(this.#logins, newest?.startedAt));
+    }
     return session;
   }
 
@@ -327,7 +410,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   /** A live session writes its transcript only after the first message. */
   #expectedPath(nativeId: string): string | undefined {
     const cwd = this.#liveCwd.get(nativeId);
-    return cwd ? join(this.#home, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${nativeId}.jsonl`) : undefined;
+    return cwd ? join(this.home, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${nativeId}.jsonl`) : undefined;
   }
 }
 
@@ -336,143 +419,4 @@ function promptBlock(status: SessionStatus, hasPane: boolean): PromptBlock | und
   if (!hasPane) return 'no_tmux';
   if (status === 'needs_input') return 'awaiting_input';
   return undefined;
-}
-
-/** The registry's `tmux` is `"<session>:@<window>.%<pane>"`; prompts target the `%<pane>` id. */
-export function tmuxPane(value: string | undefined): string | undefined {
-  const pane = value?.slice(value.lastIndexOf('.') + 1);
-  return pane && /^%\d+$/.test(pane) ? pane : undefined;
-}
-
-/** Walks the parent chain in /proc; without procfs (macOS) the registry is trusted. */
-function descendsFrom(pid: number, ancestor: number): boolean {
-  for (let p = pid, hops = 0; p > 1 && hops < 64; hops++) {
-    if (p === ancestor) return true;
-    let stat: string;
-    try {
-      stat = readFileSync(`/proc/${p}/stat`, 'utf8');
-    } catch {
-      return !HAS_PROCFS && hops === 0;
-    }
-    p = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-  }
-  return false;
-}
-
-function mapStatus(status: string | undefined): SessionStatus {
-  switch (status) {
-    case 'busy':
-    case 'running':
-    case 'shell':
-      return 'running';
-    case 'waiting':
-    case 'needs_input':
-      return 'needs_input';
-    case 'exited':
-      return 'ended';
-    default:
-      return 'idle';
-  }
-}
-
-/** `updatedAt` is not a heartbeat (an idle session keeps it for days), so the age cap only applies without a pid-reuse guard. */
-function isLive(entry: RegistryEntry, now: number): boolean {
-  if (!pidAlive(entry.pid)) return false;
-  return entry.procStart && HAS_PROCFS ? sameProcess(entry) : now - entry.updatedAt < LIVE_MAX_AGE_MS;
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return isObject(err) && err.code === 'EPERM';
-  }
-}
-
-/** Guards against pid reuse: `procStart` is field 22 (starttime) of /proc/<pid>/stat. */
-function sameProcess(entry: { pid: number; procStart: string | undefined }): boolean {
-  if (!entry.procStart) return true;
-  let stat: string;
-  try {
-    stat = readFileSync(`/proc/${entry.pid}/stat`, 'utf8');
-  } catch {
-    return !HAS_PROCFS; // No procfs (macOS): fall back to the pid check alone.
-  }
-  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-  return fields[19] === entry.procStart;
-}
-
-/** Reads `<pid>.json` entries only; the neighbouring `*.key` files are secrets and never opened. */
-async function readRegistry(dir: string): Promise<RegistryEntry[]> {
-  let names: string[];
-  try {
-    names = await readdir(dir);
-  } catch (err) {
-    if (isNotFound(err)) return [];
-    throw err;
-  }
-  const entries = await Promise.all(names.filter((name) => /^\d+\.json$/.test(name)).map((name) => readEntry(join(dir, name))));
-  return entries.filter((e) => e !== undefined);
-}
-
-async function readEntry(path: string): Promise<RegistryEntry | undefined> {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await readFile(path, 'utf8'));
-  } catch {
-    return undefined; // Removed or half-written; the next refresh sees it.
-  }
-  if (!isObject(raw)) return undefined;
-  const pid = num(raw.pid);
-  const sessionId = str(raw.sessionId);
-  const updatedAt = num(raw.updatedAt) ?? num(raw.startedAt);
-  if (pid === undefined || !sessionId || updatedAt === undefined) return undefined;
-  return {
-    pid,
-    sessionId,
-    updatedAt,
-    statusUpdatedAt: num(raw.statusUpdatedAt) ?? updatedAt,
-    cwd: str(raw.cwd),
-    name: str(raw.name),
-    nameSource: str(raw.nameSource),
-    status: str(raw.status),
-    tmux: str(raw.tmux),
-    procStart: str(raw.procStart),
-    version: str(raw.version),
-  };
-}
-
-/** Maps session id to `projects/<slug>/<sessionId>.jsonl`; undefined when projects/ is missing. */
-async function scanTranscripts(dir: string): Promise<Map<string, TranscriptFile> | undefined> {
-  let slugs;
-  try {
-    slugs = await readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (isNotFound(err)) return undefined;
-    throw err;
-  }
-  const files = new Map<string, TranscriptFile>();
-  for (const slug of slugs) {
-    if (!slug.isDirectory()) continue;
-    let names: string[];
-    try {
-      names = await readdir(join(dir, slug.name));
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue;
-      const path = join(dir, slug.name, name);
-      try {
-        const st = await stat(path);
-        const id = basename(name, '.jsonl');
-        const prev = files.get(id);
-        if (!prev || prev.mtimeMs < st.mtimeMs) files.set(id, { path, mtimeMs: st.mtimeMs, size: st.size });
-      } catch {
-        // Deleted between readdir and stat.
-      }
-    }
-  }
-  return files;
 }
