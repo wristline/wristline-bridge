@@ -6,7 +6,7 @@ import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { newToken } from './auth.ts';
-import { configDir, configPath, readStored, resolveConfig, updateStored, type Bins, type Config, type Env, type Flags } from './config.ts';
+import { canonical, configDir, configPath, readStored, resolveConfig, updateStored, type Bins, type Config, type Env, type Flags } from './config.ts';
 import type { Account, ProviderId } from './protocol.ts';
 import { readClaudeAccount } from './providers/claude-code/account.ts';
 import {
@@ -136,8 +136,9 @@ export async function hooksInstall(flags: Flags, options: HooksOptions): Promise
   const dir = configDir();
   const config = await hookConfig(flags);
   let all = true;
-  for (const target of hookTargets(config, options.settings)) {
-    if (options.settings === undefined && !(await exists(dirname(target.settingsPath)))) {
+  for (const [i, target] of hookTargets(config, options.settings).entries()) {
+    // The primary home is created as before (Claude Code may not have run yet); an extra home that is gone is not brought back.
+    if (i > 0 && !(await exists(dirname(target.settingsPath)))) {
       console.log(`Skipped ${target.settingsPath}: the home does not exist.`);
       continue;
     }
@@ -274,7 +275,7 @@ export async function detectHomes(homeDir: string, env: Env): Promise<{ claude: 
     for (const name of names.filter((n) => n.startsWith(prefix))) {
       const dir = join(homeDir, name);
       const marked = await Promise.all(marks.map((m) => exists(join(dir, m))));
-      if (marked.some(Boolean) && !out.some((h) => resolve(h) === resolve(dir))) out.push(dir);
+      if (marked.some(Boolean) && !out.some((h) => canonical(h) === canonical(dir))) out.push(dir);
     }
     return out;
   };
@@ -284,13 +285,22 @@ export async function detectHomes(homeDir: string, env: Env): Promise<{ claude: 
   };
 }
 
-/** Proposes each detected home that is not registered yet; resolves the extras to store. */
-async function proposeHomes(provider: ProviderId, detected: string[], registered: string[], extras: string[], yes: boolean): Promise<string[]> {
+/**
+ * Asks about each detected home that is not registered yet; resolves the extras to store. Never
+ * registers one unasked (`--yes`, no terminal): a name-scanned directory may be a backup, and
+ * registering it rewrites its settings.json; then it only says how to add it.
+ */
+export async function proposeHomes(provider: ProviderId, detected: string[], registered: string[], extras: string[], yes: boolean): Promise<string[]> {
   const out = [...extras];
+  const ask = !yes && process.stdin.isTTY;
   for (const dir of detected) {
-    if (registered.some((h) => resolve(h) === resolve(dir))) continue;
+    if (registered.some((h) => canonical(h) === canonical(dir))) continue;
     const login = loginText(await readLogin(provider, dir));
-    if (yes || (process.stdin.isTTY && (await confirm(`Add ${dir} (login: ${login}) as another account?`)))) out.push(dir);
+    if (ask) {
+      if (await confirm(`Add ${dir} (login: ${login}) as another account?`)) out.push(dir);
+    } else {
+      console.log(`  Found ${dir} (login: ${login}); add it with \`wristline-bridge accounts add --${provider === 'claude-code' ? 'claude' : 'codex'}-home ${dir}\``);
+    }
   }
   return out;
 }

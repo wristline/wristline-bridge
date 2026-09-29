@@ -70,8 +70,10 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
 - **Usage** — per provider and account: `windows[]` with `id` (`5h`/`7d` for Claude Code,
   `primary`/`secondary` for Codex), `usedPercent`, optional `resetsAt` (ISO 8601) and `minutes`.
   A usage entry is identified by `provider` plus `account.id` (empty when `account` is absent); a
-  `usage` event replaces the entry with the same key. Once a provider reports a labelled entry, the
-  bridge drops that provider's unlabelled one (a watch sees it go on its next `snapshot`).
+  `usage` event replaces the entry with the same key, unless its `updatedAt` is older than the
+  entry's (a stale snapshot). Once a provider reports a labelled entry, the bridge drops that
+  provider's unlabelled one (a watch sees it go on its next `snapshot`) and ignores later unlabelled
+  reports of that provider.
 
 All timestamps are ISO 8601 in UTC.
 
@@ -105,7 +107,7 @@ Server events (JSON text frames):
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
-| `usage` | `usage` | plan usage numbers changed | `event-usage.json` |
+| `usage` | `usage` | plan usage numbers or account changed | `event-usage.json` |
 | `alert` | `sessionId, alert, text?` | `needs_input` or `done` (text: short summary) | `event-alert.json` |
 
 Client events:
@@ -133,8 +135,9 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   usage (`resets_at` epoch seconds → ISO) and `context_window` the session's context
   (`context_window_size`, and `current_usage` input tokens when present). With several Claude
   Code homes, the report goes to the home whose `projects/` holds `transcript_path` (real paths
-  compared), else to the home that lists `session_id`, else to the only home; otherwise it is
-  dropped (logged once per session). The usage entry carries the home's `account`.
+  compared), else to the home that lists `session_id`, else to the only home unless the path lies
+  under some other `projects/` directory; otherwise it is dropped (logged once per session). The
+  usage entry carries the home's `account`.
 - `POST /hooks/permission-request` — Claude Code's PermissionRequest hook input. Answers an empty
   `200` at once when no watch is present (connected now or within 90 s); otherwise opens a
   request and answers when the watch does: `allow` → `{"hookSpecificOutput": {"hookEventName":

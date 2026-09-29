@@ -3,10 +3,10 @@
 import { access, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import { configPath, readStored, resolveConfig, updateStored, type Config, type StoredConfig } from './config.ts';
+import { canonical, configPath, readStored, resolveConfig, updateStored, type Config, type StoredConfig } from './config.ts';
 import type { ProviderId } from './protocol.ts';
 import { approve, loginText, readLogin } from './setup.ts';
-import { CliError } from './util.ts';
+import { CliError, own } from './util.ts';
 
 /** Labels are shown on a watch face; longer ones are cut there. */
 const LABEL_MAX = 12;
@@ -22,7 +22,7 @@ export async function accountsList(config: Config): Promise<void> {
   console.log(`${'PROVIDER'.padEnd(13)}${'HOME'.padEnd(width)}${'LOGIN'.padEnd(28)}LABEL`);
   for (const [provider, home] of rows) {
     const login = await readLogin(provider, home);
-    const label = (login && config.labels[login.id]) ?? '';
+    const label = (login && own(config.labels, login.id)) ?? '';
     const earlier = new Set((provider === 'claude-code' ? (config.claudeLogins[home] ?? []) : []).map((l) => l.id).filter((id) => id !== login?.id)).size;
     const note = earlier > 0 ? `  (+${earlier} earlier login${earlier > 1 ? 's' : ''})` : '';
     console.log(`${provider.padEnd(13)}${home.padEnd(width)}${loginText(login).padEnd(28)}${label}${note}`);
@@ -41,12 +41,14 @@ function withHomeVar(path: string): string {
 
 /** Registers a second home (creating it if needed), labels its login and prints how to log in and use it. Idempotent. */
 export async function accountsAdd(dir: string, target: AccountTarget, label: string | undefined, yes: boolean): Promise<void> {
-  if (label !== undefined && (label === '' || label.length > LABEL_MAX)) throw new CliError(`--label must be 1 to ${LABEL_MAX} characters`);
+  if (label !== undefined && (label === '' || label.length > LABEL_MAX || /[\u0000-\u001f\u007f-\u009f]/.test(label))) {
+    throw new CliError(`--label must be 1 to ${LABEL_MAX} characters without control characters`);
+  }
   const stored = await readStored(dir);
   const config = resolveConfig(stored);
   const home = resolve(target.home);
   const claude = target.provider === 'claude-code';
-  if (resolve(claude ? config.claudeHome : config.codexHome) === home) throw new CliError(`${home} is the primary ${claude ? 'Claude Code' : 'Codex'} home already.`);
+  if (canonical(claude ? config.claudeHome : config.codexHome) === canonical(home)) throw new CliError(`${home} is the primary ${claude ? 'Claude Code' : 'Codex'} home already.`);
   try {
     await access(home);
   } catch {
@@ -56,7 +58,7 @@ export async function accountsAdd(dir: string, target: AccountTarget, label: str
   const login = await readLogin(target.provider, home);
   const key = extrasKey(target.provider);
   const extras = stored[key] ?? [];
-  const patch: StoredConfig = { [key]: extras.some((h) => resolve(h) === home) ? extras : [...extras, home] };
+  const patch: StoredConfig = { [key]: extras.some((h) => canonical(h) === canonical(home)) ? extras : [...extras, home] };
   if (label !== undefined && login) patch.labels = { ...config.labels, [login.id]: label };
   await updateStored(dir, patch);
   console.log(`Registered ${home} (login: ${loginText(login)}${patch.labels ? `, label: ${label}` : ''}).`);
@@ -73,14 +75,17 @@ export async function accountsRemove(dir: string, target: AccountTarget): Promis
   const config = resolveConfig(stored);
   const home = resolve(target.home);
   const claude = target.provider === 'claude-code';
-  if (resolve(claude ? config.claudeHome : config.codexHome) === home) {
+  if (canonical(claude ? config.claudeHome : config.codexHome) === canonical(home)) {
     throw new CliError(`${home} is the primary home; change "${claude ? 'claudeHome' : 'codexHome'}" in ${configPath(dir)} instead.`);
   }
   const key = extrasKey(target.provider);
   const extras = stored[key] ?? [];
-  const kept = extras.filter((h) => resolve(h) !== home);
+  const kept = extras.filter((h) => canonical(h) !== canonical(home));
   if (kept.length === extras.length) throw new CliError(`${home} is not registered.`);
-  await updateStored(dir, { [key]: kept });
+  const patch: StoredConfig = { [key]: kept };
+  // The home's login timeline (account ids and emails) goes with it; `labels` and `codexAccounts` are keyed by account id and shared.
+  if (claude && stored.claudeLogins) patch.claudeLogins = Object.fromEntries(Object.entries(stored.claudeLogins).filter(([h]) => canonical(h) !== canonical(home)));
+  await updateStored(dir, patch);
   console.log(`Removed ${home}. Restart the bridge to stop watching it.`);
   if (claude) console.log(`Its hooks stay until you run \`wristline-bridge hooks uninstall --settings ${join(home, 'settings.json')}\`.`);
 }

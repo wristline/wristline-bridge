@@ -1,11 +1,11 @@
 import { join } from 'node:path';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
-import type { Account, Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
+import type { Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isObject, str } from '../../util.ts';
 import { CodexAccounts, type AccountsOptions } from './account.ts';
 import { codexAsk } from './ask.ts';
-import { daemonStatus, loadedThreadIds, type Ask, type Loaded } from './daemon.ts';
+import { LoadedThreads, daemonStatus, loadedThreadIds, type Ask } from './daemon.ts';
 import { scanRollouts, type RolloutFile } from './home.ts';
 import {
   CodexMetaScan,
@@ -16,7 +16,6 @@ import {
   normalizeItem,
   normalizeItemCompleted,
   normalizeRateLimits,
-  normalizeThreadStatus,
   parseCodexLine,
   usageOf,
 } from './parse.ts';
@@ -59,10 +58,7 @@ export class CodexProvider implements SessionProvider {
   readonly #index = new SessionIndex();
   readonly #indexTail: JsonlTail;
   readonly #rpc: CodexRpc | undefined;
-  /** Threads loaded in the daemon, by id; empty while disconnected. */
-  readonly #loaded = new Map<string, Loaded>();
-  /** Title-generation and other throwaway threads, which never get a rollout. */
-  readonly #ephemeral = new Set<string>();
+  readonly #loaded = new LoadedThreads();
   readonly #asks = new Map<RequestId, Ask>();
   /** What running items do (e.g. the files of a file change), for approvals that do not say. */
   readonly #itemText = new Map<string, string>();
@@ -72,8 +68,11 @@ export class CodexProvider implements SessionProvider {
   /** Last usage published per account id (`''` without one). */
   readonly #usage = new Map<string, Usage>();
   #daemonLimits: RateLimitSnapshot | undefined;
-  /** The daemon's login: null without an account id, undefined while unknown (disconnected, or being re-read). */
-  #daemonAccount: Account | null | undefined;
+  /** The daemon's login (account id): null without one, undefined while unknown (disconnected, being re-read, or the read failed). */
+  #daemonAccount: string | null | undefined;
+  /** Reads of the daemon's login in flight, and the number of the newest one: only it applies. */
+  #syncing = 0;
+  #syncGen = 0;
   #version: string | undefined;
   #found = false;
   #hub: Hub | undefined;
@@ -137,7 +136,7 @@ export class CodexProvider implements SessionProvider {
     if (!session) throw new PromptBlocked('not_live');
     if (session.promptBlock) throw new PromptBlocked(session.promptBlock);
     if (this.#hub?.pending.hasSession(session.id)) throw new PromptBlocked('awaiting_input');
-    if (!this.#rpc || !(await this.#join(nativeId))) throw new PromptBlocked('unsupported');
+    if (!this.#rpc || !(await this.#loaded.join(nativeId, this.#rpc))) throw new PromptBlocked('unsupported');
     try {
       await this.#rpc.request('turn/start', { threadId: nativeId, input: [{ type: 'text', text, text_elements: [] }] });
     } catch (err) {
@@ -187,15 +186,19 @@ export class CodexProvider implements SessionProvider {
     this.#publish();
 
     // The daemon's numbers are live for its own account; rollouts fill in the others and while it is not connected.
-    const daemonKey = this.#daemonLimits ? (this.#daemonAccount?.id ?? '') : undefined;
+    const daemonKey = this.#daemonLimits ? (this.#daemonAccount ?? '') : undefined;
     for (const [key, limits] of latest) {
       if (key === daemonKey || limits.at <= (this.#usage.get(key)?.updatedAt ?? '')) continue;
       const usage = usageOf(limits.snapshot, limits.at, key ? this.#accounts.account(key) : undefined);
       this.#usage.set(key, usage);
       this.#hub?.usage(usage);
     }
-    // A thread created by a TUI has no rollout until its first turn, so rejoining waits for it.
-    for (const id of this.#loaded.keys()) if (this.#files.has(id)) void this.#join(id);
+    this.#rejoin();
+  }
+
+  /** A thread created by a TUI has no rollout until its first turn, so rejoining waits for it. */
+  #rejoin(): void {
+    for (const id of this.#loaded.ids()) if (this.#files.has(id)) void this.#loaded.join(id, this.#rpc);
   }
 
   /** Rebuilds the list from the last scan plus the daemon's state and publishes what changed. */
@@ -272,11 +275,11 @@ export class CodexProvider implements SessionProvider {
       } catch {
         // No rollout before the first turn; its status arrives by notification.
       }
-      this.#track(id, isObject(read) ? read.thread : undefined);
+      this.#loaded.track(id, isObject(read) ? read.thread : undefined);
     }
     await this.#syncAccount();
     this.#publish();
-    for (const id of this.#loaded.keys()) if (this.#files.has(id)) void this.#join(id);
+    this.#rejoin();
   }
 
   #disconnected(): void {
@@ -293,64 +296,39 @@ export class CodexProvider implements SessionProvider {
   /**
    * Re-reads the daemon's login and its full limits. Meanwhile the login is unknown, so a sparse
    * `account/rateLimits/updated` that arrives cannot be attributed and is dropped; the full
-   * snapshot read here carries its numbers again.
+   * snapshot read here carries its numbers again. Reads overlap when `account/updated` arrives
+   * while connecting; only the newest one applies.
    */
   async #syncAccount(): Promise<void> {
     if (!this.#rpc) return;
+    const gen = ++this.#syncGen;
     this.#daemonAccount = undefined;
     this.#daemonLimits = undefined;
-    const daemon = await this.#accounts.daemon(this.#rpc);
-    if (!daemon) return;
-    this.#daemonAccount = daemon.account;
-    this.#limits(daemon.rateLimits);
-  }
-
-  /** Records a loaded thread from a Thread object (or just its id); ephemeral threads are skipped. */
-  #track(id: string, thread: unknown): void {
-    const t = isObject(thread) ? thread : {};
-    if (t.ephemeral === true || this.#ephemeral.has(id)) {
-      this.#ephemeral.add(id);
-      return;
+    this.#syncing++;
+    try {
+      const daemon = await this.#accounts.daemon(this.#rpc);
+      if (gen !== this.#syncGen || !daemon) return; // Superseded, or failed: the next update triggers another read.
+      this.#daemonAccount = daemon.accountId;
+      this.#limits(daemon.rateLimits);
+    } finally {
+      this.#syncing--;
     }
-    const status = normalizeThreadStatus(t.status) ?? this.#loaded.get(id)?.status ?? { type: 'idle' };
-    if (status.type === 'notLoaded') {
-      this.#loaded.delete(id);
-      return;
-    }
-    const previous = this.#loaded.get(id);
-    this.#loaded.set(id, { status, parent: str(t.parentThreadId) ?? previous?.parent, joined: previous?.joined ?? false });
-  }
-
-  /** Rejoins a thread the daemon has loaded so this client receives its requests. */
-  #join(id: string): Promise<boolean> {
-    const loaded = this.#loaded.get(id);
-    const rpc = this.#rpc;
-    // Never resume a thread the daemon has not loaded: that would open its rollout a second time.
-    if (!loaded || !rpc?.ready) return Promise.resolve(false);
-    if (loaded.joined) return Promise.resolve(true);
-    loaded.joining ??= rpc.request('thread/resume', { threadId: id, excludeTurns: true }).then(
-      () => {
-        loaded.joined = true;
-        loaded.joining = undefined;
-        console.log(`wristline: codex rejoined loaded thread ${id}`);
-        return true;
-      },
-      () => {
-        loaded.joining = undefined;
-        return false;
-      },
-    );
-    return loaded.joining;
   }
 
   #limits(raw: unknown): void {
     const snapshot = normalizeRateLimits(raw);
     // Other limit ids (e.g. a reserve model) are not the plan windows the TUI shows.
     if (!snapshot || (snapshot.limitId !== null && snapshot.limitId !== 'codex')) return;
-    if (this.#daemonAccount === undefined) return; // Whose limits these are is being re-read.
+    if (this.#daemonAccount === undefined) {
+      // Whose limits these are is unknown: a read in flight will carry these numbers, or the last read failed and is retried now.
+      if (this.#syncing === 0) this.#syncAccount().catch((err: unknown) => console.error('wristline: codex account sync failed:', err));
+      return;
+    }
     this.#daemonLimits = mergeRateLimits(this.#daemonLimits, snapshot);
-    const usage = usageOf(this.#daemonLimits, new Date(this.#now()).toISOString(), this.#daemonAccount ?? undefined);
-    this.#usage.set(this.#daemonAccount?.id ?? '', usage);
+    const id = this.#daemonAccount;
+    // The label is resolved now, not at sync time, so an email learned since (auth.json, account/read) shows.
+    const usage = usageOf(this.#daemonLimits, new Date(this.#now()).toISOString(), id ? this.#accounts.account(id) : undefined);
+    this.#usage.set(id ?? '', usage);
     this.#hub?.usage(usage);
   }
 
@@ -366,20 +344,19 @@ export class CodexProvider implements SessionProvider {
         const thread = isObject(params.thread) ? params.thread : undefined;
         const id = str(thread?.id);
         if (!id) return;
-        this.#track(id, thread);
+        this.#loaded.track(id, thread);
         this.#publish();
         return;
       }
       case 'thread/status/changed':
-        if (!threadId || this.#ephemeral.has(threadId)) return;
-        this.#track(threadId, { status: params.status });
-        if (this.#loaded.has(threadId) && this.#files.has(threadId)) void this.#join(threadId);
+        if (!threadId || this.#loaded.isEphemeral(threadId)) return;
+        this.#loaded.track(threadId, { status: params.status });
+        if (this.#loaded.has(threadId) && this.#files.has(threadId)) void this.#loaded.join(threadId, this.#rpc);
         this.#publish();
         return;
       case 'thread/closed':
         if (!threadId) return;
-        this.#loaded.delete(threadId);
-        this.#ephemeral.delete(threadId);
+        this.#loaded.forget(threadId);
         this.#abortWhere((a) => a.threadId === threadId);
         this.#publish();
         return;

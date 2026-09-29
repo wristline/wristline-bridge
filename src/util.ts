@@ -54,6 +54,16 @@ export function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** Text safe to print or show: control characters (which could rewrite a terminal line) become spaces. */
+export function printable(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+}
+
+/** The record's own value for `key`; a plain object would answer `constructor` and the like from its prototype. */
+export function own<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 /** Accepts epoch seconds, epoch milliseconds or an ISO string. */
 export function toIso(value: unknown): string | undefined {
   if (typeof value === 'string') {

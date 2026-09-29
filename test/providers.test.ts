@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -475,4 +475,39 @@ test('claude-code: statusLine usage goes to the learned fingerprint\'s account, 
   assert.equal(provider.hasSession(newer), true);
   assert.equal(provider.hasSession(peer), false, 'a dead registry entry is not a session');
   assert.equal(provider.home, home);
+});
+
+test('claude-code: an unreadable .claude.json keeps the previous login and is logged once, not on every poll', async () => {
+  const home = join(root, 'claude-unreadable');
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  symlinkSync('.claude.json', join(home, '.claude.json')); // A symlink loop: stat fails with ELOOP, not ENOENT.
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(' '));
+  try {
+    const provider = new ClaudeCodeProvider({ home, historyDays: 7, logins: [{ at: '2026-01-01T00:00:00.000Z', id: 'acc-a', label: 'a@example.com' }] });
+    await provider.start(recordingHub());
+    provider.stop();
+    await provider.refresh();
+    await provider.statusline({ session_id: 'x' });
+    await provider.refresh();
+    assert.equal(errors.filter((e) => e.includes(`login poll of ${home} failed`)).length, 1, errors.join('\n'));
+    // A session labelled by the timeline still gets the previous login.
+    writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 'aaaaaaaa-0000-4000-8000-0000000000aa', cwd: '/w', status: 'idle', startedAt: Date.now(), updatedAt: Date.now() }));
+    await provider.refresh();
+    assert.deepEqual(provider.listSessions()[0]?.account, { id: 'acc-a', label: 'a@example.com' });
+  } finally {
+    console.error = original;
+  }
+});
+
+test('claude-code: a login whose id is an Object.prototype member is labelled by its email, not a prototype function', async () => {
+  const clock = Date.now();
+  const { home, login, entry } = accountHome('claude-proto', () => clock);
+  login('constructor', 'c@example.com');
+  entry(process.pid, 'bbbbbbbb-0000-4000-8000-0000000000bb');
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7, now: () => clock, labels: {} });
+  await provider.start(recordingHub());
+  provider.stop();
+  assert.deepEqual(provider.listSessions()[0]?.account, { id: 'constructor', label: 'c@example.com' });
 });

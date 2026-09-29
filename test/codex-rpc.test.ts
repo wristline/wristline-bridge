@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -353,4 +353,57 @@ test('codex provider: daemon usage carries the login\'s account; an update durin
     [B, 'school', [['primary', 50], ['secondary', 40]]],
   ]);
   assert.deepEqual(saved.at(-1), { [A]: 'a@example.com', [B]: 'b@example.com' });
+});
+
+test('codex provider: a failed rate-limit read is retried on the next update, the usage label follows a later-learned email, and only the newest login read applies', async (t) => {
+  const home = join(root, 'codex-retry');
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
+  const limits = (usedPercent: number): unknown => ({ limitId: 'codex', primary: { usedPercent, windowDurationMins: 10080, resetsAt: null }, secondary: null });
+  const sparse = { rateLimits: { limitId: 'codex', primary: null, secondary: { usedPercent: 40, windowDurationMins: 300, resetsAt: null } } };
+  const { rpc, log } = fakeRpc('retry', { accountId: A, rateLimits: limits(2), rateLimitsError: 'fetch failed' });
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc });
+  const hub = recordingHub();
+  t.after(() => provider.stop());
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(' '));
+  t.after(() => void (console.error = original));
+  const failures = (): number => errors.filter((e) => e.includes('account/rateLimits/read failed')).length;
+  const reads = (): number => log().filter((m) => m.method === 'account/rateLimits/read').length;
+  const brief = (u: Usage): unknown => [u.account?.id ?? '', u.account?.label, u.windows.map((w) => [w.id, w.usedPercent])];
+  const notify = (method: string, params: unknown): Promise<unknown> => rpc.request('fake/notify', { method, params });
+  await provider.start(hub);
+  await waitFor(() => reads() === 1 && failures() === 1);
+
+  // The read failed at connect: the next sparse update triggers another read instead of being dropped for good.
+  await notify('account/rateLimits/updated', sparse);
+  await waitFor(() => reads() === 2 && failures() === 2);
+  assert.deepEqual(hub.usages, [], 'nothing is attributed while the login is unknown');
+  await rpc.request('fake/state', { rateLimitsError: null });
+  await notify('account/rateLimits/updated', sparse);
+  await waitFor(() => hub.usages.length === 1);
+  assert.deepEqual(hub.usages.map(brief), [[A, 'a1a1a1a1', [['primary', 2]]]], 'the full snapshot read carries the numbers');
+
+  // The email learned from auth.json afterwards labels the next daemon update; the label is not frozen at sync time.
+  const segment = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const idToken = `${segment({ alg: 'none' })}.${segment({ email: 'a@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: A } })}.sig`;
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { id_token: idToken, access_token: 'ACCESS-SECRET' } }));
+  await provider.refresh();
+  await notify('account/rateLimits/updated', sparse);
+  assert.deepEqual(hub.usages.slice(-1).map(brief), [[A, 'a@example.com', [['primary', 2], ['secondary', 40]]]]);
+  assert.equal(JSON.stringify([hub.usages, errors]).includes('SECRET'), false);
+
+  // Overlapping reads: the one issued last applies, even though the earlier one (for A) answers later.
+  await rpc.request('fake/state', { accountDelayMs: 300 });
+  await notify('account/updated', { authMode: 'chatgpt' });
+  await rpc.request('fake/state', { accountId: B, rateLimits: limits(50), accountDelayMs: 0 });
+  await notify('account/updated', { authMode: 'chatgpt' });
+  await waitFor(() => hub.usages.at(-1)?.account?.id === B);
+  await new Promise((r) => setTimeout(r, 400));
+  await notify('account/rateLimits/updated', sparse);
+  assert.deepEqual(hub.usages.slice(-2).map(brief), [
+    [B, 'b2b2b2b2', [['primary', 50]]],
+    [B, 'b2b2b2b2', [['primary', 50], ['secondary', 40]]],
+  ]);
 });

@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { LoginEntry } from '../../config.ts';
 import type { Account } from '../../protocol.ts';
-import { isNotFound, isObject, str, toIso, type JsonObject } from '../../util.ts';
+import { isNotFound, isObject, printable, str, toIso, type JsonObject } from '../../util.ts';
 
 /** Logins remembered per home; older ones are forgotten. */
 export const LOGINS_MAX = 20;
@@ -46,7 +46,8 @@ export async function readClaudeAccount(home: string, homeDir = homedir()): Prom
   const oauth = isObject(raw) && isObject(raw.oauthAccount) ? raw.oauthAccount : undefined;
   const id = str(oauth?.accountUuid);
   if (!id) return undefined;
-  return { id, label: str(oauth?.emailAddress) || str(oauth?.organizationName) || id.slice(0, 8) };
+  // The label is printed by `setup` and `accounts`: control characters in it could rewrite a prompt line.
+  return { id, label: printable(str(oauth?.emailAddress) ?? '') || printable(str(oauth?.organizationName) ?? '') || id.slice(0, 8) };
 }
 
 /**

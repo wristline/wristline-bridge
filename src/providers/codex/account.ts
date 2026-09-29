@@ -5,7 +5,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Account } from '../../protocol.ts';
-import { isNotFound, isObject, parseJson, str } from '../../util.ts';
+import { isNotFound, isObject, own, parseJson, printable, str } from '../../util.ts';
 import type { CodexRpc } from './rpc.ts';
 
 const AUTH_CLAIM = 'https://api.openai.com/auth';
@@ -32,7 +32,7 @@ function jwtClaims(idToken: string): Account | undefined {
   const auth = claims && isObject(claims[AUTH_CLAIM]) ? claims[AUTH_CLAIM] : undefined;
   const id = str(auth?.chatgpt_account_id);
   if (!id) return undefined;
-  return { id, label: str(claims?.email) || id.slice(0, 8) };
+  return { id, label: printable(str(claims?.email) ?? '') || id.slice(0, 8) };
 }
 
 export interface AccountsOptions {
@@ -59,12 +59,12 @@ export class CodexAccounts {
   }
 
   account(id: string): Account {
-    return { id, label: this.#labels[id] ?? this.#accounts[id] ?? id.slice(0, 8) };
+    return { id, label: own(this.#labels, id) ?? own(this.#accounts, id) ?? id.slice(0, 8) };
   }
 
   /** Remembers an account's email so its threads keep their label after a restart. */
   learn(id: string, email: string): void {
-    if (this.#accounts[id] === email) return;
+    if (own(this.#accounts, id) === email) return;
     this.#accounts = { ...this.#accounts, [id]: email };
     this.#save?.(this.#accounts).catch((err: unknown) => console.error('wristline: codex: saving accounts failed:', err));
   }
@@ -90,10 +90,10 @@ export class CodexAccounts {
   }
 
   /**
-   * Who the daemon is logged in as, with its full rate limits: `account` is null for a login
-   * without an account id (API key); undefined when the limits could not be read.
+   * Who the daemon is logged in as, with its full rate limits: `accountId` is null for a login
+   * without one (API key); undefined when the limits could not be read.
    */
-  async daemon(rpc: CodexRpc): Promise<{ account: Account | null; rateLimits: unknown } | undefined> {
+  async daemon(rpc: CodexRpc): Promise<{ accountId: string | null; rateLimits: unknown } | undefined> {
     // `account/read` only adds the email; a daemon without it still reports whose limits these are.
     const [read, limits] = await Promise.allSettled([rpc.request('account/read'), rpc.request('account/rateLimits/read')]);
     if (limits.status === 'rejected') {
@@ -102,8 +102,8 @@ export class CodexAccounts {
     }
     const response = isObject(limits.value) ? limits.value : {};
     const id = str(response.accountId);
-    const email = read.status === 'fulfilled' && isObject(read.value) && isObject(read.value.account) ? str(read.value.account.email) : undefined;
+    const email = read.status === 'fulfilled' && isObject(read.value) && isObject(read.value.account) ? printable(str(read.value.account.email) ?? '') : '';
     if (id && email) this.learn(id, email);
-    return { account: id ? this.account(id) : null, rateLimits: response.rateLimits };
+    return { accountId: id ?? null, rateLimits: response.rateLimits };
   }
 }

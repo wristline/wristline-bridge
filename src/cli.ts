@@ -64,20 +64,18 @@ async function run(flags: Flags): Promise<void> {
   const config = resolveConfig(stored, flags);
   const version = packageVersion();
 
-  // One instance per home. The running bridge owns these two keys; updateStored keeps the others as other commands wrote them.
-  const claudeLogins = { ...config.claudeLogins };
-  let codexAccounts = config.codexAccounts;
+  // One instance per home. Each save patches only its own key inside updateStored's read-modify-write, so a
+  // timeline cleared by hand while the bridge runs stays cleared and another command's keys are kept.
   const claudes = config.claudeHomes.map(
     (home) =>
       new ClaudeCodeProvider({
         home,
         historyDays: config.historyDays,
         ...(config.bins.tmux ? { tmux: config.bins.tmux } : {}),
-        logins: claudeLogins[home] ?? [],
+        logins: config.claudeLogins[home] ?? [],
         labels: config.labels,
         saveLogins: async (logins) => {
-          claudeLogins[home] = logins;
-          await updateStored(dir, { claudeLogins: { ...claudeLogins } });
+          await updateStored(dir, (stored) => ({ claudeLogins: { ...stored.claudeLogins, [home]: logins } }));
         },
       }),
   );
@@ -87,11 +85,10 @@ async function run(flags: Flags): Promise<void> {
         home,
         historyDays: config.historyDays,
         rpc: new CodexRpc({ codexHome: home, clientVersion: version, ...(config.bins.codex ? { bin: config.bins.codex } : {}) }),
-        accounts: codexAccounts,
+        accounts: config.codexAccounts,
         labels: config.labels,
         saveAccounts: async (accounts) => {
-          codexAccounts = { ...codexAccounts, ...accounts };
-          await updateStored(dir, { codexAccounts });
+          await updateStored(dir, (stored) => ({ codexAccounts: { ...stored.codexAccounts, ...accounts } }));
         },
       }),
   );

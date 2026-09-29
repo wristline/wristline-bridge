@@ -13,7 +13,7 @@ import {
   readClaudeAccount,
   statuslineFingerprint,
 } from '../src/providers/claude-code/account.ts';
-import { readCodexLogin } from '../src/providers/codex/account.ts';
+import { CodexAccounts, readCodexLogin } from '../src/providers/codex/account.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-accounts-'));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -41,6 +41,11 @@ test('readClaudeAccount: email, organization and id fallbacks; no oauthAccount o
   assert.deepEqual(await readClaudeAccount(home, homeDir), { id: 'uuid-a', label: 'Org A' });
   write({ oauthAccount: { accountUuid: 'uuid-abcdef', emailAddress: '' } });
   assert.deepEqual(await readClaudeAccount(home, homeDir), { id: 'uuid-abcdef', label: 'uuid-abc' });
+  // setup and accounts print the label: control characters could rewrite the prompt that asks to enrol a directory.
+  write({ oauthAccount: { accountUuid: 'uuid-a', emailAddress: 'ok@x.y\r\u001b[KAdd ~/.claude (login: me@x.y)?' } });
+  assert.deepEqual(await readClaudeAccount(home, homeDir), { id: 'uuid-a', label: 'ok@x.y [KAdd ~/.claude (login: me@x.y)?' }, 'the escape byte is gone; its tail is plain text');
+  write({ oauthAccount: { accountUuid: 'uuid-a', emailAddress: '\u0007', organizationName: 'Org A' } });
+  assert.deepEqual(await readClaudeAccount(home, homeDir), { id: 'uuid-a', label: 'Org A' });
   write({ numStartups: 3 });
   assert.equal(await readClaudeAccount(home, homeDir), undefined);
   write({ oauthAccount: { emailAddress: 'a@example.com' } });
@@ -124,8 +129,18 @@ test('readCodexLogin: only the account id and email leave auth.json; API-key, mi
   assert.deepEqual(await readCodexLogin(home), { id: 'acct-1234567890', label: 'acct-123' }, 'no email claim: short id');
   write({ tokens: { id_token: unsignedJwt({ email: 'c@example.com' }) } });
   assert.equal(await readCodexLogin(home), undefined, 'no account claim');
+  write({ tokens: { id_token: unsignedJwt({ email: 'c@x.y\n\u001b[2K', 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-1234567890' } }) } });
+  assert.deepEqual(await readCodexLogin(home), { id: 'acct-1234567890', label: 'c@x.y [2K' }, 'control characters never reach the terminal');
   write({ tokens: { id_token: 'not.a.jwt' } });
   assert.equal(await readCodexLogin(home), undefined);
   write('{');
   assert.equal(await readCodexLogin(home), undefined);
+});
+
+test('account labels: an id named like an Object.prototype member gets a string label, never the prototype function', () => {
+  const accounts = new CodexAccounts({ labels: { 'acc-a': 'me' }, accounts: { toString: 't@example.com' } });
+  assert.deepEqual(accounts.account('acc-a'), { id: 'acc-a', label: 'me' });
+  assert.deepEqual(accounts.account('constructor'), { id: 'constructor', label: 'construc' });
+  assert.deepEqual(accounts.account('toString'), { id: 'toString', label: 't@example.com' });
+  assert.equal(JSON.stringify(accounts.account('valueOf')).includes('label'), true);
 });

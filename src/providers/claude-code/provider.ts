@@ -6,7 +6,7 @@ import type { LoginEntry } from '../../config.ts';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
 import type { Account, Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
-import { isNotFound, isObject, str } from '../../util.ts';
+import { isNotFound, isObject, own, str } from '../../util.ts';
 import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, statuslineFingerprint } from './account.ts';
 import { ClaudeMetaScan, parseClaudeLine, sessionTitle, statuslineContext, statuslineUsage } from './parse.ts';
 import {
@@ -231,7 +231,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   }
 
   #account(id: string, estimated: boolean): Account {
-    const label = this.#labels[id] ?? this.#logins.findLast((login) => login.id === id)?.label ?? id.slice(0, 8);
+    const label = own(this.#labels, id) ?? this.#logins.findLast((login) => login.id === id)?.label ?? id.slice(0, 8);
     return estimated ? { id, label, estimated: true } : { id, label };
   }
 
@@ -252,10 +252,10 @@ export class ClaudeCodeProvider implements SessionProvider {
       const st = await stat(path);
       key = `${path}:${st.mtimeMs}:${st.size}`;
     } catch (err) {
-      if (!isNotFound(err)) throw err;
+      if (!isNotFound(err)) key = `${path}:unreadable`;
     }
     if (key === this.#loginStat) return;
-    this.#loginStat = key; // Set first: a broken file is reported once, not every 2 s.
+    this.#loginStat = key; // Set first: a broken or unreadable file is reported once, not every 2 s.
     const account = await readClaudeAccount(this.home);
     if (!account) return;
     const logins = appendLogin(this.#logins, account, this.#now());

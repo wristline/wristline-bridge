@@ -7,6 +7,7 @@ import {
   type Item,
   type PendingRequest,
   type ProviderHealth,
+  type ProviderId,
   type ServerEvent,
   type Session,
   type Usage,
@@ -53,6 +54,8 @@ export class BridgeHub implements Hub {
   readonly pending: PendingRegistry;
   readonly #providers: SessionProvider[];
   readonly #usage = new Map<string, Usage>();
+  /** Providers that have reported a labelled usage entry; their unlabelled reports are stale from then on (see protocol.md). */
+  readonly #labelled = new Set<ProviderId>();
   readonly #clients = new Set<Client>();
   readonly #watches = new Map<string, { stop: () => void; clients: Set<Client> }>();
   readonly #throttles = new Map<string, Throttle>();
@@ -101,13 +104,20 @@ export class BridgeHub implements Hub {
   }
 
   usage(usage: Usage): void {
+    if (!usage.account && this.#labelled.has(usage.provider)) return;
     const key = usageKey(usage);
     const previous = this.#usage.get(key);
+    // Another home's older snapshot of this account (a rollout) must not replace its live numbers.
+    if (previous && usage.updatedAt < previous.updatedAt) return;
     this.#usage.set(key, usage);
     // Once the provider names an account, its unlabelled entry is stale; a watch drops it with the next snapshot.
-    if (usage.account) this.#usage.delete(usageKey({ provider: usage.provider }));
+    if (usage.account) {
+      this.#labelled.add(usage.provider);
+      this.#usage.delete(usageKey({ provider: usage.provider }));
+    }
     // Unchanged numbers are not worth waking the watch radio for; GET /api/usage has the fresh timestamp.
-    if (!previous || JSON.stringify(previous.windows) !== JSON.stringify(usage.windows)) this.#broadcast({ type: 'usage', usage });
+    const changed = !previous || JSON.stringify([previous.windows, previous.account]) !== JSON.stringify([usage.windows, usage.account]);
+    if (changed) this.#broadcast({ type: 'usage', usage });
   }
 
   alert(sessionId: string, alert: AlertKind, text?: string): void {
@@ -116,12 +126,11 @@ export class BridgeHub implements Hub {
 
   // Queries
 
-  /** needs_input first, then running, then most recent activity. */
+  /** needs_input first, then running, then most recent activity. A session two instances list (a copied home) counts once, from the first, as in `resolve`. */
   sessions(): Session[] {
-    return this.#providers
-      .flatMap((p) => p.listSessions())
-      .map((s) => this.#overlay(s))
-      .sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.lastActivity.localeCompare(a.lastActivity));
+    const byId = new Map<string, Session>();
+    for (const p of this.#providers) for (const s of p.listSessions()) if (!byId.has(s.id)) byId.set(s.id, this.#overlay(s));
+    return [...byId.values()].sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.lastActivity.localeCompare(a.lastActivity));
   }
 
   providerHealth(): ProviderHealth[] {

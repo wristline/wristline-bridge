@@ -3,6 +3,7 @@
 
 import type { SessionStatus } from '../../protocol.ts';
 import { isObject, str } from '../../util.ts';
+import { normalizeThreadStatus } from './parse.ts';
 import type { CodexRpc, ThreadStatus } from './rpc.ts';
 
 /** What the app-server daemon reports about a thread it has loaded. */
@@ -39,4 +40,73 @@ export async function loadedThreadIds(rpc: CodexRpc): Promise<string[]> {
     cursor = str(page.nextCursor);
   } while (cursor);
   return ids;
+}
+
+/** The threads the daemon has loaded (empty while disconnected), and which of them this client has rejoined. */
+export class LoadedThreads {
+  readonly #threads = new Map<string, Loaded>();
+  /** Title-generation and other throwaway threads, which never get a rollout. */
+  readonly #ephemeral = new Set<string>();
+
+  get(id: string): Loaded | undefined {
+    return this.#threads.get(id);
+  }
+
+  has(id: string): boolean {
+    return this.#threads.has(id);
+  }
+
+  isEphemeral(id: string): boolean {
+    return this.#ephemeral.has(id);
+  }
+
+  ids(): string[] {
+    return [...this.#threads.keys()];
+  }
+
+  clear(): void {
+    this.#threads.clear();
+  }
+
+  forget(id: string): void {
+    this.#threads.delete(id);
+    this.#ephemeral.delete(id);
+  }
+
+  /** Records a loaded thread from a Thread object (or just its id); ephemeral threads are skipped. */
+  track(id: string, thread: unknown): void {
+    const t = isObject(thread) ? thread : {};
+    if (t.ephemeral === true || this.#ephemeral.has(id)) {
+      this.#ephemeral.add(id);
+      return;
+    }
+    const status = normalizeThreadStatus(t.status) ?? this.#threads.get(id)?.status ?? { type: 'idle' };
+    if (status.type === 'notLoaded') {
+      this.#threads.delete(id);
+      return;
+    }
+    const previous = this.#threads.get(id);
+    this.#threads.set(id, { status, parent: str(t.parentThreadId) ?? previous?.parent, joined: previous?.joined ?? false });
+  }
+
+  /** Rejoins a thread the daemon has loaded so this client receives its requests. */
+  join(id: string, rpc: CodexRpc | undefined): Promise<boolean> {
+    const loaded = this.#threads.get(id);
+    // Never resume a thread the daemon has not loaded: that would open its rollout a second time.
+    if (!loaded || !rpc?.ready) return Promise.resolve(false);
+    if (loaded.joined) return Promise.resolve(true);
+    loaded.joining ??= rpc.request('thread/resume', { threadId: id, excludeTurns: true }).then(
+      () => {
+        loaded.joined = true;
+        loaded.joining = undefined;
+        console.log(`wristline: codex rejoined loaded thread ${id}`);
+        return true;
+      },
+      () => {
+        loaded.joining = undefined;
+        return false;
+      },
+    );
+    return loaded.joining;
+  }
 }

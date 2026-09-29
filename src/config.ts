@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -93,11 +94,20 @@ export function resolveConfig(stored: StoredConfig, flags: Flags = {}, env: Env 
   };
 }
 
-/** The primary first, then the extras that name a different directory (compared as resolved paths). */
+/** A path as the file system knows it (symlinks followed), or resolved when it does not exist: how two spellings of one home are told apart. */
+export function canonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/** The primary first, then the extras that name a different directory, each as a resolved path (`claudeLogins` is keyed by it). */
 function homes(primary: string, extra: string[] | undefined): string[] {
   const out: string[] = [];
   for (const home of [primary, ...(extra ?? [])]) {
-    if (!out.some((h) => resolve(h) === resolve(home))) out.push(home);
+    if (!out.some((h) => canonical(h) === canonical(home))) out.push(resolve(home));
   }
   return out;
 }
@@ -123,15 +133,16 @@ export async function readStored(dir: string): Promise<StoredConfig> {
 /** Saves run one after another: concurrent ones (a revoke racing a pair) would share the temp file and lose a patch. */
 let saving: Promise<unknown> = Promise.resolve();
 
-/** Read-modify-write so a running bridge and `setup` only replace the keys they own. */
-export function updateStored(dir: string, patch: StoredConfig): Promise<StoredConfig> {
+/** Read-modify-write so a running bridge and `setup` only replace the keys they own; a function patch sees what is stored (to change one key of a nested map). */
+export function updateStored(dir: string, patch: StoredConfig | ((stored: StoredConfig) => StoredConfig)): Promise<StoredConfig> {
   const result = saving.then(() => writeStored(dir, patch));
   saving = result.catch(() => {});
   return result;
 }
 
-async function writeStored(dir: string, patch: StoredConfig): Promise<StoredConfig> {
-  const next = { ...(await readStored(dir)), ...patch };
+async function writeStored(dir: string, patch: StoredConfig | ((stored: StoredConfig) => StoredConfig)): Promise<StoredConfig> {
+  const stored = await readStored(dir);
+  const next = { ...stored, ...(typeof patch === 'function' ? patch(stored) : patch) };
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
   const file = configPath(dir);

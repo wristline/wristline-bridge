@@ -15,11 +15,22 @@ interface State {
   /** `account/read`'s account and `account/rateLimits/read`'s accountId. */
   account: unknown;
   accountId: string | null;
-  /** Delays the two account reads, for what arrives while a login is being re-read. */
+  /** Delays the two account reads (answered with the state as of the request), for what arrives while a login is being re-read. */
   accountDelayMs: number;
+  /** Makes `account/rateLimits/read` fail with this message. */
+  rateLimitsError: string | null;
 }
 
-const state: State = { loaded: [], threads: {}, rateLimits: null, account: null, accountId: null, accountDelayMs: 0, ...(JSON.parse(process.argv[2] ?? '{}') as Partial<State>) };
+const state: State = {
+  loaded: [],
+  threads: {},
+  rateLimits: null,
+  account: null,
+  accountId: null,
+  accountDelayMs: 0,
+  rateLimitsError: null,
+  ...(JSON.parse(process.argv[2] ?? '{}') as Partial<State>),
+};
 const logFile = process.argv[3];
 let nextServerId = 0;
 
@@ -48,10 +59,15 @@ wss.on('connection', (ws) => {
         return reply({ thread: { id: threadId } });
       case 'turn/start':
         return reply({ turn: { id: 'turn-new', items: [], status: 'inProgress' } });
-      case 'account/read':
-        return void setTimeout(() => reply({ account: state.account }), state.accountDelayMs);
-      case 'account/rateLimits/read':
-        return void setTimeout(() => reply({ rateLimits: state.rateLimits, accountId: state.accountId }), state.accountDelayMs);
+      case 'account/read': {
+        const result = { account: state.account };
+        return void setTimeout(() => reply(result), state.accountDelayMs);
+      }
+      case 'account/rateLimits/read': {
+        const result = { rateLimits: state.rateLimits, accountId: state.accountId };
+        const error = state.rateLimitsError;
+        return void setTimeout(() => (error === null ? reply(result) : fail(-32000, error)), state.accountDelayMs);
+      }
       case 'fake/state':
         Object.assign(state, p);
         return reply({});

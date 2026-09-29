@@ -14,8 +14,9 @@ export interface StatuslineTarget {
 
 /**
  * The home whose `projects/` holds `transcript_path` (real paths compared) gets the report; else
- * the instance that lists `session_id`; else the only instance. Anything else is dropped, logged
- * once per session.
+ * the instance that lists `session_id`; else the only instance, unless the path lies under some
+ * other `projects/` (a home the bridge does not watch, whose numbers would be filed under the
+ * watched home's account). Anything else is dropped, logged once per session.
  */
 export function statuslineRouter(instances: StatuslineTarget[], log: (line: string) => void = console.error): (input: unknown) => void {
   const dropped = new Set<string>();
@@ -28,11 +29,12 @@ export function statuslineRouter(instances: StatuslineTarget[], log: (line: stri
       if (path?.startsWith(root + sep)) return instance.statusline(input);
     }
     const id = str(input.session_id);
-    const target = (id === undefined ? undefined : instances.find((i) => i.hasSession(id))) ?? (instances.length === 1 ? instances[0] : undefined);
+    const foreign = path !== undefined && path.includes(`${sep}projects${sep}`);
+    const target = (id === undefined ? undefined : instances.find((i) => i.hasSession(id))) ?? (instances.length === 1 && !foreign ? instances[0] : undefined);
     if (target) return target.statusline(input);
     if (dropped.has(id ?? '')) return;
     dropped.add(id ?? '');
-    log(`wristline: statusLine of session ${id ?? '(no id)'} matches no Claude Code home; ignored`);
+    log(`wristline: statusLine of session ${id ?? '(no id)'} matches no registered Claude Code home; ignored`);
   };
   return (input) => {
     if (isObject(input)) route(input).catch((err: unknown) => log(`wristline: statusLine routing failed: ${err instanceof Error ? err.message : String(err)}`));

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -31,6 +31,10 @@ test('updateStored merges keys and writes 0600 in a 0700 dir', async () => {
   await updateStored(dir, { hookToken: 't', apiPort: 1 });
   await updateStored(dir, { devices: [] });
   assert.deepEqual(await readStored(dir), { hookToken: 't', apiPort: 1, devices: [] });
+  // A function patch sees what is stored, so one key of a nested map can be changed without restoring the rest from memory.
+  await updateStored(dir, { claudeLogins: { '/a': [] } });
+  await updateStored(dir, (stored) => ({ claudeLogins: { ...stored.claudeLogins, '/b': [] } }));
+  assert.deepEqual((await readStored(dir)).claudeLogins, { '/a': [], '/b': [] });
   assert.equal(statSync(dir).mode & 0o777, 0o700);
   assert.equal(statSync(join(dir, 'config.json')).mode & 0o777, 0o600);
 });
@@ -50,7 +54,7 @@ test('invalid values in config.json are ignored, invalid JSON is an error', asyn
   await assert.rejects(readStored(dir), /not valid JSON/);
 });
 
-test('claudeHomes/codexHomes: primary first, extras deduplicated by resolved path; env and flag only move the primary', () => {
+test('claudeHomes/codexHomes: primary first, extras resolved and deduplicated (symlinks followed); env and flag only move the primary', () => {
   const home = '/home/u';
   const stored = {
     claudeHome: '/home/u/.claude',
@@ -60,9 +64,14 @@ test('claudeHomes/codexHomes: primary first, extras deduplicated by resolved pat
   assert.deepEqual(resolveConfig(stored, {}, {}, home).claudeHomes, ['/home/u/.claude', '/home/u/.claude-school']);
   assert.deepEqual(resolveConfig(stored, {}, {}, home).codexHomes, ['/home/u/.codex', '/home/u/.codex-school']);
   const env = resolveConfig(stored, {}, { CLAUDE_CONFIG_DIR: '/env' }, home);
-  assert.deepEqual([env.claudeHome, env.claudeHomes], ['/env', ['/env', '/home/u/.claude-school', '/home/u/.claude/']], 'the old primary is now a distinct extra');
+  assert.deepEqual([env.claudeHome, env.claudeHomes], ['/env', ['/env', '/home/u/.claude-school', '/home/u/.claude']], 'the old primary is now a distinct extra, stored resolved');
   const flag = resolveConfig(stored, { claudeHome: '/home/u/.claude-school' }, { CLAUDE_CONFIG_DIR: '/env' }, home);
-  assert.deepEqual(flag.claudeHomes, ['/home/u/.claude-school', '/home/u/.claude/']);
+  assert.deepEqual(flag.claudeHomes, ['/home/u/.claude-school', '/home/u/.claude']);
+  // A symlink to a registered home is that home: one provider instance, not two listing the same sessions.
+  const real = join(root, 'real-home');
+  mkdirSync(real);
+  symlinkSync(real, join(root, 'link-home'));
+  assert.deepEqual(resolveConfig({ claudeHome: join(root, 'link-home'), extraClaudeHomes: [real, `${real}/`] }, {}, {}, home).claudeHomes, [join(root, 'link-home')]);
   const defaults = resolveConfig({}, {}, {}, home);
   assert.deepEqual(
     [defaults.claudeHomes, defaults.codexHomes, defaults.claudeLogins, defaults.codexAccounts, defaults.labels],

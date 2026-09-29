@@ -163,8 +163,14 @@ alias for your shell profile (`alias claude-school='CLAUDE_CONFIG_DIR=$HOME/.cla
 the bridge never edits your profile), then `hooks install` and a bridge restart. `--label` gives
 the account a short name (up to 12 characters) shown on the watch instead of its email; if the
 home was not logged in yet, run the same `add` again afterwards. `setup` also proposes homes it
-finds (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `~/.claude*`, `~/.codex*`). Each Claude Code home
-has its own `settings.json`, `CLAUDE.md`, memory and plugins; copy what you need.
+finds (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `~/.claude*`, `~/.codex*`) and asks about each one;
+with `--yes` (or without a terminal) it only lists them with the `accounts add` line to run, so a
+backup kept next to your home is never enrolled unasked. Each Claude Code home has its own
+`settings.json`, `CLAUDE.md`, memory and plugins; copy what you need, but never `projects/`,
+`sessions/`, `.claude.json` or `.credentials.json`: they hold the first home's transcripts, live
+sessions and login, and a copy would list every session twice. A symlink to a registered home
+counts as the same home. `remove` also forgets the home's login timeline (`claudeLogins`);
+`labels` and `codexAccounts` are keyed by account id, shared between homes, and stay.
 
 `hooks install` goes through every registered Claude Code home and gives each its own relay
 script (`~/.config/wristline/statusline-<home>.sh`, e.g. `statusline--home-u--claude-school.sh`),

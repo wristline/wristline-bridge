@@ -14,24 +14,30 @@ after(() => rmSync(root, { recursive: true, force: true }));
 
 const session = (n: string): Session => ({ id: `claude-code:${n}`, provider: 'claude-code', title: n, cwd: '/w', status: 'idle', lastActivity: '2026-09-29T10:00:00.000Z' });
 
-test('two instances of one provider: resolve picks the one listing the session, and items are served from it', async () => {
+test('two instances of one provider: resolve picks the one listing the session, items are served from it, a duplicate id is listed once', async () => {
   const a = new FakeProvider();
   a.sessions = [session('s1')];
   a.items.set('s1', [{ seq: 1, kind: 'user', ts: '2026-09-29T10:00:00.000Z', text: 'from a' }]);
   const b = new FakeProvider();
   b.sessions = [session('s2')];
   b.items.set('s2', []);
-  const bridge = await startBridge([a, b]);
+  const c = new FakeProvider(); // A copied home lists a's session too.
+  c.sessions = [{ ...session('s1'), title: 'copy' }];
+  const bridge = await startBridge([a, b, c]);
   try {
     assert.equal(bridge.hub.resolve('claude-code:s1')?.provider, a);
     assert.equal(bridge.hub.resolve('claude-code:s2')?.provider, b);
     assert.equal(bridge.hub.resolve('claude-code:s3'), undefined);
     assert.equal(bridge.hub.resolve('codex:s1'), undefined);
     assert.deepEqual(
-      bridge.hub.sessions().map((s) => s.id),
-      ['claude-code:s1', 'claude-code:s2'],
+      bridge.hub.sessions().map((s) => [s.id, s.title]),
+      [
+        ['claude-code:s1', 's1'],
+        ['claude-code:s2', 's2'],
+      ],
+      'a duplicate id counts once, from the first instance (as resolve picks it)',
     );
-    assert.deepEqual(bridge.hub.providerHealth().map((h) => h.id), ['claude-code', 'claude-code']);
+    assert.deepEqual(bridge.hub.providerHealth().map((h) => h.id), ['claude-code', 'claude-code', 'claude-code']);
     const items = (id: string): Promise<Response> => fetch(`${bridge.base}/api/sessions/${id}/items`, { headers: { authorization: `Bearer ${bridge.token}` } });
     assert.deepEqual(await (await items('claude-code:s1')).json(), { items: [{ seq: 1, kind: 'user', ts: '2026-09-29T10:00:00.000Z', text: 'from a' }], hasMore: false });
     assert.deepEqual(await (await items('claude-code:s2')).json(), { items: [], hasMore: false });
@@ -41,7 +47,7 @@ test('two instances of one provider: resolve picks the one listing the session, 
   }
 });
 
-test('usage is kept per provider and account; a labelled entry retires the unlabelled one; only changed numbers are broadcast', async () => {
+test('usage is kept per provider and account; a labelled entry retires the unlabelled one for good; stale snapshots are ignored; changed numbers or accounts are broadcast', async () => {
   const bridge = await startBridge(new FakeProvider());
   try {
     const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
@@ -77,6 +83,19 @@ test('usage is kept per provider and account; a labelled entry retires the unlab
     bridge.hub.usage(claude(A, 11));
     const event = await ws.next();
     assert.equal(event.type === 'usage' && event.usage.windows[0]?.usedPercent, 11);
+
+    // Once labelled, an unlabelled report of the provider is stale: neither stored nor broadcast.
+    bridge.hub.usage(claude(undefined, 99));
+    // A snapshot older than the stored entry (another home's rollout of this account) must not replace live numbers.
+    bridge.hub.usage({ ...claude(A, 50), updatedAt: '2026-09-29T09:00:00.000Z' });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ws.pending(), 0);
+    assert.deepEqual(keys(), ['claude-code:acc-a', 'claude-code:acc-b', 'codex:']);
+    assert.equal(bridge.hub.usageList().find((u) => u.account?.id === 'acc-a')?.windows[0]?.usedPercent, 11);
+    // Same numbers, but the account is now known for certain (or relabelled): worth an event.
+    const exact = claude({ id: 'acc-b', label: 'school' }, 20);
+    bridge.hub.usage(exact);
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: exact });
 
     const other = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
     const snapshot = await other.next();
@@ -121,8 +140,14 @@ test('statusLine reports go to the home holding the transcript, else to the inst
   assert.deepEqual(logs.length, 1, 'an unroutable session is logged once');
   assert.match(logs[0] ?? '', /zz/);
 
+  // A single instance takes reports without a path, but not one whose transcript lies under another home's projects/.
   calls.length = 0;
-  statuslineRouter([a])({ session_id: 'anything' });
-  await waitFor(() => calls[0]);
+  logs.length = 0;
+  const single = statuslineRouter([a], (line) => logs.push(line));
+  single({ session_id: 'anything' });
+  single({ session_id: 'foreign', transcript_path: join(root, 'elsewhere', 'projects', '-w', 'foreign.jsonl') });
+  await waitFor(() => (calls.length === 1 && logs.length === 1 ? true : undefined));
+  await new Promise((r) => setTimeout(r, 50));
   assert.deepEqual(calls, [[homeA, 'anything']]);
+  assert.match(logs[0] ?? '', /foreign/);
 });
