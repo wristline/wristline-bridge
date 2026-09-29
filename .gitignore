@@ -1,0 +1,30 @@
+# Node
+node_modules/
+dist/
+*.log
+.env
+.env.*
+
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+.cxx/
+captures/
+*.iml
+.idea/
+
+# Keystores and secrets
+*.jks
+*.keystore
+*.p12
+bridge/config.json
+**/wristline-bridge.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
