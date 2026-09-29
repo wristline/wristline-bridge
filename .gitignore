@@ -5,22 +5,11 @@ dist/
 .env
 .env.*
 
-# Android / Gradle
-.gradle/
-build/
-local.properties
-*.apk
-*.aab
-.cxx/
-captures/
-*.iml
-.idea/
-
 # Keystores and secrets
 *.jks
 *.keystore
 *.p12
-bridge/config.json
+/config.json
 **/wristline-bridge.json
 
 # OS / editor

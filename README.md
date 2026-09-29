@@ -1,19 +1,10 @@
-# Wristline
+# Wristline Bridge
 
-Wristline is a Wear OS app for Galaxy Watch that lets you browse and control AI coding-agent sessions (Claude Code, OpenAI Codex CLI, and more later) running on your PC. It is paired with `wristline-bridge`, a small local server on the PC that the watch talks to.
+Wristline Bridge is the small local server that runs on your development machine and lets the Wristline watch app browse and control AI coding-agent sessions (Claude Code, OpenAI Codex CLI, and more providers later). It is the companion of the Wristline watch app: https://github.com/wristline/wristline
 
 ## Status
 
 Early development.
-
-## Layout
-
-Planned structure:
-
-- `bridge/`: `wristline-bridge`, the Node/TypeScript bridge server
-- `watch/`: the Wear OS app
-- `scripts/`: setup helpers
-- `docs/`: documentation
 
 ## License
 
