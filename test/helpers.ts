@@ -1,6 +1,6 @@
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
-import { Auth } from '../src/auth.ts';
+import { Auth, type AuthOptions } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
 import type { Item, ItemPage, ProviderHealth, ServerEvent, Session } from '../src/protocol.ts';
 import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.ts';
@@ -56,10 +56,15 @@ export interface Bridge {
   close(): Promise<void>;
 }
 
-export async function startBridge(provider: SessionProvider, now = () => Date.parse('2026-09-29T10:00:00Z'), waitMs = 60_000): Promise<Bridge> {
+export async function startBridge(
+  provider: SessionProvider,
+  now = () => Date.parse('2026-09-29T10:00:00Z'),
+  waitMs = 60_000,
+  save: AuthOptions['save'] = async () => {},
+): Promise<Bridge> {
   let n = 0;
   const hub = new BridgeHub({ providers: [provider], pending: { now, newId: () => `req-${++n}` } });
-  const auth = new Auth({ devices: [], save: async () => {}, now });
+  const auth = new Auth({ devices: [], save, now });
   const hookToken = 'hook-token';
   const server = await startServer({
     hub,

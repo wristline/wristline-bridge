@@ -85,8 +85,17 @@ export async function readStored(dir: string): Promise<StoredConfig> {
   return pickStored(raw);
 }
 
+/** Saves run one after another: concurrent ones (a revoke racing a pair) would share the temp file and lose a patch. */
+let saving: Promise<unknown> = Promise.resolve();
+
 /** Read-modify-write so a running bridge and `setup` only replace the keys they own. */
-export async function updateStored(dir: string, patch: StoredConfig): Promise<StoredConfig> {
+export function updateStored(dir: string, patch: StoredConfig): Promise<StoredConfig> {
+  const result = saving.then(() => writeStored(dir, patch));
+  saving = result.catch(() => {});
+  return result;
+}
+
+async function writeStored(dir: string, patch: StoredConfig): Promise<StoredConfig> {
   const next = { ...(await readStored(dir)), ...patch };
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);

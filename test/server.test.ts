@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { connect } from 'node:net';
 import { after, before, test } from 'node:test';
 import { WebSocket } from 'ws';
 import { CLOSE_REVOKED, type Session } from '../src/protocol.ts';
@@ -80,6 +81,91 @@ test('pairing: 401 for a wrong code, 404 once the window closed', async () => {
   assert.equal((await pair('12')).status, 400);
   for (let i = 0; i < 5; i++) assert.equal((await pair(wrong)).status, 401);
   assert.equal((await pair(code)).status, 404);
+});
+
+/** Sends one raw request (undici would normalise the target) and resolves the status line. */
+function raw(port: number, request: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => socket.write(request));
+    let data = '';
+    socket.on('data', (chunk: Buffer) => (data += chunk.toString()));
+    socket.on('close', () => resolve(data.split('\r\n')[0] ?? ''));
+    socket.on('error', reject);
+  });
+}
+
+const UPGRADE_HEADERS = 'Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n';
+
+test('a request-target URL cannot parse answers 400, also on the upgrade path', async () => {
+  const port = bridge.server.apiPort;
+  assert.equal(await raw(port, 'GET //[ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'), 'HTTP/1.1 400 Bad Request');
+  assert.equal(await raw(port, `GET //[ HTTP/1.1\r\nHost: x\r\n${UPGRADE_HEADERS}\r\n`), 'HTTP/1.1 400 Bad Request');
+  assert.equal(await raw(bridge.server.hookPort, 'GET //[ HTTP/1.1\r\nHost: x\r\nauthorization: Bearer hook-token\r\nConnection: close\r\n\r\n'), 'HTTP/1.1 400 Bad Request');
+  assert.equal((await fetch(`${bridge.base}/api/health`, auth(bridge.token))).status, 200);
+});
+
+test('a refused upgrade survives a peer reset and does not linger when the peer never closes', async () => {
+  const own = await startBridge(new FakeProvider());
+  try {
+    const port = own.server.apiPort;
+    const upgrade = `GET /api/ws HTTP/1.1\r\nHost: x\r\n${UPGRADE_HEADERS}\r\n`;
+    for (let i = 0; i < 10; i++) {
+      const socket = connect(port, '127.0.0.1');
+      socket.on('error', () => {});
+      await once(socket, 'connect');
+      socket.write(upgrade);
+      socket.resetAndDestroy(); // Reaches the bridge with the request: its reply hits a reset socket.
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal((await fetch(`${own.base}/api/health`, auth(own.token))).status, 200);
+
+    // Half-open peer: reads the 401, never sends its own FIN. The bridge must close its side anyway.
+    const peer = connect({ port, host: '127.0.0.1', allowHalfOpen: true });
+    peer.resume();
+    let closed = false;
+    peer.on('error', () => {});
+    peer.on('close', () => (closed = true));
+    await once(peer, 'connect');
+    peer.write(upgrade);
+    await once(peer, 'end');
+    for (let i = 0; i < 30 && !closed; i++) {
+      peer.write('x'); // A destroyed server socket answers with RST; the next write then fails.
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(closed, true, 'the bridge kept the refused socket open');
+    peer.destroy();
+  } finally {
+    await own.close();
+  }
+});
+
+test('malformed percent-encoding in an id answers 400, not 500', async () => {
+  const headers = auth(bridge.token);
+  assert.equal((await fetch(`${bridge.base}/api/sessions/%zz/items`, headers)).status, 400);
+  assert.equal((await fetch(`${bridge.base}/api/sessions/%zz/prompt`, { method: 'POST', ...headers, body: JSON.stringify({ text: 'hi' }) })).status, 400);
+  assert.equal((await fetch(`${bridge.base}/api/requests/%zz`, { method: 'POST', ...headers, body: JSON.stringify({ answers: {} }) })).status, 400);
+  assert.equal((await fetch(`${bridge.local}/local/devices/%zz`, { method: 'DELETE', ...auth(bridge.hookToken) })).status, 400);
+});
+
+test('revoking closes the device connections even when saving the device list fails', async () => {
+  let failSave = false;
+  const own = await startBridge(new FakeProvider(), undefined, undefined, async () => {
+    if (failSave) throw new Error('disk full');
+  });
+  try {
+    const first = await own.auth.issue('via local');
+    const second = await own.auth.issue('via public');
+    const sockets = await Promise.all([first, second].map((d) => new TestSocket(`${own.base.replace('http', 'ws')}/api/ws`, d.token).open()));
+    const closes = sockets.map((s) => once(s.ws, 'close'));
+    failSave = true;
+    assert.equal((await fetch(`${own.local}/local/devices/${first.device.id}`, { method: 'DELETE', ...auth(own.hookToken) })).status, 500);
+    assert.equal((await fetch(`${own.base}/api/device`, { method: 'DELETE', ...auth(second.token) })).status, 500);
+    for (const close of closes) assert.equal(((await close) as [number])[0], CLOSE_REVOKED);
+    assert.equal((await fetch(`${own.base}/api/sessions`, auth(first.token))).status, 401);
+    assert.equal((await fetch(`${own.base}/api/sessions`, auth(second.token))).status, 401);
+  } finally {
+    await own.close();
+  }
 });
 
 // Runs last: it locks the listener for 60 s.

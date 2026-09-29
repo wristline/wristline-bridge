@@ -39,6 +39,14 @@ test('5 wrong codes close the window', async () => {
   assert.equal(await auth.pair(code, 'x'), 'no_window');
 });
 
+test('pairing attempts while no window is open count towards the lockout', async () => {
+  const { auth } = setup();
+  for (let i = 0; i < 20; i++) assert.equal(await auth.pair('000000', 'x'), 'no_window');
+  assert.equal(auth.locked(), false);
+  assert.equal(await auth.pair('000000', 'x'), 'no_window');
+  assert.equal(auth.locked(), true);
+});
+
 test('tokens are compared in constant time and revocation takes effect', async () => {
   const { auth } = setup();
   const one = await auth.issue('one');

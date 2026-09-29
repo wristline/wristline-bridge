@@ -37,6 +37,9 @@ export function unitFile(o: UnitOptions): string {
     '[Unit]',
     'Description=Wristline bridge: watch remote for coding-agent sessions',
     'After=network.target',
+    // Without a limit, a node or cli path that disappeared (npx cache, nvm) fails every 5 s forever.
+    'StartLimitIntervalSec=120',
+    'StartLimitBurst=5',
     '',
     '[Service]',
     `ExecStart=${systemdQuote(o.execPath)} ${systemdQuote(o.cli)} run`,

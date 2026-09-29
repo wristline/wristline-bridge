@@ -29,8 +29,9 @@ The bridge listens on two loopback ports:
 Every public request except `POST /api/pair`, including the WebSocket upgrade, carries
 `Authorization: Bearer <deviceToken>`. A missing or wrong token gets
 `401` with `WWW-Authenticate: Bearer realm="wristline"` (the watch uses this to recognise a bridge
-before pairing). More than 20 failed attempts in a minute lock the public listener for 60 s:
-requests without a valid token (and all pairing attempts) then get `429` with `Retry-After`.
+before pairing). More than 20 failed attempts in a minute (wrong tokens, wrong codes, and pairing
+attempts while no window is open) lock the public listener for 60 s: requests without a valid
+token (and all pairing attempts) then get `429` with `Retry-After`.
 
 Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the body
 `{"error": <code>}` ([`error-401.json`](../protocol/v1/error-401.json)); codes:

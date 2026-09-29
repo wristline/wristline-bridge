@@ -56,8 +56,10 @@ loginctl enable-linger "$USER"               # optional: keep it running while l
 ```
 
 The unit runs the current `node` binary on this package's `dist/cli.js` and restarts it on
-failure. Install the package globally first (`npm i -g wristline-bridge`); a copy in the npx
-cache can disappear. Logs: `journalctl --user -u wristline-bridge -f`.
+failure (up to 5 times in 2 minutes; after that, `systemctl --user reset-failed wristline-bridge`
+and start it again). Install the package globally first (`npm i -g wristline-bridge`): a copy in
+the npx cache can disappear, so `service install` refuses one unless you pass `--force`, and it
+warns when `node` comes from nvm, fnm or volta. Logs: `journalctl --user -u wristline-bridge -f`.
 
 ## Claude Code hooks
 
@@ -188,8 +190,10 @@ wristline-bridge devices --revoke <id>   # revoke one; its connections close imm
 - Only paired devices can use the public API. Each device has its own random 256-bit token; the
   bridge stores only its SHA-256 hash and compares hashes in constant time.
 - Pairing codes come from a cryptographic RNG, expire after 5 minutes, work once, and are
-  discarded after 5 wrong attempts. More than 20 failed authentications per minute lock the
-  public API for 60 s (`429`).
+  discarded after 5 wrong attempts. More than 20 failed authentications per minute (pairing
+  attempts while no window is open count too) lock the public API for 60 s (`429`). Paired
+  watches keep working; if someone keeps the lock up while you want to pair, use
+  `wristline-bridge pair --token`, which goes through the local port only.
 - The local port requires a separate token from `config.json`, because WSL2 also forwards it to
   Windows where a web page could otherwise reach it. It is never meant to be published.
 - `~/.config/wristline/` is created with mode 0700 and `config.json` with 0600.

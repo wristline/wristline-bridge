@@ -162,8 +162,17 @@ export async function hooksUninstall(flags: Flags, options: HooksOptions): Promi
   console.log('Uninstalled.');
 }
 
+/**
+ * Where a unit's paths would stop existing on their own: npm cleans the npx cache up, and a node
+ * version manager removes the version the unit names when it is switched or uninstalled.
+ */
+export function volatilePath(cli: string, execPath: string): 'npx' | 'nvm' | 'fnm' | 'volta' | undefined {
+  if (cli.includes(`${sep}_npx${sep}`)) return 'npx';
+  return (['nvm', 'fnm', 'volta'] as const).find((name) => [cli, execPath].some((p) => p.includes(`${sep}.${name}${sep}`)));
+}
+
 /** Writes the systemd user unit and enables it; `dryRun` only prints what would happen. */
-export async function serviceInstall(flags: Flags, options: { yes: boolean; dryRun: boolean }): Promise<boolean> {
+export async function serviceInstall(flags: Flags, options: { yes: boolean; dryRun: boolean; force?: boolean }): Promise<boolean> {
   const config = resolveConfig(await readStored(configDir()), flags);
   const cli = cliPath();
   const unit = unitFile({ execPath: process.execPath, cli, codexHome: config.codexHome });
@@ -175,10 +184,16 @@ export async function serviceInstall(flags: Flags, options: { yes: boolean; dryR
     return false;
   }
   if (!(await builtCliExists())) throw new CliError(`${cli} does not exist; run \`npm run build\` first.`);
-  if (cli.includes(`${sep}_npx${sep}`)) {
-    console.log('This copy runs from the npx cache, which npm may clean up. Install it for good first:');
-    console.log('  npm i -g wristline-bridge && wristline-bridge service install\n');
+  const volatile = volatilePath(cli, process.execPath);
+  if (volatile === 'npx' && !options.force) {
+    throw new CliError(
+      'This copy runs from the npx cache, which npm may clean up. Install it for good first:\n' +
+        '  npm i -g wristline-bridge && wristline-bridge service install\n' +
+        'or pass --force to use this copy anyway.',
+    );
   }
+  if (volatile === 'npx') console.log('This copy runs from the npx cache, which npm may clean up; the service then fails to start.\n');
+  else if (volatile) console.log(`node runs from ${volatile}; the service fails to start once that node version is removed.\n`);
   console.log(`Stop a bridge you started by hand first; the service uses the same ports.`);
   if (!(await approve(`Install and start ${SERVICE_NAME}?`, options.yes, 'wristline-bridge service install'))) return false;
   try {

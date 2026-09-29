@@ -25,8 +25,9 @@ Commands:
   hooks install|uninstall [--yes] [--settings <file>]
                                   Add or remove the Claude Code hooks and statusLine relay
                                   (default file: <claude-home>/settings.json); shows the diff first
-  service install|uninstall [--yes] [--dry-run]
-                                  Run the bridge as a systemd user service
+  service install|uninstall [--yes] [--dry-run] [--force]
+                                  Run the bridge as a systemd user service (--force: even from
+                                  the npx cache)
 
 Options:
   --api-port <port>     Public API port (default 47770)
@@ -72,7 +73,13 @@ async function run(flags: Flags): Promise<void> {
       await updateStored(dir, { devices });
     },
   });
-  await Promise.all(providers.map((p) => p.start(hub)));
+  // Settled, not raced: a sibling start() finishing after a failure would recreate its timers and keep the process alive.
+  const failed = (await Promise.allSettled(providers.map((p) => p.start(hub)))).find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (failed) {
+    for (const p of providers) p.stop();
+    hub.close();
+    throw failed.reason;
+  }
   const server = await startServer({
     hub,
     auth,
@@ -174,6 +181,7 @@ async function main(argv: string[]): Promise<void> {
       revoke: { type: 'string' },
       settings: { type: 'string' },
       'dry-run': { type: 'boolean' },
+      force: { type: 'boolean' },
       yes: { type: 'boolean', short: 'y' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -206,9 +214,11 @@ async function main(argv: string[]): Promise<void> {
       throw new CliError('Usage: wristline-bridge hooks install|uninstall [--yes] [--settings <file>]');
     }
     case 'service':
-      if (positionals[1] === 'install') return void (await serviceInstall(flags, { yes: values.yes === true, dryRun: values['dry-run'] === true }));
+      if (positionals[1] === 'install') {
+        return void (await serviceInstall(flags, { yes: values.yes === true, dryRun: values['dry-run'] === true, force: values.force === true }));
+      }
       if (positionals[1] === 'uninstall') return serviceUninstall();
-      throw new CliError('Usage: wristline-bridge service install|uninstall [--yes] [--dry-run]');
+      throw new CliError('Usage: wristline-bridge service install|uninstall [--yes] [--dry-run] [--force]');
     default:
       throw new CliError(`Unknown command: ${command}\n\n${HELP}`);
   }

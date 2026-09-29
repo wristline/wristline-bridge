@@ -95,11 +95,15 @@ export class Auth {
     return { code, expiresAt: new Date(expiresAt).toISOString() };
   }
 
-  /** Redeems a pairing code; the window closes on success, expiry, or the 5th wrong code. */
+  /**
+   * Redeems a pairing code; the window closes on success, expiry, or the 5th wrong code. An attempt
+   * without a window counts towards the lockout too, so polling for one is not free.
+   */
   async pair(code: string, deviceName: string): Promise<Issued | 'no_window' | 'invalid_code'> {
     const window = this.#pairing;
     if (!window || this.#now() >= window.expiresAt) {
       this.#pairing = undefined;
+      this.recordFailure();
       return 'no_window';
     }
     if (!safeEqual(code, window.code)) {

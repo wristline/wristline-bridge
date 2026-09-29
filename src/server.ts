@@ -134,6 +134,24 @@ function positiveInt(value: string | null): number | undefined | null {
   return /^[1-9]\d{0,9}$/.test(value) ? Number(value) : null;
 }
 
+/** Undefined for a request-target `URL` rejects (e.g. `//[`), which must not throw in the upgrade listener. */
+function parseUrl(req: IncomingMessage): URL | undefined {
+  try {
+    return new URL(req.url ?? '/', 'http://localhost');
+  } catch {
+    return undefined;
+  }
+}
+
+/** A percent-decoded path segment; undefined when it is malformed (`%zz`). */
+function decodeId(segment: string | undefined): string | undefined {
+  try {
+    return decodeURIComponent(segment ?? '');
+  } catch {
+    return undefined;
+  }
+}
+
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
   const { hub, auth, bridge } = options;
   const host = options.host ?? '127.0.0.1';
@@ -164,7 +182,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   };
 
   const handlePublic = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const url = new URL(req.url ?? '/', 'http://localhost');
+    const url = parseUrl(req);
+    if (!url) return fail(res, 400, 'bad_request');
     const path = url.pathname;
     const method = req.method ?? 'GET';
     if (method === 'POST' && path === '/api/pair') return pair(req, res);
@@ -177,8 +196,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return send(res, 200, health);
     }
     if (method === 'DELETE' && path === '/api/device') {
-      await auth.revoke(device.id);
-      hub.closeDevice(device.id);
+      const revoked = auth.revoke(device.id);
+      hub.closeDevice(device.id); // Not after the save, which may fail: the token is already gone from memory.
+      await revoked;
       return send(res, 204);
     }
     if (method === 'GET' && path === '/api/sessions') return send(res, 200, { sessions: hub.sessions() } satisfies SessionList);
@@ -187,7 +207,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
     const session = /^\/api\/sessions\/([^/]+)\/(items|prompt)$/.exec(path);
     if (session) {
-      const target = hub.resolve(decodeURIComponent(session[1] ?? ''));
+      const id = decodeId(session[1]);
+      if (id === undefined) return fail(res, 400, 'bad_request');
+      const target = hub.resolve(id);
       if (session[2] === 'items' && method === 'GET') {
         const before = positiveInt(url.searchParams.get('before'));
         const limit = positiveInt(url.searchParams.get('limit'));
@@ -214,11 +236,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
     const request = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (request && method === 'POST') {
+      const id = decodeId(request[1]);
+      if (id === undefined) return fail(res, 400, 'bad_request');
       const input = await body(req, res, PUBLIC_BODY_MAX);
       if (!input) return;
       const answers = parseAnswers(input.answers);
       if (!answers) return fail(res, 400, 'bad_request');
-      const result = hub.pending.answer(decodeURIComponent(request[1] ?? ''), answers);
+      const result = hub.pending.answer(id, answers);
       if (result === 'already_resolved') return fail(res, 409, 'already_resolved');
       if (result === 'invalid') return fail(res, 400, 'bad_request');
       return send(res, 200, {});
@@ -230,7 +254,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     // Required even on loopback: WSL2 forwards localhost ports to Windows, where any browser page could post here.
     const token = bearer(req);
     if (!token || !safeEqual(token, options.hookToken)) return fail(res, 401, 'unauthorized', { 'www-authenticate': REALM });
-    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    const url = parseUrl(req);
+    if (!url) return fail(res, 400, 'bad_request');
+    const path = url.pathname;
     const method = req.method ?? 'GET';
 
     if (method === 'POST' && path === '/local/statusline') {
@@ -272,9 +298,11 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     }
     const revoke = /^\/local\/devices\/([^/]+)$/.exec(path);
     if (method === 'DELETE' && revoke) {
-      const id = decodeURIComponent(revoke[1] ?? '');
-      if (!(await auth.revoke(id))) return fail(res, 404, 'not_found');
-      hub.closeDevice(id);
+      const id = decodeId(revoke[1]);
+      if (id === undefined) return fail(res, 400, 'bad_request');
+      const revoked = auth.revoke(id);
+      hub.closeDevice(id); // Not after the save, which may fail: the token is already gone from memory.
+      if (!(await revoked)) return fail(res, 404, 'not_found');
       return send(res, 204);
     }
     fail(res, 404, 'not_found');
@@ -294,10 +322,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const localServer = createServer(guard(handleLocal));
 
   publicServer.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    if (path !== '/api/ws') return reject(socket, 404, 'not_found');
+    // Node hands the socket over without an error listener: a peer reset would otherwise crash the process.
+    const onError = (): void => {
+      socket.destroy();
+    };
+    socket.on('error', onError);
+    const url = parseUrl(req);
+    if (!url) return reject(socket, 400, 'bad_request');
+    if (url.pathname !== '/api/ws') return reject(socket, 404, 'not_found');
     const device = authorize(req);
     if (typeof device === 'number') return reject(socket, device, device === 401 ? 'unauthorized' : 'rate_limited', denyHeaders(device));
+    socket.off('error', onError); // ws installs its own.
     wss.handleUpgrade(req, socket, head, (ws) => hub.attach(ws, device.id));
   });
 
@@ -327,6 +362,8 @@ function reject(socket: Duplex, status: number, error: ErrorCode, headers: Heade
   const lines = Object.entries({ ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), connection: 'close' }).map(
     ([k, v]) => `${k}: ${v}`,
   );
+  // Like ws's abortHandshake: a peer that never closes would otherwise keep the socket in FIN-WAIT-2 for good.
+  socket.once('finish', () => socket.destroy());
   socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status] ?? ''}\r\n${lines.join('\r\n')}\r\n\r\n${data}`);
 }
 

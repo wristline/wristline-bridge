@@ -2,13 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { systemdQuote, unitFile, unitPath } from '../src/service.ts';
 
-test('the unit runs this node binary on the built cli with CODEX_HOME and restarts on failure', () => {
+test('the unit runs this node binary on the built cli with CODEX_HOME and restarts on failure, a limited number of times', () => {
   assert.equal(
     unitFile({ execPath: '/usr/bin/node', cli: '/usr/lib/node_modules/wristline-bridge/dist/cli.js', codexHome: '/home/dev/.codex-wsl' }),
     [
       '[Unit]',
       'Description=Wristline bridge: watch remote for coding-agent sessions',
       'After=network.target',
+      'StartLimitIntervalSec=120',
+      'StartLimitBurst=5',
       '',
       '[Service]',
       'ExecStart=/usr/bin/node /usr/lib/node_modules/wristline-bridge/dist/cli.js run',

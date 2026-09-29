@@ -35,6 +35,12 @@ test('updateStored merges keys and writes 0600 in a 0700 dir', async () => {
   assert.equal(statSync(join(dir, 'config.json')).mode & 0o777, 0o600);
 });
 
+test('concurrent saves are serialized: none fails and no patch is lost', async () => {
+  const dir = join(root, 'concurrent');
+  await Promise.all([updateStored(dir, { apiPort: 1 }), updateStored(dir, { hookPort: 2 }), updateStored(dir, { historyDays: 3 })]);
+  assert.deepEqual(await readStored(dir), { apiPort: 1, hookPort: 2, historyDays: 3 });
+});
+
 test('invalid values in config.json are ignored, invalid JSON is an error', async () => {
   const dir = join(root, 'bad');
   await updateStored(dir, {});
