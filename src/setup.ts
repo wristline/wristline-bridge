@@ -243,6 +243,7 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
   });
   console.log(`\nWrote ${configPath(dir)}`);
   console.log(`Bridge address for the watch: ${publicUrl ?? 'not set'}`);
+  console.log(`Permission wait (permissionWaitSec): ${config.permissionWaitSec} s; edit config.json to change it, then rerun \`hooks install\``);
 
   console.log('\nClaude Code hooks (permission prompts, alerts and plan usage on the watch)');
   if (await exists(config.claudeHome)) await hooksInstall(flags, { yes });

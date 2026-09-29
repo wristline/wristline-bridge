@@ -206,6 +206,17 @@ export class Transcript {
     this.#loaded = true;
   }
 
+  /**
+   * Applies items from a live source (e.g. app-server notifications) after catching up with the
+   * file, so seq order still follows the file. The file's own record of the same item (same key)
+   * later updates it in place.
+   */
+  async inject(apply: (sink: ItemSink) => void): Promise<void> {
+    await this.sync();
+    apply(this.#log);
+    for (const item of this.#log.drain()) for (const fn of this.#subscribers) fn(item);
+  }
+
   subscribe(onItem: (item: Item) => void): () => void {
     this.#subscribers.add(onItem);
     if (!this.#unfollow) {
@@ -254,6 +265,11 @@ export class TranscriptCache {
 
   has(key: string): boolean {
     return this.#entries.has(key);
+  }
+
+  /** The cached transcript, without creating one or changing the LRU order. */
+  peek(key: string): Transcript | undefined {
+    return this.#entries.get(key);
   }
 
   clear(): void {

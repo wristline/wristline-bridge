@@ -117,6 +117,9 @@ test('REST responses', async () => {
   const blocked = await post(`/api/sessions/${encodeURIComponent(ended.id)}/prompt`, { text: 'hello' });
   assert.equal(blocked.status, 409);
   fixture('error-409-prompt-blocked', await blocked.json());
+  const unsafe = await post(`/api/sessions/${encodeURIComponent(running.id)}/prompt`, { text: '!rm -rf build' });
+  assert.equal(unsafe.status, 409);
+  fixture('error-409-unsafe-prefix', await unsafe.json());
 });
 
 test('requests: list, answer, already resolved', async () => {

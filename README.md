@@ -11,7 +11,8 @@ terminal. It never sends your data anywhere except to the watches you pair with 
 ## Status
 
 Early development. For Claude Code the watch can follow sessions live, answer permission prompts
-and questions, and send prompts (sessions running in tmux). Codex sessions are read-only for now.
+and questions, and send prompts (sessions running in tmux). For Codex it does the same through
+Codex's background app-server (see [Codex](#codex)); without it, Codex sessions are read-only.
 Context and plan usage are shown for both.
 
 Verified with Claude Code 2.1.284 and Codex CLI 0.159.0 on Linux (WSL2). Requires Node.js 22 or
@@ -100,9 +101,45 @@ Claude Code sessions **running inside tmux** (on the same tmux server as the bri
 bridge checks that the session really runs in that pane before typing. A session waiting on a
 dialog refuses prompts (`awaiting_input`) until it is answered; a busy session queues them.
 
-Known limitation: the prompt is typed after whatever is already in the session's input box. If
-you left half-typed text there, it becomes part of the prompt; if you left the input in `!`
-(shell) mode, the prompt runs as a shell command. Clear the input box before walking away.
+Prompts starting with `!` are refused (`unsafe_prefix`), because Claude Code would run them as a
+shell command; `/` commands are allowed. Known limitation: the prompt is typed after whatever is
+already in the session's input box. If you left half-typed text there, it becomes part of the
+prompt; if you left the input in `!` (shell) mode, the prompt runs as a shell command. Clear the
+input box before walking away.
+
+## Codex
+
+Codex sessions are always listed from `$CODEX_HOME/sessions` (read-only). Control goes through
+the Codex **app-server daemon**, the shared background server that `codex` starts by default
+(`daemon_auto_start`). The bridge connects to its control socket
+(`$CODEX_HOME/app-server-control/app-server-control.sock`) through `codex app-server proxy`,
+which needs no extra setup. `GET /api/health` (and the `run` banner) shows the connection in
+the Codex provider's `detail`; while the daemon is not running the bridge stays read-only and
+looks again every 30 s.
+
+For threads the daemon has loaded — a `codex` TUI in daemon mode, or other clients of the daemon:
+
+- **Status** comes live from the daemon (running, idle, waiting for approval → `needs_input`).
+- **Approvals** for commands, file changes and extra permissions, and **questions**
+  (`request_user_input` with choices), appear on the watch *and* in the terminal; whichever
+  answers first wins, and an answer in the terminal clears it from the watch at once. "Always
+  allow" uses Codex's session approval, or the proposed command rule when that is what Codex
+  offers. There is no "answer on PC" and no timeout: Codex waits until someone answers.
+- **Prompts** from the watch start a turn (`turn/start`) and show in the TUI like typed ones.
+  Refused with `busy` while a turn runs and `awaiting_input` while an approval is open.
+- **Plan usage** (`primary`/`secondary` windows) comes from the daemon; without it, from the
+  newest rollout.
+
+Limits:
+
+- A `codex` TUI started with `-c`, `--enable`, `--disable`, `--search`, `--profile`, `--oss` or
+  `--no-daemon` runs its own embedded server instead of the daemon. Its session is shown and
+  followed, but approvals and prompts stay in the terminal (`unsupported`).
+- The bridge only rejoins threads the daemon already has loaded; it never loads (resumes) an
+  old thread, which would open its rollout a second time.
+- The daemon keeps a thread loaded after its TUI exits; prompts sent then run in the daemon
+  without a terminal showing them.
+- Free-text and secret questions are answered in the terminal only.
 
 ## Reach it from the watch: Tailscale Funnel
 

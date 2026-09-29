@@ -44,7 +44,10 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   `ended`; a session with an open request is always `needs_input`. `promptBlock`, when present,
   says why a prompt would be refused: `not_live`, `no_tmux`, `awaiting_input`, `busy`,
   `unsupported`; a session with an open request reports `awaiting_input` unless a lasting reason
-  applies. `context` is `{used, window}` in tokens.
+  applies. `context` is `{used, window}` in tokens. A further code, `unsafe_prefix`, is only
+  returned by `POST …/prompt` (never as `promptBlock`): Claude Code prompts whose first
+  non-space character is `!` would run as a shell command and are refused. Clients show unknown
+  codes with a generic message.
 - **Item** — one entry of a conversation: `kind` is `user`, `assistant`, `tool` or `notice`.
   `seq` starts at 1 and orders items within a session; an updated item (e.g. a tool that finished)
   is sent again with the same `seq`. `text` is at most 4000 UTF-16 code units, `detail` (tool
@@ -53,7 +56,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
 - **PendingRequest** — something the agent waits on. `kind` is `permission` or `question`. A
   permission carries exactly one question with id `decision` whose option ids are drawn from
   `allow`, `always`, `deny` and `defer` ("answer on the PC"). The bridge sends ids; the watch
-  localises the wording.
+  localises the wording. Codex requests never offer `defer` (the terminal shows the same
+  request, and whoever answers first wins) and have no timeout; they resolve `by: "terminal"`
+  when answered in the terminal or when the agent stops waiting.
 - **Answers** — `{ "<questionId>": ["<optionId>", ...] }`, every question answered, exactly one
   option for a question with `multi: false`.
 - **Usage** — per provider: `windows[]` with `id` (`5h`/`7d` for Claude Code,
@@ -66,11 +71,11 @@ All timestamps are ISO 8601 in UTC.
 | Method and path | Success | Errors | Fixture |
 |---|---|---|---|
 | `POST /api/pair` `{code, deviceName}` | `200 {token, deviceId, bridge}` | `400`, `401 invalid_code`, `404` (no pairing window), `429` | `pair.json` |
-| `GET /api/health` | `200 {name, version, apiVersion, providers[]}` | `401` | `health.json` |
+| `GET /api/health` | `200 {name, version, apiVersion, providers[]}`; each provider `{id, status: ok\|not_found, version?, detail?}` (`detail`: English diagnostic text, e.g. the Codex app-server connection) | `401` | `health.json` |
 | `DELETE /api/device` | `204` (revokes the calling device) | `401` | |
 | `GET /api/sessions` | `200 {sessions}` sorted needs_input, running, then most recent | `401` | `sessions.json` |
 | `GET /api/sessions/:sid/items?before=&limit=40` | `200 {items, hasMore}`: the `limit` (max 200) newest items with `seq < before` | `400`, `404` | `items.json` |
-| `POST /api/sessions/:sid/prompt` `{text}` | `202 {}` | `400`, `404`, `409 {error: PromptBlock}`, `413` (text over 4000) | `error-409-prompt-blocked.json` |
+| `POST /api/sessions/:sid/prompt` `{text}` | `202 {}` | `400`, `404`, `409 {error: PromptBlock}`, `413` (text over 4000) | `error-409-prompt-blocked.json`, `error-409-unsafe-prefix.json` |
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |

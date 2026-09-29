@@ -138,3 +138,107 @@ parent chain) so a stale or foreign pane never receives keystrokes.
 - **S13 (no original statusLine):** with the relay alone (it prints nothing), Claude Code keeps an
   empty row above the mode line where the status line would be. The relay is still needed for
   plan usage, so the row stays; the README mentions it.
+
+## Phase 3 — Codex control (2026-09-29)
+
+**Setup.** Codex CLI 0.159.0, `CODEX_HOME=~/.codex-wsl`, a managed daemon already running as
+`codex app-server --remote-control --listen unix:// --managed-daemon`, control socket
+`$CODEX_HOME/app-server-control/app-server-control.sock` (a symlink into
+`/tmp/codex-daemon-<uid>/`). A throwaway directory with its own `.codex/config.toml` (hooks and
+sub-agents off, so the user's global PreToolUse gate did not interfere) and an `AGENTS.md` asking
+the model to run commands itself. The TUI ran in a dedicated tmux session as
+`codex -a on-request -s read-only`, a spike client connected through `codex app-server proxy`.
+Five short turns in total (model `gpt-6-astra`, effort low).
+
+### Transport
+
+- **The control socket speaks WebSocket, not newline-delimited JSON.** `codex app-server proxy
+  --sock <path>` is a plain byte pipe between stdio and the socket; the first bytes must be an
+  HTTP `Upgrade: websocket` request (answered `101`, with
+  `x-codex-websocket-max-unfragmented-message-bytes: 16777216`), after which each JSON-RPC message
+  is one WebSocket text frame. Raw JSON lines get no answer. No authentication beyond the
+  socket's file permissions (0600).
+- Messages omit `jsonrpc`; notifications carry an extra `emittedAtMs`. Server→client request ids
+  are small integers counted per connection (0, 1, …).
+- With no socket, `proxy` exits 1 at once (`failed to connect to socket … No such file or
+  directory`); it never starts a daemon.
+- All method and notification names in the plan exist in 0.159.0
+  (`codex app-server generate-json-schema`). Also present and used: `serverRequest/resolved`
+  (`{threadId, requestId}`) and `thread/closed`.
+
+### S4 — the TUI and the daemon
+
+- **The TUI uses the daemon only without config overrides.** Started with `-c …` or
+  `--disable …` it silently runs its own in-process app-server (the binary's reason string:
+  "Running without the shared background server: command-line configuration overrides (-c,
+  --enable, --disable, or --search)"; the same applies to `--profile`, `--oss`, `--strict-config`,
+  `--no-daemon`, …). Its thread then showed as `notLoaded` in `thread/list` and the TUI had no
+  connection to the socket. `-a` and `-s` do not prevent daemon mode. In daemon mode the footer
+  shows "← for agents".
+- **(A) yes.** A daemon-mode TUI creates its thread at startup: every client got `thread/started`
+  (status `idle`, `source: "vscode"`, `originator: "codex_chatgpt_android_remote"`), and
+  `thread/loaded/list` returned its id. `thread/status/changed`, `thread/started`,
+  `thread/closed` and `thread/name/updated` reach clients that never subscribed.
+  Title generation runs as a separate `ephemeral: true` thread (ignored by the bridge).
+- `thread/resume` of the loaded thread **before its first turn** failed with `-32600 "no rollout
+  found for thread id …"` (nothing was loaded). After the first turn it rejoined the running
+  thread (`excludeTurns: true`, no overrides) and returned its metadata.
+- **(B) yes, both get the approval.** After the rejoin, `item/commandExecution/requestApproval`
+  (id 0) reached the bridge client at the same time as the TUI showed its dialog, and the thread
+  status became `active` with `activeFlags: ["waitingOnApproval"]`.
+  - Bridge answers first (`{"decision":"accept"}`): the TUI's dialog closed, the command ran, all
+    clients got `serverRequest/resolved {requestId: 0}`.
+  - TUI answers first (`y`): `serverRequest/resolved {requestId: 1}` arrived within ~1 ms; a
+    **late** bridge answer (`cancel`, sent 0.1 s later) was ignored — no error response, the
+    command ran, the turn completed normally.
+  - The request carried `availableDecisions: ["accept", {"acceptWithExecpolicyAmendment": …},
+    "cancel"]` — no `acceptForSession` and no `decline` for this escalation request.
+- **(C) yes.** `turn/start {threadId, input: [{type: "text", text}]}` from the bridge returned the
+  new turn at once; the TUI showed the prompt as a user message and streamed the reply.
+- **(D) yes.** `thread/tokenUsage/updated` (per turn, `{total, last, modelContextWindow}`) and
+  `account/rateLimits/updated` (after each model response) reached the subscribed client.
+  `account/rateLimits/read` returned only a `primary` window (10080 min) for this plan
+  (`secondary: null`), plus other limit ids under `rateLimitsByLimitId`.
+- Live item ids (`item/started`, `item/completed`) equal the ids in the rollout's
+  `item_completed` records, so both sources merge into one item.
+- The daemon-written rollout records `task_started`/`task_complete` like the TUI does.
+
+**Decisions.** Branch **A**: approvals, `requestUserInput` questions and prompts are all
+supported for threads loaded in the daemon.
+1. Transport: spawn `codex app-server proxy --sock <socket>` and run a WebSocket client over its
+   stdio (the `ws` package with a stdio-backed connection). The socket's existence is checked
+   before spawning, so a machine without the daemon causes no process churn.
+2. The bridge rejoins (`thread/resume`) only ids reported by `thread/loaded/list`,
+   `thread/started` or a non-`notLoaded` status, retries when the rollout does not exist yet, and
+   never resumes anything else.
+3. Watch options follow `availableDecisions` when present: `allow` → `accept`, `always` →
+   `acceptForSession` (or `acceptWithExecpolicyAmendment` with the proposed amendment when that
+   is what is offered), `deny` → `decline` (or `cancel` when `decline` is not offered).
+   `defer` is not offered: the TUI's dialog is up anyway and there is no "no decision" answer.
+4. No timeout. `serverRequest/resolved`, completion of the item or turn, or losing the connection
+   resolves the watch's request as `by: "terminal"`; a late watch answer is harmless.
+5. Only TUIs started without `-c/--enable/--disable/--search/--profile` can be controlled; others
+   stay read-only (`unsupported`). The README says so.
+
+### Live checks
+
+Bridge built from this commit (`dist/cli.js run`, separate `XDG_CONFIG_HOME`, ports 47870/47871),
+`scripts/fake-watch.ts` as the watch, the spike TUI from above.
+
+- **Connect:** the banner showed `app-server connected`; the bridge rejoined exactly one thread,
+  the one `thread/loaded/list` reported (2 bridge runs, 2 `rejoined` log lines, both for that
+  id; no other `thread/resume`).
+- **Status:** the session went `idle` → `running` → `needs_input` / `awaiting_input` while the
+  TUI's approval dialog was up, and back.
+- **Approval:** the request reached the watch in the same millisecond as the pending tool item
+  (`Shell`, options `allow`/`always`/`deny`, `always` described as the proposed rule
+  `touch live-c.txt`). Answering `allow` from the watch: `resolved {by: "watch"}`, the TUI's
+  dialog closed and the command ran (file created) 40 ms later. A second run confirmed the tool
+  item turns from pending to done under the same `seq`.
+- **Usage:** `GET /api/usage` returned the daemon's Codex window at once (`primary` 2 %,
+  10080 min).
+- **Prompt:** `POST …/prompt` → `202`; the TUI showed the prompt and the reply ("WRIST")
+  2 s later; the watch got the user item once (same `seq` from the live notification and the
+  rollout).
+- After the TUI was killed, the daemon still listed the thread in `thread/loaded/list` — a
+  loaded thread may have no terminal attached (README: limits).

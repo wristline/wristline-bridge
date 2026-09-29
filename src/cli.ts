@@ -9,6 +9,7 @@ import { API_VERSION } from './protocol.ts';
 import { hookHandlers } from './providers/claude-code/hooks.ts';
 import { ClaudeCodeProvider } from './providers/claude-code/provider.ts';
 import { CodexProvider } from './providers/codex/provider.ts';
+import { CodexRpc } from './providers/codex/rpc.ts';
 import { startServer, type LocalDevices, type LocalPairResponse } from './server.ts';
 import { hooksInstall, hooksUninstall, serviceInstall, serviceUninstall, setup } from './setup.ts';
 import { CliError, isObject, str } from './util.ts';
@@ -60,7 +61,9 @@ async function run(flags: Flags): Promise<void> {
     historyDays: config.historyDays,
     ...(config.bins.tmux ? { tmux: config.bins.tmux } : {}),
   });
-  const codex = new CodexProvider({ home: config.codexHome, historyDays: config.historyDays });
+  const version = packageVersion();
+  const rpc = new CodexRpc({ codexHome: config.codexHome, clientVersion: version, ...(config.bins.codex ? { bin: config.bins.codex } : {}) });
+  const codex = new CodexProvider({ home: config.codexHome, historyDays: config.historyDays, rpc });
   const providers = [claude, codex];
   const hub = new BridgeHub({ providers });
   const auth = new Auth({
@@ -70,7 +73,6 @@ async function run(flags: Flags): Promise<void> {
     },
   });
   await Promise.all(providers.map((p) => p.start(hub)));
-  const version = packageVersion();
   const server = await startServer({
     hub,
     auth,
@@ -93,6 +95,7 @@ async function run(flags: Flags): Promise<void> {
   for (const p of providers) {
     const h = p.health();
     console.log(`  ${h.id.padEnd(11)} ${h.status === 'ok' ? `${p.listSessions().length} sessions` : 'not found'}${h.version ? ` (v${h.version})` : ''}`);
+    if (h.detail) console.log(`              ${h.detail}`);
   }
   console.log(`  ${config.devices.length} paired device(s); run \`wristline-bridge pair\` to add one`);
 

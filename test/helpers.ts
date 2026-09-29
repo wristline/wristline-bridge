@@ -38,7 +38,8 @@ export class FakeProvider implements SessionProvider {
   emit(nativeId: string, item: Item): void {
     for (const fn of this.#watchers.get(nativeId) ?? []) fn(item);
   }
-  async sendPrompt(nativeId: string): Promise<void> {
+  async sendPrompt(nativeId: string, text: string): Promise<void> {
+    if (text.startsWith('!')) throw new PromptBlocked('unsafe_prefix');
     const block = this.sessions.find((s) => s.id.endsWith(nativeId))?.promptBlock;
     if (block) throw new PromptBlocked(block);
   }

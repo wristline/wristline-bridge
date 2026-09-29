@@ -129,13 +129,15 @@ export class ClaudeCodeProvider implements SessionProvider {
 
   /**
    * Types the prompt into the session's tmux pane and presses Enter, as if typed there. Text
-   * already in the input box stays in front of it.
+   * already in the input box stays in front of it. A leading `!` would switch the input box to
+   * shell mode and run the text as a command, so it is refused; `/` commands are allowed.
    */
   async sendPrompt(nativeId: string, text: string): Promise<void> {
     const session = this.#sessions.get(nativeId);
     if (!session) throw new PromptBlocked('not_live');
     if (session.promptBlock) throw new PromptBlocked(session.promptBlock);
     if (this.#hub?.pending.hasSession(session.id)) throw new PromptBlocked('awaiting_input');
+    if (/^[\s\u0000-\u001f\u007f]*!/.test(text)) throw new PromptBlocked('unsafe_prefix');
     const pane = this.#panes.get(nativeId);
     if (!pane || !(await this.#paneRuns(pane))) throw new PromptBlocked('no_tmux');
     // Control characters would act as keys (Enter, Esc, Ctrl-C) in the agent's input box.

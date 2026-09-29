@@ -9,7 +9,8 @@ export const DETAIL_MAX = 600;
 
 export type ProviderId = 'claude-code' | 'codex';
 export type SessionStatus = 'running' | 'idle' | 'needs_input' | 'ended';
-export type PromptBlock = 'not_live' | 'no_tmux' | 'awaiting_input' | 'busy' | 'unsupported';
+/** `unsafe_prefix` is only ever a prompt error (409), never a session's `promptBlock`. */
+export type PromptBlock = 'not_live' | 'no_tmux' | 'awaiting_input' | 'busy' | 'unsupported' | 'unsafe_prefix';
 
 export interface Session {
   /** `<provider>:<nativeId>` */
@@ -127,6 +128,8 @@ export interface ProviderHealth {
   status: 'ok' | 'not_found';
   /** Agent CLI version seen in its most recent session data. */
   version?: string;
+  /** Diagnostic text for people (English, not localised), e.g. the Codex app-server connection. */
+  detail?: string;
 }
 
 export interface Health extends BridgeInfo {

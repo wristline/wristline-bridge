@@ -52,11 +52,15 @@ test('app-server camelCase items normalize to the same drafts as rollout snake_c
   const rollout = normalizeItem({ type: 'CommandExecution', id: 'exec-1', command: ['/bin/bash', '-lc', 'npm test'], status: 'in_progress' });
   assert.deepEqual(rollout && itemDraft(rollout, 't'), { kind: 'tool', ts: 't', text: 'Shell(npm test)', pending: true });
 
+  // The live app-server sends the shell wrapper as one string; it reads the same as the rollout's argv.
+  const wrapped = normalizeItem({ type: 'commandExecution', id: 'exec-1', command: "/bin/bash -lc 'npm test'", status: 'completed', exitCode: 0 });
+  assert.deepEqual(wrapped && itemDraft(wrapped, 't'), { kind: 'tool', ts: 't', text: 'Shell(npm test)', pending: false });
+
   const agent = normalizeItem({ type: 'AGENTMESSAGE', id: 'm', text: 'hi' });
   assert.deepEqual(agent && itemDraft(agent, 't'), { kind: 'assistant', ts: 't', text: 'hi' });
 
   const change = normalizeItem({ type: 'fileChange', id: 'p', changes: [{ path: '/a.ts', kind: { type: 'add' }, diff: '' }], status: 'failed' });
-  assert.deepEqual(change && itemDraft(change, 't'), { kind: 'tool', ts: 't', text: 'Edit(/a.ts)', error: true });
+  assert.deepEqual(change && itemDraft(change, 't'), { kind: 'tool', ts: 't', text: 'Edit(/a.ts)', pending: false, error: true });
 
   assert.equal(normalizeItem({ type: 'reasoning', id: 'r' }), undefined);
   assert.equal(normalizeItem({ type: 'userMessage' }), undefined);

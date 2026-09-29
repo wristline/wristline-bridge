@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -140,6 +140,29 @@ test('codex: rollouts with index titles, sub-agents hidden, usage from token_cou
   }
 });
 
+test('codex without the daemon: an unfinished turn counts as running only while the rollout changes', async () => {
+  const home = join(root, 'codex-stale');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const [fresh, stale] = ['019a0000-0000-7000-8000-0000000000c1', '019a0000-0000-7000-8000-0000000000c2'];
+  const lines = [
+    { timestamp: '2026-09-29T09:00:00.000Z', type: 'session_meta', payload: { id: fresh, cwd: '/w', cli_version: '0.159.0' } },
+    { timestamp: '2026-09-29T09:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } },
+  ];
+  for (const id of [fresh, stale]) writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`), lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
+  const hourAgo = new Date(Date.now() - 3600_000);
+  utimesSync(join(day, `rollout-2026-09-29T09-00-00-${stale}.jsonl`), hourAgo, hourAgo);
+  const provider = new CodexProvider({ home, historyDays: 3650 });
+  await provider.start(recordingHub());
+  provider.stop();
+  const status = (id: string): [string | undefined, string | undefined] => {
+    const s = provider.listSessions().find((x) => x.id === `codex:${id}`);
+    return [s?.status, s?.promptBlock];
+  };
+  assert.deepEqual(status(fresh), ['running', 'unsupported']);
+  assert.deepEqual(status(stale), ['ended', 'not_live']);
+});
+
 test('a missing agent home is reported as not_found', async () => {
   const provider = new CodexProvider({ home: join(root, 'nowhere'), historyDays: 7 });
   await provider.start(recordingHub());
@@ -197,6 +220,12 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
       ['/usr/bin/tmux', 'send-keys', '-t', '%5', '-l', '--', 'fix the build then run tests '],
       ['/usr/bin/tmux', 'send-keys', '-t', '%5', 'Enter'],
     ]);
+
+    // A leading "!" would switch Claude Code's input box to shell mode; "/" commands are fine.
+    await assert.rejects(provider.sendPrompt(newer, ' \u0001!rm -rf build'), (e: unknown) => e instanceof PromptBlocked && e.code === 'unsafe_prefix');
+    assert.equal(calls.length, 3);
+    await provider.sendPrompt(newer, '/compact');
+    assert.deepEqual(calls.at(-2), ['/usr/bin/tmux', 'send-keys', '-t', '%5', '-l', '--', '/compact']);
 
     // A pane whose process tree does not contain the session is someone else's.
     calls.length = 0;
