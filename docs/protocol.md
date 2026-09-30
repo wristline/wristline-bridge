@@ -74,8 +74,11 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   when answered in the terminal or when the agent stops waiting.
 - **Answers** — `{ "<questionId>": ["<optionId>", ...] }`, every question answered, exactly one
   option for a question with `multi: false`.
-- **Usage** — per provider and account: `windows[]` with `id` (`5h`/`7d` for Claude Code,
-  `primary`/`secondary` for Codex), `usedPercent`, optional `resetsAt` (ISO 8601) and `minutes`.
+- **Usage** — per provider and account: `windows[]` with `id`, optional `label`, `usedPercent`,
+  optional `resetsAt` (ISO 8601) and `minutes`. Claude Code ids are `5h`, `7d`, `7d_<model>` for a
+  model-scoped weekly limit (e.g. `7d_opus`), `spend` for a gateway spend limit, else the
+  statusLine key, each with a `label` for people (`5h`, `7d`, `7d Opus`, `Spend`); Codex ids are
+  `primary`/`secondary`, without `label`. A watch shows `label`, else `id`.
   A usage entry is identified by `provider` plus `account.id` (empty when `account` is absent); a
   `usage` event replaces the entry with the same key, unless its `updatedAt` is older than the
   entry's (a stale snapshot). Once a provider reports a labelled entry, the bridge drops that
@@ -138,9 +141,11 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
 - `POST /local/pair` `{}` → `{code, expiresAt}`: opens a 5-minute, single-use pairing window
   (closed after 5 wrong codes). `{"token": true, "name": "..."}` → `{token, deviceId}` instead.
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
-- `POST /local/statusline` — the Claude Code statusLine JSON; `rate_limits` becomes `5h`/`7d`
-  usage (`resets_at` epoch seconds → ISO) and `context_window` the session's context
-  (`context_window_size`, and `current_usage` input tokens when present); `model.display_name`
+- `POST /local/statusline` — the Claude Code statusLine JSON; every `rate_limits` entry with a
+  `used_percentage` becomes a usage window (`five_hour` → `5h`, `seven_day` → `7d`,
+  `seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`; `resets_at` epoch seconds → ISO)
+  and `context_window` the session's context (`context_window_size`, and `current_usage` input
+  tokens when present); `model.display_name`
   and `effort.level` become the session's `model` and `effort`. With several Claude
   Code homes, the report goes to the home whose `projects/` holds `transcript_path` (real paths
   compared), else to the home that lists `session_id`, else to the only home unless the path lies

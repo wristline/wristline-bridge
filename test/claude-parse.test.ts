@@ -171,12 +171,36 @@ test('statusLine rate limits become 5h/7d usage with ISO reset times', () => {
     provider: 'claude-code',
     updatedAt: '2026-09-29T10:00:00.000Z',
     windows: [
-      { id: '5h', usedPercent: 42, resetsAt: new Date(1790683200 * 1000).toISOString(), minutes: 300 },
-      { id: '7d', usedPercent: 12.5, resetsAt: '2026-10-05T00:00:00.000Z', minutes: 10080 },
+      { id: '5h', label: '5h', usedPercent: 42, resetsAt: new Date(1790683200 * 1000).toISOString(), minutes: 300 },
+      { id: '7d', label: '7d', usedPercent: 12.5, resetsAt: '2026-10-05T00:00:00.000Z', minutes: 10080 },
     ],
   });
   assert.deepEqual(statuslineContext(input), { sessionId: 'abc', window: 1_000_000 });
   assert.equal(statuslineUsage({ rate_limits: null }, 0), undefined);
+});
+
+test('statusLine rate limits: every window with used_percentage, model-scoped weekly and spend limits labelled', () => {
+  const input = {
+    rate_limits: {
+      five_hour: { used_percentage: 9, resets_at: 1790701800 },
+      seven_day: { used_percentage: 5, resets_at: 1791244800 },
+      seven_day_fable: { used_percentage: 61, resets_at: 1791244800 },
+      seven_day_oauth_apps: { used_percentage: 0 },
+      spend_limit: { used_percentage: 104, resets_at: 1791244800, used_usd: 52, limit_usd: 50, period: 'weekly' },
+      monthly: { used_percentage: 7 },
+      seven_day_opus: null,
+      extra_usage: { is_enabled: true },
+    },
+  };
+  assert.deepEqual(statuslineUsage(input, 0)?.windows, [
+    { id: '5h', label: '5h', usedPercent: 9, resetsAt: '2026-09-29T17:10:00.000Z', minutes: 300 },
+    { id: '7d', label: '7d', usedPercent: 5, resetsAt: '2026-10-06T00:00:00.000Z', minutes: 10080 },
+    { id: '7d_fable', label: '7d Fable', usedPercent: 61, resetsAt: '2026-10-06T00:00:00.000Z', minutes: 10080 },
+    { id: '7d_oauth_apps', label: '7d Oauth apps', usedPercent: 0, minutes: 10080 },
+    { id: 'spend', label: 'Spend', usedPercent: 104, resetsAt: '2026-10-06T00:00:00.000Z' },
+    { id: 'monthly', usedPercent: 7 },
+  ]);
+  assert.equal(statuslineUsage({ rate_limits: { extra_usage: { is_enabled: true } } }, 0), undefined);
 });
 
 // Shape recorded from Claude Code 2.1.284 (docs/spikes.md); paths shortened.
@@ -205,8 +229,8 @@ const realStatusline = {
 
 test('real statusLine JSON: rate limits to 5h/7d with ISO resets, context before and after the first call', () => {
   assert.deepEqual(statuslineUsage(realStatusline, Date.parse('2026-09-29T14:09:41Z'))?.windows, [
-    { id: '5h', usedPercent: 9, resetsAt: '2026-09-29T17:10:00.000Z', minutes: 300 },
-    { id: '7d', usedPercent: 5, resetsAt: '2026-10-06T00:00:00.000Z', minutes: 10080 },
+    { id: '5h', label: '5h', usedPercent: 9, resetsAt: '2026-09-29T17:10:00.000Z', minutes: 300 },
+    { id: '7d', label: '7d', usedPercent: 5, resetsAt: '2026-10-06T00:00:00.000Z', minutes: 10080 },
   ]);
   assert.deepEqual(statuslineContext(realStatusline), { sessionId: realStatusline.session_id, window: 200000 });
   const after = {

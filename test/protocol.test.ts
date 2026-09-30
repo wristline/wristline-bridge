@@ -85,8 +85,9 @@ const claudeUsage: Usage[] = [
     provider: 'claude-code',
     updatedAt: '2026-09-29T09:58:00.000Z',
     windows: [
-      { id: '5h', usedPercent: 42, resetsAt: '2026-09-29T14:00:00.000Z' },
-      { id: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z' },
+      { id: '5h', label: '5h', usedPercent: 42, resetsAt: '2026-09-29T14:00:00.000Z', minutes: 300 },
+      { id: '7d', label: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z', minutes: 10080 },
+      { id: '7d_fable', label: '7d Fable', usedPercent: 61, resetsAt: '2026-10-03T00:00:00.000Z', minutes: 10080 },
     ],
     account: { id: 'acc-school', label: 'school', estimated: true },
   },

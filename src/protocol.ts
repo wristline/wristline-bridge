@@ -91,8 +91,10 @@ export interface PendingRequest {
 export type Answers = Record<string, string[]>;
 
 export interface UsageWindow {
-  /** `5h` | `7d` (claude-code), `primary` | `secondary` (codex) */
+  /** claude-code: `5h` | `7d` | `7d_<model>` (e.g. `7d_opus`) | `spend`, else the statusLine key; codex: `primary` | `secondary` */
   id: string;
+  /** For people, e.g. `5h`, `7d Opus`, `Spend` (claude-code only); a watch shows `id` when absent. */
+  label?: string;
   usedPercent: number;
   resetsAt?: string;
   minutes?: number;

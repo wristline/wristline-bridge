@@ -222,23 +222,34 @@ export function claudeModelName(id: string): string {
   return known?.[1] ?? id.replace(/^claude-/, '');
 }
 
-const LIMITS = [
-  ['5h', 'five_hour', 300],
-  ['7d', 'seven_day', 10080],
-] as const;
+/** `rate_limits` keys with a fixed id; `seven_day_<model>` becomes `7d_<model>`, any other key keeps its name. */
+const LIMITS = new Map<string, { id: string; label: string; minutes?: number }>([
+  ['five_hour', { id: '5h', label: '5h', minutes: 300 }],
+  ['seven_day', { id: '7d', label: '7d', minutes: 10080 }],
+  ['spend_limit', { id: 'spend', label: 'Spend' }],
+]);
 
-/** `rate_limits` of the statusLine JSON; the only official source of the 5h/7d plan limits. */
+function limitWindow(key: string): { id: string; label?: string; minutes?: number } {
+  const known = LIMITS.get(key);
+  if (known) return known;
+  const model = /^seven_day_(.+)$/.exec(key)?.[1];
+  if (!model) return { id: key };
+  const name = model.replace(/_/g, ' ');
+  return { id: `7d_${model}`, label: `7d ${name.charAt(0).toUpperCase()}${name.slice(1)}`, minutes: 10080 };
+}
+
+/** `rate_limits` of the statusLine JSON (every window with a `used_percentage`); the only official source of the plan limits. */
 export function statuslineUsage(input: JsonObject, now: number): Usage | undefined {
   const limits = input.rate_limits;
   if (!isObject(limits)) return undefined;
   const windows: UsageWindow[] = [];
-  for (const [id, key, minutes] of LIMITS) {
-    const window = limits[key];
+  for (const [key, window] of Object.entries(limits)) {
     if (!isObject(window)) continue;
     const usedPercent = num(window.used_percentage);
     if (usedPercent === undefined) continue;
+    const { id, label, minutes } = limitWindow(key);
     const resetsAt = toIso(window.resets_at);
-    windows.push(resetsAt ? { id, usedPercent, resetsAt, minutes } : { id, usedPercent, minutes });
+    windows.push({ id, ...(label && { label }), usedPercent, ...(resetsAt && { resetsAt }), ...(minutes && { minutes }) });
   }
   if (windows.length === 0) return undefined;
   return { provider: 'claude-code', updatedAt: new Date(now).toISOString(), windows };

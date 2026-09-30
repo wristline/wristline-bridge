@@ -242,3 +242,26 @@ Bridge built from this commit (`dist/cli.js run`, separate `XDG_CONFIG_HOME`, po
   rollout).
 - After the TUI was killed, the daemon still listed the thread in `thread/loaded/list` — a
   loaded thread may have no terminal attached (README: limits).
+
+## Claude Code plan-limit windows (2026-09-30)
+
+**Setup.** Claude Code 2.1.285, the user's own sessions relaying their statusLine every 10 s. A
+temporary, uncommitted log in the bridge service printed only the key names under `rate_limits`
+(never values); the Claude Code binary was searched for the code that builds the statusLine JSON.
+
+- **Live:** 18 reports in 3 minutes, every one `five_hour` and `seven_day`, each with
+  `used_percentage` and `resets_at`.
+- **Binary:** the statusLine builder writes only `five_hour`, `seven_day` and, behind a Claude
+  gateway, `spend_limit` (`used_percentage`, `resets_at`, optional `used_usd`, `limit_usd`,
+  `period`), and leaves out `rate_limits` when none is present. The statusLine schema Claude Code
+  documents lists the same three.
+- **Model-scoped weekly limits are not in the statusLine.** Claude Code calls the Fable weekly
+  limit `seven_day_overage_included`; it reads it, with `seven_day_opus`, `seven_day_sonnet` and
+  `seven_day_oauth_apps`, from the OAuth usage endpoint (`limits[]`, projected as
+  `model_scoped[]` with `display_name`, `utilization`, `resets_at`), which feeds `/usage`. Other
+  rate-limit types named in the binary: `seven_day_cowork`, `seven_day_omelette`.
+- **Decision:** the bridge maps every `rate_limits` entry with a `used_percentage`
+  (`seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`, with a `label`), so a window a later
+  Claude Code adds to the statusLine reaches the watch without a bridge change. Until then the
+  watch gets `5h` and `7d` (plus `spend` behind a gateway); a Fable window would need the OAuth
+  usage endpoint as a second source, which the bridge does not read.
