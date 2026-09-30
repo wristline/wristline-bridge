@@ -73,19 +73,28 @@ function expired(window: UsageWindow, now: number): boolean {
 const SAME_WINDOW_MS = 5 * 60_000;
 
 /**
- * Of two values of one window id, the one to keep. Arrival order says nothing: each Claude Code
+ * Of two values of one window id, the one to keep. Arrival order says little: each Claude Code
  * process reports the limits of its own last API response (an idle one keeps repeating them), and
  * Codex servers jitter a window's reset time by about a second between reports. So reset times at
- * most SAME_WINDOW_MS apart (or a missing one) mean the same window: usage only grows within it, so
- * the higher `usedPercent` wins, with the later reset time. Reset times further apart are two
- * windows, and the later one is the newer.
+ * most SAME_WINDOW_MS apart mean the same window: usage only grows within it, so the higher
+ * `usedPercent` wins, with the later reset time. Reset times further apart are two windows, and the
+ * later one is the newer. Without a reset time on either side (Codex sends none for some limits)
+ * nothing tells a stale report from a reset, so the reported (newer) value wins, even when lower,
+ * and a known reset time is kept. Within one window the optional fields either value carries are
+ * kept, in the stored value's field order, so an unchanged merge is no change.
  */
 function mergeWindow(stored: UsageWindow, reported: UsageWindow): UsageWindow {
   const a = stored.resetsAt === undefined ? undefined : Date.parse(stored.resetsAt);
   const b = reported.resetsAt === undefined ? undefined : Date.parse(reported.resetsAt);
-  const later = a !== undefined && (b === undefined || a > b) ? stored : reported;
-  if (a !== undefined && b !== undefined && Math.abs(a - b) > SAME_WINDOW_MS) return later;
-  return { ...later, usedPercent: Math.max(stored.usedPercent, reported.usedPercent) };
+  if (a !== undefined && b !== undefined && Math.abs(a - b) > SAME_WINDOW_MS) return a > b ? stored : reported;
+  const merged = { ...stored, ...reported };
+  if (a !== undefined && b !== undefined) {
+    merged.usedPercent = Math.max(stored.usedPercent, reported.usedPercent);
+    if (a > b) merged.resetsAt = stored.resetsAt;
+  } else if (a !== undefined) {
+    merged.resetsAt = stored.resetsAt;
+  }
+  return merged;
 }
 
 /**

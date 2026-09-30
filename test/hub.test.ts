@@ -351,7 +351,7 @@ test('usage from processes that alternate (an idle one repeats the limits of its
   }
 });
 
-test('usage windows with reset times at most 5 minutes apart are one window (the higher number wins); further apart, the later reset time wins', () => {
+test('usage windows with reset times at most 5 minutes apart are one window (the higher number wins); further apart, the later reset time wins; without one, the newer report', () => {
   let clock = Date.parse('2026-09-29T10:00:00Z');
   const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, log: quiet });
   try {
@@ -388,10 +388,11 @@ test('usage windows with reset times at most 5 minutes apart are one window (the
     report('codex', [{ id: 'primary', usedPercent: 1, resetsAt: at(T, 5 * 3600 - 1), minutes: 300 }]);
     assert.deepEqual(window('codex', 'primary'), { id: 'primary', usedPercent: 1, resetsAt: at(T, 5 * 3600 - 1), minutes: 300 });
 
-    // Without a reset time on either side it is the same window: the higher number wins; a known reset time is kept.
+    // Without a reset time on either side nothing tells a stale report from a reset (Codex sends resetsAt: null for some
+    // limits): the newer report wins, also when lower, so the number can go down after a real reset; a known reset time is kept.
     report('codex', [{ id: 'secondary', usedPercent: 30, minutes: 10080 }]);
     report('codex', [{ id: 'secondary', usedPercent: 20, minutes: 10080 }]);
-    assert.deepEqual(window('codex', 'secondary'), { id: 'secondary', usedPercent: 30, minutes: 10080 });
+    assert.deepEqual(window('codex', 'secondary'), { id: 'secondary', usedPercent: 20, minutes: 10080 });
     report('codex', [{ id: 'secondary', usedPercent: 35, minutes: 10080 }]);
     assert.deepEqual(window('codex', 'secondary'), { id: 'secondary', usedPercent: 35, minutes: 10080 });
     const weekly = { id: 'secondary', usedPercent: 36, resetsAt: '2026-10-03T00:00:00.000Z', minutes: 10080 };
@@ -400,9 +401,40 @@ test('usage windows with reset times at most 5 minutes apart are one window (the
     report('codex', [{ id: 'secondary', usedPercent: 37, minutes: 10080 }]);
     assert.deepEqual(window('codex', 'secondary'), { ...weekly, usedPercent: 37 });
     report('codex', [{ id: 'secondary', usedPercent: 5, minutes: 10080 }]);
-    assert.deepEqual(window('codex', 'secondary'), { ...weekly, usedPercent: 37 });
+    assert.deepEqual(window('codex', 'secondary'), { ...weekly, usedPercent: 5 });
   } finally {
     hub.close();
+  }
+});
+
+test('a merged window keeps the optional fields either report carries; the same numbers without them are no change', async () => {
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const bridge = await startBridge(new FakeProvider(), () => clock);
+  try {
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    assert.equal((await ws.next()).type, 'snapshot');
+    const report = (windows: Usage['windows']): Usage => ({ provider: 'claude-code', updatedAt: new Date(clock).toISOString(), windows, account: { id: 'acc-a', label: 'me' } });
+    const stored = (): Usage['windows'] | undefined => bridge.hub.usageList()[0]?.windows;
+    const fiveHour = { id: '5h', label: '5h', usedPercent: 40, resetsAt: '2026-09-29T12:00:00.000Z', minutes: 300 };
+    const weekly = { id: '7d', label: '7d', usedPercent: 12, minutes: 10080 };
+    bridge.hub.usage(report([fiveHour, weekly]));
+    assert.equal((await ws.next()).type, 'usage');
+
+    // The same numbers without label or minutes (with a jittered reset time, and with none): unchanged, so nothing is sent.
+    clock += 60_000;
+    bridge.hub.usage(report([{ id: '5h', usedPercent: 40, resetsAt: '2026-09-29T11:59:59.000Z' }, { id: '7d', usedPercent: 12 }]));
+    assert.deepEqual(stored(), [fiveHour, weekly]);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ws.pending(), 0, 'the numbers never changed, so nothing was sent');
+
+    // New numbers without them keep them too; a field only the newer report carries is added.
+    clock += 60_000;
+    bridge.hub.usage(report([{ id: '5h', usedPercent: 42, resetsAt: fiveHour.resetsAt }, { id: '7d', usedPercent: 13, resetsAt: '2026-10-03T00:00:00.000Z' }]));
+    const grown = await ws.next();
+    assert.deepEqual(grown.type === 'usage' && grown.usage.windows, [{ ...fiveHour, usedPercent: 42 }, { ...weekly, usedPercent: 13, resetsAt: '2026-10-03T00:00:00.000Z' }]);
+    ws.close();
+  } finally {
+    await bridge.close();
   }
 });
 

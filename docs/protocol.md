@@ -88,19 +88,22 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   reports of that provider.
   The bridge merges the windows of an entry. Two values of one window `id` are the same window
   when their `resetsAt` are at most 5 minutes apart or either lacks one (Codex servers jitter
-  `resets_at` by about a second between reports); within a window usage never decreases, so the
-  higher `usedPercent` is kept, with the later `resetsAt` (every Claude Code process repeats the
-  limits of its own last API call, so an idle one reports old numbers). `resetsAt` further apart
-  are two windows, and the one with the later `resetsAt` is kept. Windows whose `resetsAt` has
-  passed are dropped before merging. A window is removed only when its `resetsAt` has passed (or the
-  entry is dropped), never because one report omitted it (a Claude Code statusLine report carries
-  only the limits it happens to name). `GET /api/usage` and the `snapshot` always return this
-  merged state; `usage` events are sent at once when an entry first appears and then at most once
-  per minute per entry, with the merged state at the time of sending (windows merely listed in
-  another order are no change); an event with empty `windows` means the entry's last
-  window has reset (the entry is then absent from `GET /api/usage`). The windows a provider
-  reported before it named its account belong to the first labelled entry. The bridge sends no
-  event on the passing of a `resetsAt` alone: a watch showing a window past its `resetsAt` shows
+  `resets_at` by about a second between reports). When both have a `resetsAt`, usage never
+  decreases within a window, so the higher `usedPercent` is kept, with the later `resetsAt` (every
+  Claude Code process repeats the limits of its own last API call, so an idle one reports old
+  numbers); when either lacks one (Codex sends none for some limits), nothing tells an old report
+  from a reset, so the newer report's `usedPercent` is kept, even when lower, with the known
+  `resetsAt`. A merged window keeps the optional fields (`label`, `minutes`) either value carries.
+  `resetsAt` further apart are two windows, and the one with the later `resetsAt` is kept. Windows
+  whose `resetsAt` has passed are dropped before merging. A window is removed only when its
+  `resetsAt` has passed (or the entry is dropped), never because one report omitted it (a Claude
+  Code statusLine report carries only the limits it happens to name). `GET /api/usage` and the
+  `snapshot` always return this merged state; `usage` events are sent at once when an entry first
+  appears and then at most once per minute per entry, with the merged state at the time of sending
+  (windows merely listed in another order are no change); an event with empty `windows` means the
+  entry's last window has reset (the entry is then absent from `GET /api/usage`). The windows a
+  provider reported before it named its account belong to the first labelled entry. The bridge sends
+  no event on the passing of a `resetsAt` alone: a watch showing a window past its `resetsAt` shows
   stale numbers until the next report or `snapshot`.
 
 - **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `threadId` (the id of the
