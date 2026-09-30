@@ -9,7 +9,7 @@ import { BridgeHub, usageKey } from '../src/hub.ts';
 import type { Account, Session, Usage } from '../src/protocol.ts';
 import { statuslineRouter, type StatuslineTarget } from '../src/providers/claude-code/statusline.ts';
 import { startServer } from '../src/server.ts';
-import { FakeProvider, TestSocket, fakeAskRunner, startBridge, waitFor } from './helpers.ts';
+import { FakeProvider, TestSocket, fakeAskRunner, quiet, startBridge, waitFor } from './helpers.ts';
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'wristline-hub-')));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -284,7 +284,7 @@ test('usage windows are merged per entry: a report without a window keeps it unt
 });
 
 test('windows reported before the account was known are folded into the first labelled entry', () => {
-  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') } });
+  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: quiet });
   try {
     const fiveHour = { id: '5h', usedPercent: 40, resetsAt: '2026-09-29T12:00:00.000Z' };
     const sevenDay = { id: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z' };
@@ -301,7 +301,7 @@ test('windows reported before the account was known are folded into the first la
 
 test('a usage change inside the throttle window is sent when the window ends, in its then-current state', async () => {
   const clock = Date.parse('2026-09-29T10:00:00Z');
-  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, usageThrottleMs: 200 });
+  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, usageThrottleMs: 200, log: quiet });
   const auth = new Auth({ devices: [], save: async () => {}, now: () => clock });
   const server = await startServer({ hub, auth, bridge: { name: 'devbox', version: '0.1.0', apiVersion: 1 }, hookToken: 'h', apiPort: 0, hookPort: 0, onStatusline: () => {}, asks: fakeAskRunner(() => {}, {}) });
   try {

@@ -15,6 +15,9 @@ import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.t
 import { hookHandlers } from '../src/providers/claude-code/hooks.ts';
 import { startServer, type RunningServer } from '../src/server.ts';
 
+/** A logger that drops everything: the hub logs connections and deliveries to the console by default. */
+export const quiet = (): void => {};
+
 /** In-memory provider with deterministic data. */
 export class FakeProvider implements SessionProvider {
   readonly id: ProviderId;
@@ -129,6 +132,7 @@ export async function startBridge(
     providers: Array.isArray(provider) ? provider : [provider],
     pending: { now, newId: () => `req-${++n}` },
     alerts: { now, newId: () => `a1e47c00-0000-4000-8000-${String(++a).padStart(12, '0')}` },
+    log: quiet,
   });
   const auth = new Auth({ devices: [], save, now });
   const hookToken = 'hook-token';
