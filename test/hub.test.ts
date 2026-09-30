@@ -156,6 +156,63 @@ test('usage is kept per provider and account; a labelled entry retires the unlab
   }
 });
 
+test('background mode: only requests, resolutions, alerts and needs_input transitions reach the client; foreground gets everything', async () => {
+  const p = new FakeProvider();
+  const s1 = session('s1');
+  p.sessions = [s1];
+  p.items.set('s1', []);
+  const bridge = await startBridge(p);
+  try {
+    const url = `${bridge.base.replace('http', 'ws')}/api/ws`;
+    const fg = await new TestSocket(url, bridge.token).open();
+    const bg = await new TestSocket(url, bridge.token).open();
+    assert.equal((await fg.next()).type, 'snapshot');
+    assert.equal((await bg.next()).type, 'snapshot');
+    for (const ws of [fg, bg]) ws.send({ type: 'subscribe', sessionId: s1.id });
+    bg.send({ type: 'mode', mode: 'background' });
+    bg.send({ type: 'mode', mode: 'sideways' }); // Unknown modes are ignored.
+    await new Promise((r) => setTimeout(r, 100));
+    const types = async (ws: TestSocket, n: number): Promise<string[]> => {
+      const out: string[] = [];
+      for (let i = 0; i < n; i++) out.push((await ws.next()).type);
+      return out;
+    };
+
+    // Churn a background client must not hear: a title change, an item, usage, a Quick Ask event.
+    bridge.hub.session({ ...s1, title: 'renamed' });
+    p.emit('s1', { seq: 1, kind: 'assistant', ts: '2026-09-29T10:00:01.000Z', text: 'hi' });
+    bridge.hub.usage({ provider: 'codex', updatedAt: '2026-09-29T10:00:00.000Z', windows: [{ id: 'primary', usedPercent: 5 }] });
+    bridge.hub.sendToDevice(bridge.auth.authenticate(bridge.token)?.id ?? '', { type: 'ask', askId: 'ask-1', provider: 'codex', status: 'running' });
+    assert.deepEqual(await types(fg, 4), ['session', 'item', 'usage', 'ask']);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(bg.pending(), 0);
+
+    // What it must hear: a request and its session turning needs_input, the resolution and the way back, an alert.
+    const answers = bridge.hub.pending.open({ sessionId: s1.id, kind: 'permission', title: 'Bash', questions: [{ id: 'decision', text: 'ls', multi: false, options: [{ id: 'allow', label: 'Allow' }] }] }, { timeoutMs: 60_000 });
+    assert.deepEqual(await types(bg, 2), ['request', 'session']);
+    await new Promise((r) => setTimeout(r, 2100)); // the per-session throttle
+    assert.equal(bridge.hub.pending.answer('req-1', { decision: ['allow'] }), 'ok');
+    assert.deepEqual(await answers, { decision: ['allow'] });
+    assert.deepEqual(await types(bg, 2), ['resolved', 'session']);
+    bridge.hub.alert(s1.id, 'done', 'Finished the task as requested.');
+    assert.equal((await bg.next()).type, 'alert');
+    bridge.hub.removed(s1.id);
+    assert.deepEqual(await types(fg, 6), ['request', 'session', 'resolved', 'session', 'alert', 'session_removed']);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(bg.pending(), 0, 'no session_removed, no other session churn');
+
+    // Back in the foreground the client hears everything again.
+    bg.send({ type: 'mode', mode: 'foreground' });
+    await new Promise((r) => setTimeout(r, 100));
+    bridge.hub.session({ ...s1, title: 'again' });
+    assert.equal((await bg.next()).type, 'session');
+    fg.close();
+    bg.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('usage windows are merged per entry: a report without a window keeps it until its reset time passes; events are throttled to one per minute', async () => {
   const base = Date.parse('2026-09-29T10:00:00Z');
   let clock = base;

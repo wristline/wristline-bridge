@@ -177,6 +177,7 @@ Client events:
 | `type` | Fields | Effect | Fixture |
 |---|---|---|---|
 | `subscribe` | `sessionId: string \| null`, `kinds?: string[]` | receive `item` events for this session only (`null` stops); with `kinds`, only items of those kinds | `client-subscribe.json`, `client-subscribe-kinds.json` |
+| `mode` | `mode: "foreground" \| "background"` | `background`: receive only the events listed under "Background mode"; `foreground` (the default of every new connection): everything | `client-mode.json` |
 
 Unknown client events are ignored. After subscribing, fetch the newest page over REST; items that
 arrive in between may be delivered twice and are identified by `seq`.
@@ -189,7 +190,23 @@ previous subscription and its filter.
 
 The server pings every 30 s and drops a connection that missed a pong. Revoking a device closes its
 connections with code `4001`. Reconnecting clients receive a fresh `snapshot` and must subscribe
-again.
+again (and re-send their `mode`).
+
+### Background mode
+
+While the watch app is not on screen it only needs what should wake the wearer. After `{"type":
+"mode", "mode": "background"}` the bridge sends this connection only:
+
+- `request` and `resolved`,
+- `alert`,
+- `session` events whose `status` changed to or from `needs_input` (as last sent by the bridge;
+  a session's first event counts as a change only when it is `needs_input`).
+
+Nothing else: no `usage`, no `item` (the subscription stays and resumes in the foreground), no
+other `session` churn, no `session_removed`, no `ask`. `{"type": "mode", "mode": "foreground"}`
+restores the full stream. A new connection starts in the foreground and always gets its
+`snapshot`; after reconnecting, a client re-sends its `mode` (after its `subscribe`). A `mode`
+with an unknown value is ignored.
 
 ### Missed alerts
 

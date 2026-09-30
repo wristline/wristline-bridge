@@ -161,8 +161,15 @@ export type ServerEvent =
   /** Sent to the asking device only; `text` is the answer. `running` once after the 202, then `done` or `error` once. */
   | { type: 'ask'; askId: string; provider: ProviderId; status: AskStatus; text?: string; model?: string; durationMs?: number; error?: string };
 
-/** `kinds`, when present, limits the subscription's `item` events to those kinds. */
-export type ClientEvent = { type: 'subscribe'; sessionId: string | null; kinds?: ItemKind[] };
+/**
+ * `background` (the watch app is not on screen): the bridge sends only `request`, `resolved`,
+ * `alert` and `session` events whose status changed to or from `needs_input`. `foreground` (the
+ * default for a new connection) sends everything.
+ */
+export type ClientMode = 'foreground' | 'background';
+
+/** `subscribe`: `kinds`, when present, limits the subscription's `item` events to those kinds. `mode`: see ClientMode. */
+export type ClientEvent = { type: 'subscribe'; sessionId: string | null; kinds?: ItemKind[] } | { type: 'mode'; mode: ClientMode };
 
 /** WebSocket close code sent when the device token is revoked. */
 export const CLOSE_REVOKED = 4001;

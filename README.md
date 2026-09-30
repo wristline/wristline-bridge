@@ -324,6 +324,10 @@ npm run build        # tsc -> dist/
 node scripts/fake-watch.ts --url http://127.0.0.1:47770 --code 123456
 ```
 
+While the watch app is off screen it switches the connection to background mode and hears only
+requests, alerts and sessions entering or leaving `needs_input` (no usage, items or list churn);
+see "Background mode" in the protocol document.
+
 `scripts/fake-watch.ts` behaves like the watch: it prints events and reads `subscribe <sid>`,
 `answer <rid> <optionIds,...> [...]` (one argument per question), `prompt <sid> <text>` from stdin.
 

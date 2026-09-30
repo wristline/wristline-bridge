@@ -6,6 +6,7 @@ import {
   CLOSE_REVOKED,
   type Alert,
   type AlertKind,
+  type ClientMode,
   type Item,
   type PendingRequest,
   type ProviderHealth,
@@ -33,6 +34,7 @@ interface Client {
   sessionId: string | null;
   /** Item kinds the subscription wants; undefined for all. */
   kinds: ReadonlySet<string> | undefined;
+  mode: ClientMode;
   alive: boolean;
 }
 
@@ -107,6 +109,8 @@ export class BridgeHub implements Hub {
   readonly #ping: NodeJS.Timeout;
   /** Oldest first, at most ALERT_KEEP. */
   readonly #alerts: Alert[] = [];
+  /** Status as last broadcast per session: a background client hears of a change to or from needs_input only. */
+  readonly #lastStatus = new Map<string, Session['status']>();
   readonly #now: () => number;
   readonly #newId: () => string;
 
@@ -154,6 +158,7 @@ export class BridgeHub implements Hub {
   removed(sessionId: string): void {
     clearTimeout(this.#throttles.get(sessionId)?.timer);
     this.#throttles.delete(sessionId);
+    this.#lastStatus.delete(sessionId);
     this.#broadcast({ type: 'session_removed', sessionId });
   }
 
@@ -218,10 +223,10 @@ export class BridgeHub implements Hub {
     this.#broadcast({ type: 'alert', ...alert });
   }
 
-  /** To every connection of one device only (a Quick Ask answer is nobody else's business). */
+  /** To every foreground connection of one device only (a Quick Ask answer is nobody else's business). */
   sendToDevice(deviceId: string, event: ServerEvent): void {
     const data = JSON.stringify(event);
-    for (const c of this.#clients) if (c.deviceId === deviceId) this.#sendRaw(c, data);
+    for (const c of this.#clients) if (c.deviceId === deviceId && c.mode === 'foreground') this.#sendRaw(c, data);
   }
 
   // Queries
@@ -264,7 +269,7 @@ export class BridgeHub implements Hub {
   // WebSocket clients
 
   attach(ws: WebSocket, deviceId: string): void {
-    const client: Client = { ws, deviceId, sessionId: null, kinds: undefined, alive: true };
+    const client: Client = { ws, deviceId, sessionId: null, kinds: undefined, mode: 'foreground', alive: true };
     this.#clients.add(client);
     this.pending.watchConnected();
     ws.on('pong', () => {
@@ -277,6 +282,8 @@ export class BridgeHub implements Hub {
       if (msg?.type === 'subscribe' && (msg.sessionId === null || typeof msg.sessionId === 'string')) {
         const kinds = subscribeKinds(msg.kinds);
         if (kinds !== null) this.#subscribe(client, msg.sessionId, kinds);
+      } else if (msg?.type === 'mode' && (msg.mode === 'foreground' || msg.mode === 'background')) {
+        client.mode = msg.mode;
       }
     });
     ws.on('close', () => {
@@ -312,7 +319,7 @@ export class BridgeHub implements Hub {
       const clients = new Set<Client>();
       const stop = target.provider.watch(target.nativeId, (item: Item) => {
         const data = JSON.stringify({ type: 'item', sessionId, item } satisfies ServerEvent);
-        for (const c of clients) if (!c.kinds || c.kinds.has(item.kind)) this.#sendRaw(c, data);
+        for (const c of clients) if (c.mode === 'foreground' && (!c.kinds || c.kinds.has(item.kind))) this.#sendRaw(c, data);
       });
       watch = { stop, clients };
       this.#watches.set(sessionId, watch);
@@ -358,7 +365,26 @@ export class BridgeHub implements Hub {
 
   #broadcast(event: ServerEvent): void {
     const data = JSON.stringify(event);
-    for (const c of this.#clients) this.#sendRaw(c, data);
+    const background = this.#forBackground(event);
+    for (const c of this.#clients) if (c.mode === 'foreground' || background) this.#sendRaw(c, data);
+  }
+
+  /** What a background client hears: requests and their resolution, alerts, and a session entering or leaving needs_input. */
+  #forBackground(event: ServerEvent): boolean {
+    switch (event.type) {
+      case 'request':
+      case 'resolved':
+      case 'alert':
+        return true;
+      case 'session': {
+        const { id, status } = event.session;
+        const was = this.#lastStatus.get(id) === 'needs_input';
+        this.#lastStatus.set(id, status);
+        return was !== (status === 'needs_input');
+      }
+      default:
+        return false;
+    }
   }
 
   #send(client: Client, event: ServerEvent): void {

@@ -266,6 +266,10 @@ test('WebSocket events', async () => {
   ws.send(subscribe);
   other.send({ type: 'subscribe', sessionId: ended.id });
   other.send({ type: 'future_message', value: 1 });
+  // The other watch leaves the screen: from now on it hears only requests, resolutions, alerts and needs_input transitions.
+  const mode: ClientEvent = { type: 'mode', mode: 'background' };
+  fixture('client-mode', mode);
+  other.send(mode);
   const talk = new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token);
   await talk.open();
   await talk.next();
@@ -310,6 +314,10 @@ test('WebSocket events', async () => {
   assert.deepEqual(await ws.next(), { type: 'resolved', requestId: 'req-2', by: 'terminal' });
   assert.deepEqual(await ws.next(), { type: 'session', session: codex });
 
+  await new Promise((r) => setTimeout(r, 100));
+  const heard: string[] = [];
+  while (other.pending() > 0) heard.push((await other.next()).type);
+  assert.deepEqual(heard, ['resolved', 'session', 'resolved', 'session'], 'the background watch heard the two resolutions and the sessions leaving needs_input, not the item, session_removed or usage');
   ws.close();
   other.close();
 });
