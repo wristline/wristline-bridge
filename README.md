@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/wristline-lockup-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/wristline-lockup-light.svg">
+    <img alt="Wristline" src="docs/brand/wristline-lockup-light.svg" width="360">
+  </picture>
+</p>
+
 # Wristline Bridge
 
 Wristline Bridge is the small local server that runs on your development machine and lets the
