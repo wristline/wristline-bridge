@@ -69,17 +69,23 @@ function expired(window: UsageWindow, now: number): boolean {
   return window.resetsAt !== undefined && Date.parse(window.resetsAt) < now;
 }
 
+/** Two values of one window id whose reset times are at most this far apart are the same window. */
+const SAME_WINDOW_MS = 5 * 60_000;
+
 /**
- * Of two values of one window, the one to keep. Each Claude Code process reports the limits of its
- * own last API response, and an idle one keeps repeating them, so arrival order says nothing: the
- * later reset time is the newer window, and within one window usage only grows. Without both reset
- * times the report wins.
+ * Of two values of one window id, the one to keep. Arrival order says nothing: each Claude Code
+ * process reports the limits of its own last API response (an idle one keeps repeating them), and
+ * Codex servers jitter a window's reset time by about a second between reports. So reset times at
+ * most SAME_WINDOW_MS apart (or a missing one) mean the same window: usage only grows within it, so
+ * the higher `usedPercent` wins, with the later reset time. Reset times further apart are two
+ * windows, and the later one is the newer.
  */
-function newerWindow(stored: UsageWindow, reported: UsageWindow): UsageWindow {
-  if (stored.resetsAt === undefined || reported.resetsAt === undefined) return reported;
-  const [a, b] = [Date.parse(stored.resetsAt), Date.parse(reported.resetsAt)];
-  if (a !== b) return a > b ? stored : reported;
-  return stored.usedPercent > reported.usedPercent ? stored : reported;
+function mergeWindow(stored: UsageWindow, reported: UsageWindow): UsageWindow {
+  const a = stored.resetsAt === undefined ? undefined : Date.parse(stored.resetsAt);
+  const b = reported.resetsAt === undefined ? undefined : Date.parse(reported.resetsAt);
+  const later = a !== undefined && (b === undefined || a > b) ? stored : reported;
+  if (a !== undefined && b !== undefined && Math.abs(a - b) > SAME_WINDOW_MS) return later;
+  return { ...later, usedPercent: Math.max(stored.usedPercent, reported.usedPercent) };
 }
 
 /**
@@ -93,7 +99,7 @@ export function mergeUsage(previous: Usage | undefined, next: Usage, now: number
   for (const w of next.windows) {
     if (expired(w, now)) continue;
     const old = stored.get(w.id);
-    byId.set(w.id, old ? newerWindow(old, w) : w);
+    byId.set(w.id, old ? mergeWindow(old, w) : w);
   }
   for (const [id, w] of stored) if (!byId.has(id)) byId.set(id, w);
   return { ...next, windows: [...byId.values()] };

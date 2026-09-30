@@ -351,6 +351,61 @@ test('usage from processes that alternate (an idle one repeats the limits of its
   }
 });
 
+test('usage windows with reset times at most 5 minutes apart are one window (the higher number wins); further apart, the later reset time wins', () => {
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, log: quiet });
+  try {
+    const at = (iso: string, seconds: number): string => new Date(Date.parse(iso) + seconds * 1000).toISOString();
+    const window = (provider: Usage['provider'], id: string): Usage['windows'][number] | undefined =>
+      hub.usageList().find((u) => u.provider === provider)?.windows.find((w) => w.id === id);
+    const report = (provider: Usage['provider'], windows: Usage['windows']): void => {
+      clock += 1000;
+      hub.usage({ provider, updatedAt: new Date(clock).toISOString(), windows, account: { id: 'acc-a', label: 'me' } });
+    };
+
+    // Codex jitters resets_at by about a second between reports: the latest (higher) number shows, with the later reset time.
+    const T = '2026-09-29T12:00:00.000Z';
+    for (const [jitter, usedPercent, latest] of [[0, 10, 0], [1, 11, 1], [-1, 12, 1], [1, 13, 1], [-1, 14, 1]] as const) {
+      report('codex', [{ id: 'primary', usedPercent, resetsAt: at(T, jitter), minutes: 300 }]);
+      assert.deepEqual(window('codex', 'primary'), { id: 'primary', usedPercent, resetsAt: at(T, latest), minutes: 300 });
+    }
+
+    // A stale Claude Code reporter (an idle process) repeats an older, lower number for the same reset time: ignored.
+    const fiveHour = { id: '5h', label: '5h', usedPercent: 40, resetsAt: T, minutes: 300 };
+    report('claude-code', [fiveHour]);
+    report('claude-code', [{ ...fiveHour, usedPercent: 25 }]);
+    assert.deepEqual(window('claude-code', '5h'), fiveHour);
+
+    // A new window (reset time 5 h later) replaces the old one although its number is lower, even while the old reset time
+    // has not passed on the bridge's clock; the stale reporter's old window then loses to it.
+    clock = Date.parse('2026-09-29T11:59:00Z');
+    const next = { ...fiveHour, usedPercent: 2, resetsAt: at(T, 5 * 3600) };
+    report('claude-code', [next]);
+    assert.deepEqual(window('claude-code', '5h'), next);
+    report('claude-code', [{ ...fiveHour, usedPercent: 45 }]);
+    assert.deepEqual(window('claude-code', '5h'), next);
+    // Codex's new window: its reset time is 5 h later, jittered.
+    report('codex', [{ id: 'primary', usedPercent: 1, resetsAt: at(T, 5 * 3600 - 1), minutes: 300 }]);
+    assert.deepEqual(window('codex', 'primary'), { id: 'primary', usedPercent: 1, resetsAt: at(T, 5 * 3600 - 1), minutes: 300 });
+
+    // Without a reset time on either side it is the same window: the higher number wins; a known reset time is kept.
+    report('codex', [{ id: 'secondary', usedPercent: 30, minutes: 10080 }]);
+    report('codex', [{ id: 'secondary', usedPercent: 20, minutes: 10080 }]);
+    assert.deepEqual(window('codex', 'secondary'), { id: 'secondary', usedPercent: 30, minutes: 10080 });
+    report('codex', [{ id: 'secondary', usedPercent: 35, minutes: 10080 }]);
+    assert.deepEqual(window('codex', 'secondary'), { id: 'secondary', usedPercent: 35, minutes: 10080 });
+    const weekly = { id: 'secondary', usedPercent: 36, resetsAt: '2026-10-03T00:00:00.000Z', minutes: 10080 };
+    report('codex', [weekly]);
+    assert.deepEqual(window('codex', 'secondary'), weekly);
+    report('codex', [{ id: 'secondary', usedPercent: 37, minutes: 10080 }]);
+    assert.deepEqual(window('codex', 'secondary'), { ...weekly, usedPercent: 37 });
+    report('codex', [{ id: 'secondary', usedPercent: 5, minutes: 10080 }]);
+    assert.deepEqual(window('codex', 'secondary'), { ...weekly, usedPercent: 37 });
+  } finally {
+    hub.close();
+  }
+});
+
 test('a usage change inside the throttle window is sent when the window ends, in its then-current state', async () => {
   const clock = Date.parse('2026-09-29T10:00:00Z');
   const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, usageThrottleMs: 200, log: quiet });
