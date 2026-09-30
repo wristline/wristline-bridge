@@ -86,6 +86,12 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   entry's (a stale snapshot). Once a provider reports a labelled entry, the bridge drops that
   provider's unlabelled one (a watch sees it go on its next `snapshot`) and ignores later unlabelled
   reports of that provider.
+  The bridge merges the windows of an entry: each window `id` keeps the latest value reported for
+  it, and a window is removed only when its `resetsAt` has passed (or the entry is dropped), never
+  because one report omitted it (a Claude Code statusLine report carries only the limits it happens
+  to name). `GET /api/usage` and the `snapshot` always return this merged state; `usage` events are
+  sent at once when an entry first appears and then at most once per minute per entry, with the
+  merged state at the time of sending.
 
 - **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `question` (the watch's
   text, trimmed), `status` (`running`, `done`, `error`), `createdAt`; when `done`, `answer` (at
@@ -162,7 +168,7 @@ Server events (JSON text frames):
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
-| `usage` | `usage` | plan usage numbers or account changed | `event-usage.json` |
+| `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first | `event-usage.json` |
 | `alert` | `id, at, sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json` |
 | `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
@@ -210,7 +216,8 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   quiet while the watch shows the alert.
 - `POST /local/statusline` — the Claude Code statusLine JSON; every `rate_limits` entry with a
   `used_percentage` becomes a usage window (`five_hour` → `5h`, `seven_day` → `7d`,
-  `seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`; `resets_at` epoch seconds → ISO)
+  `seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`; `resets_at` epoch seconds → ISO),
+  merged into the account's entry (a window the report omits keeps its last value until it resets),
   and `context_window` the session's context (`context_window_size`, and `current_usage` input
   tokens when present); `model.display_name`
   and `effort.level` become the session's `model` and `effort`. With several Claude

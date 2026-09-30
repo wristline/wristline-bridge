@@ -4,10 +4,12 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { usageKey } from '../src/hub.ts';
+import { Auth } from '../src/auth.ts';
+import { BridgeHub, usageKey } from '../src/hub.ts';
 import type { Account, Session, Usage } from '../src/protocol.ts';
 import { statuslineRouter, type StatuslineTarget } from '../src/providers/claude-code/statusline.ts';
-import { FakeProvider, TestSocket, startBridge, waitFor } from './helpers.ts';
+import { startServer } from '../src/server.ts';
+import { FakeProvider, TestSocket, fakeAskRunner, startBridge, waitFor } from './helpers.ts';
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'wristline-hub-')));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -92,7 +94,8 @@ test('snapshot and GET /api/sessions list live sessions only; a session that end
 });
 
 test('usage is kept per provider and account; a labelled entry retires the unlabelled one for good; stale snapshots are ignored; changed numbers or accounts are broadcast', async () => {
-  const bridge = await startBridge(new FakeProvider());
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const bridge = await startBridge(new FakeProvider(), () => clock);
   try {
     const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
     assert.equal((await ws.next()).type, 'snapshot');
@@ -124,6 +127,7 @@ test('usage is kept per provider and account; a labelled entry retires the unlab
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(ws.pending(), 0, 'unchanged numbers are not broadcast');
     assert.equal(bridge.hub.usageList().find((u) => u.account?.id === 'acc-a')?.updatedAt, same.updatedAt, 'but the entry is refreshed');
+    clock += 60_000; // past the usage throttle
     bridge.hub.usage(claude(A, 11));
     const event = await ws.next();
     assert.equal(event.type === 'usage' && event.usage.windows[0]?.usedPercent, 11);
@@ -138,6 +142,7 @@ test('usage is kept per provider and account; a labelled entry retires the unlab
     assert.equal(bridge.hub.usageList().find((u) => u.account?.id === 'acc-a')?.windows[0]?.usedPercent, 11);
     // Same numbers, but the account is now known for certain (or relabelled): worth an event.
     const exact = claude({ id: 'acc-b', label: 'school' }, 20);
+    clock += 60_000;
     bridge.hub.usage(exact);
     assert.deepEqual(await ws.next(), { type: 'usage', usage: exact });
 
@@ -148,6 +153,88 @@ test('usage is kept per provider and account; a labelled entry retires the unlab
     other.close();
   } finally {
     await bridge.close();
+  }
+});
+
+test('usage windows are merged per entry: a report without a window keeps it until its reset time passes; events are throttled to one per minute', async () => {
+  const base = Date.parse('2026-09-29T10:00:00Z');
+  let clock = base;
+  const bridge = await startBridge(new FakeProvider(), () => clock);
+  try {
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    assert.equal((await ws.next()).type, 'snapshot');
+    const report = (windows: Usage['windows']): Usage => ({ provider: 'claude-code', updatedAt: new Date(clock).toISOString(), windows, account: { id: 'acc-a', label: 'me' } });
+    const fiveHour = { id: '5h', label: '5h', usedPercent: 40, resetsAt: '2026-09-29T12:00:00.000Z', minutes: 300 };
+    const sevenDay = { id: '7d', label: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z', minutes: 10080 };
+    const stored = (): Usage['windows'] | undefined => bridge.hub.usageList()[0]?.windows;
+
+    // First appearance: sent at once.
+    bridge.hub.usage(report([fiveHour, sevenDay]));
+    assert.deepEqual((await ws.next()).type, 'usage');
+
+    // A report lacking the 5h window (Claude Code reports the ones it happens to carry) keeps the stored 5h; the event waits for the throttle window.
+    clock += 1000;
+    bridge.hub.usage(report([{ ...sevenDay, usedPercent: 13 }]));
+    assert.deepEqual(stored(), [{ ...sevenDay, usedPercent: 13 }, fiveHour]);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ws.pending(), 0, 'throttled: not sent within a minute of the last event');
+
+    // Past the throttle window the next change goes out at once, carrying the merged state.
+    clock = base + 60_000;
+    bridge.hub.usage(report([{ ...sevenDay, usedPercent: 14 }]));
+    const event = await ws.next();
+    assert.deepEqual(event.type === 'usage' && event.usage.windows, [{ ...sevenDay, usedPercent: 14 }, fiveHour]);
+    assert.equal(ws.pending(), 0, 'the change held back before was superseded, not sent twice');
+
+    // Once the 5h reset time has passed the window is gone from GET /api/usage, the snapshot and the next event.
+    clock = Date.parse('2026-09-29T12:00:01Z');
+    assert.deepEqual(stored(), [{ ...sevenDay, usedPercent: 14 }]);
+    const later = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    const snapshot = await later.next();
+    assert.deepEqual(snapshot.type === 'snapshot' && snapshot.usage[0]?.windows, [{ ...sevenDay, usedPercent: 14 }]);
+    later.close();
+    bridge.hub.usage(report([{ ...sevenDay, usedPercent: 15 }]));
+    const afterReset = await ws.next();
+    assert.deepEqual(afterReset.type === 'usage' && afterReset.usage.windows, [{ ...sevenDay, usedPercent: 15 }]);
+    // A report whose window has already reset is not stored either.
+    bridge.hub.usage(report([{ ...fiveHour, usedPercent: 1 }, { ...sevenDay, usedPercent: 15 }]));
+    assert.deepEqual(stored(), [{ ...sevenDay, usedPercent: 15 }]);
+    // A fresh 5h window comes back at once when reported.
+    clock += 60_000;
+    const fresh = { ...fiveHour, usedPercent: 2, resetsAt: '2026-09-29T17:00:00.000Z' };
+    bridge.hub.usage(report([fresh]));
+    const back = await ws.next();
+    assert.deepEqual(back.type === 'usage' && back.usage.windows, [fresh, { ...sevenDay, usedPercent: 15 }]);
+    ws.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('a usage change inside the throttle window is sent when the window ends, in its then-current state', async () => {
+  const clock = Date.parse('2026-09-29T10:00:00Z');
+  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, usageThrottleMs: 200 });
+  const auth = new Auth({ devices: [], save: async () => {}, now: () => clock });
+  const server = await startServer({ hub, auth, bridge: { name: 'devbox', version: '0.1.0', apiVersion: 1 }, hookToken: 'h', apiPort: 0, hookPort: 0, onStatusline: () => {}, asks: fakeAskRunner(() => {}, {}) });
+  try {
+    const { token } = await auth.issue('w');
+    const ws = await new TestSocket(`ws://127.0.0.1:${server.apiPort}/api/ws`, token).open();
+    await ws.next();
+    const report = (used: number): Usage => ({ provider: 'codex', updatedAt: '2026-09-29T10:00:00.000Z', windows: [{ id: 'primary', usedPercent: used }] });
+    hub.usage(report(1));
+    assert.equal((await ws.next()).type, 'usage');
+    hub.usage(report(2));
+    hub.usage(report(3));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(ws.pending(), 0);
+    const event = await ws.next(1000);
+    assert.deepEqual(event.type === 'usage' && event.usage.windows, [{ id: 'primary', usedPercent: 3 }], 'one event with the latest numbers');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(ws.pending(), 0, 'nothing more without a change');
+    ws.close();
+  } finally {
+    hub.close();
+    await server.close();
   }
 });
 

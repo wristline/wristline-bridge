@@ -113,7 +113,8 @@ codexProvider.sessions = [codex];
 let permission: Promise<Answers | null>;
 let question: Promise<Answers | null>;
 const terminal = new AbortController();
-const now = (): number => Date.parse('2026-09-29T10:00:00Z');
+let clock = Date.parse('2026-09-29T10:00:00Z');
+const now = (): number => clock;
 /** The fake `claude` only: a Codex ask is `ask_unavailable`. */
 const fakeEnv = { FAKE_MODE: 'ok' };
 
@@ -297,8 +298,11 @@ test('WebSocket events', async () => {
 
   bridge.hub.removed(ended.id);
   fixture('event-session-removed', await ws.next());
-  bridge.hub.usage({ ...usage, updatedAt: '2026-09-29T10:00:03.000Z', windows: [{ id: 'primary', usedPercent: 13, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 }] });
+  // A minute later (usage events are throttled to one per minute per entry) the primary window moved; the secondary one is kept from the earlier report.
+  clock += 60_000;
+  bridge.hub.usage({ ...usage, updatedAt: '2026-09-29T10:01:00.000Z', windows: [{ id: 'primary', usedPercent: 13, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 }] });
   fixture('event-usage', await ws.next());
+  clock -= 60_000;
 
   // The question is answered in the Codex terminal instead.
   terminal.abort();

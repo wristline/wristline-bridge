@@ -13,11 +13,14 @@ import {
   type ServerEvent,
   type Session,
   type Usage,
+  type UsageWindow,
 } from './protocol.ts';
 import type { Hub, SessionProvider } from './provider.ts';
 import { parseJson } from './util.ts';
 
 const SESSION_THROTTLE_MS = 2000;
+/** `usage` events per entry: at most one per minute (the first one at once). */
+export const USAGE_THROTTLE_MS = 60_000;
 const PING_MS = 30_000;
 /** Alerts replayed in the snapshot: at most this many, none older than ALERT_TTL_MS. */
 const ALERT_KEEP = 10;
@@ -44,9 +47,32 @@ export interface Target {
   nativeId: string;
 }
 
+interface UsageThrottle {
+  last: number;
+  timer?: NodeJS.Timeout;
+  /** A change arrived during the throttle window; the timer sends the entry's state at its end. */
+  pending: boolean;
+}
+
 /** The identity of a usage entry: its provider and account (see the header of protocol.ts). */
 export function usageKey(usage: Pick<Usage, 'provider' | 'account'>): string {
   return `${usage.provider}:${usage.account?.id ?? ''}`;
+}
+
+function expired(window: UsageWindow, now: number): boolean {
+  return window.resetsAt !== undefined && Date.parse(window.resetsAt) < now;
+}
+
+/**
+ * The report's windows, then the stored ones it did not mention. A statusLine report names only
+ * the windows it happens to carry, so an omitted window keeps its last value until its reset time
+ * passes; a window is only ever removed by that.
+ */
+export function mergeUsage(previous: Usage | undefined, next: Usage, now: number): Usage {
+  const byId = new Map<string, UsageWindow>();
+  for (const w of next.windows) byId.set(w.id, w);
+  for (const w of previous?.windows ?? []) if (!byId.has(w.id)) byId.set(w.id, w);
+  return { ...next, windows: [...byId.values()].filter((w) => !expired(w, now)) };
 }
 
 /** A subscribe message's `kinds`: undefined (all) when absent or null, null when malformed. Unknown kinds just never match. */
@@ -60,8 +86,10 @@ export interface HubOptions {
   providers: SessionProvider[];
   /** Overrides for deterministic request ids and timestamps in tests. */
   pending?: Pick<PendingOptions, 'now' | 'newId'>;
-  /** The same for alert ids and timestamps. */
+  /** The same for alert ids and timestamps; `now` also expires usage windows and times the usage throttle. */
   alerts?: Pick<PendingOptions, 'now' | 'newId'>;
+  /** Test override of USAGE_THROTTLE_MS. */
+  usageThrottleMs?: number;
 }
 
 /** Fans provider changes out to connected watches and tracks what each one subscribed to. */
@@ -74,6 +102,8 @@ export class BridgeHub implements Hub {
   readonly #clients = new Set<Client>();
   readonly #watches = new Map<string, { stop: () => void; clients: Set<Client> }>();
   readonly #throttles = new Map<string, Throttle>();
+  readonly #usageThrottles = new Map<string, UsageThrottle>();
+  readonly #usageThrottleMs: number;
   readonly #ping: NodeJS.Timeout;
   /** Oldest first, at most ALERT_KEEP. */
   readonly #alerts: Alert[] = [];
@@ -84,6 +114,7 @@ export class BridgeHub implements Hub {
     this.#providers = options.providers;
     this.#now = options.alerts?.now ?? Date.now;
     this.#newId = options.alerts?.newId ?? randomUUID;
+    this.#usageThrottleMs = options.usageThrottleMs ?? USAGE_THROTTLE_MS;
     this.pending = new PendingRegistry({
       ...options.pending,
       onRequest: (request) => {
@@ -132,15 +163,52 @@ export class BridgeHub implements Hub {
     const previous = this.#usage.get(key);
     // Another home's older snapshot of this account (a rollout) must not replace its live numbers.
     if (previous && usage.updatedAt < previous.updatedAt) return;
-    this.#usage.set(key, usage);
+    const merged = mergeUsage(previous, usage, this.#now());
+    this.#usage.set(key, merged);
     // Once the provider names an account, its unlabelled entry is stale; a watch drops it with the next snapshot.
     if (usage.account) {
       this.#labelled.add(usage.provider);
       this.#usage.delete(usageKey({ provider: usage.provider }));
     }
     // Unchanged numbers are not worth waking the watch radio for; GET /api/usage has the fresh timestamp.
-    const changed = !previous || JSON.stringify([previous.windows, previous.account]) !== JSON.stringify([usage.windows, usage.account]);
-    if (changed) this.#broadcast({ type: 'usage', usage });
+    const changed = !previous || JSON.stringify([previous.windows, previous.account]) !== JSON.stringify([merged.windows, merged.account]);
+    if (changed) this.#publishUsage(key);
+  }
+
+  /** At most one `usage` event per entry and USAGE_THROTTLE_MS; a change inside the window is sent at its end, in its then-current state. */
+  #publishUsage(key: string): void {
+    const now = this.#now();
+    const t = this.#usageThrottles.get(key) ?? { last: Number.NEGATIVE_INFINITY, pending: false };
+    this.#usageThrottles.set(key, t);
+    if (now - t.last >= this.#usageThrottleMs) {
+      clearTimeout(t.timer);
+      t.timer = undefined;
+      t.pending = false;
+      t.last = now;
+      this.#sendUsage(key);
+      return;
+    }
+    t.pending = true;
+    t.timer ??= setTimeout(() => {
+      t.timer = undefined;
+      t.last = this.#now();
+      if (t.pending) this.#sendUsage(key);
+      t.pending = false;
+    }, t.last + this.#usageThrottleMs - now);
+  }
+
+  #sendUsage(key: string): void {
+    const usage = this.#current(key);
+    if (usage) this.#broadcast({ type: 'usage', usage });
+  }
+
+  /** The entry as the watch should see it now: without windows whose reset time has passed; undefined when none is left. */
+  #current(key: string): Usage | undefined {
+    const stored = this.#usage.get(key);
+    if (!stored) return undefined;
+    const now = this.#now();
+    const windows = stored.windows.filter((w) => !expired(w, now));
+    return windows.length === 0 ? undefined : windows.length === stored.windows.length ? stored : { ...stored, windows };
   }
 
   alert(sessionId: string, kind: AlertKind, text?: string, title?: string): void {
@@ -169,8 +237,9 @@ export class BridgeHub implements Hub {
     return this.#providers.map((p) => p.health());
   }
 
+  /** The merged entries, without windows whose reset time has passed. */
   usageList(): Usage[] {
-    return [...this.#usage.values()];
+    return [...this.#usage.keys()].flatMap((key) => this.#current(key) ?? []);
   }
 
   /** The buffered alerts of the past ALERT_TTL_MS, oldest first: a reconnecting watch posts the ones it missed. */
@@ -226,6 +295,7 @@ export class BridgeHub implements Hub {
   close(): void {
     clearInterval(this.#ping);
     for (const t of this.#throttles.values()) clearTimeout(t.timer);
+    for (const t of this.#usageThrottles.values()) clearTimeout(t.timer);
     for (const c of this.#clients) c.ws.terminate();
     for (const w of this.#watches.values()) w.stop();
     this.#watches.clear();

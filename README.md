@@ -87,7 +87,9 @@ reorders your entries):
   saved in `statusline.orig`; `padding` and `refreshInterval` are kept). The script sends the
   status JSON to the bridge in the background (plan usage 5h/7d and context size) and then runs
   your original command unchanged. If you had no status line, it prints nothing, but Claude Code
-  still keeps an empty row for it.
+  still keeps an empty row for it. A report names only the limits Claude Code happens to carry at
+  that moment, so the bridge merges them per account: a window it omits keeps its last value until
+  its reset time passes. The watch gets usage updates at most once a minute per account.
 
 Restart running Claude Code sessions to pick the hooks up. `wristline-bridge hooks uninstall`
 removes exactly these entries, restores your status line and deletes the generated files; the
