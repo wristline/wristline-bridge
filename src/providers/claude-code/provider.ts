@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LoginEntry } from '../../config.ts';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
@@ -66,6 +66,8 @@ export interface ClaudeOptions {
   labels?: Record<string, string>;
   /** True for a session id that is a Quick Ask thread (src/ask.ts): never listed. */
   isAsk?: (nativeId: string) => boolean;
+  /** The Quick Ask scratch directory (resolved): a session that ran there is an ask's even when `isAsk` does not know its id. */
+  askCwd?: string;
 }
 
 export class ClaudeCodeProvider implements SessionProvider {
@@ -78,6 +80,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly #saveLogins: ((logins: LoginEntry[]) => Promise<void>) | undefined;
   readonly #labels: Record<string, string>;
   readonly #isAsk: (nativeId: string) => boolean;
+  readonly #askCwd: string | undefined;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   /** Context reported by the statusLine, by session id; `at` is when the report arrived. */
@@ -115,6 +118,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     this.#saveLogins = options.saveLogins;
     this.#labels = options.labels ?? {};
     this.#isAsk = options.isAsk ?? (() => false);
+    this.#askCwd = options.askCwd;
   }
 
   async start(hub: Hub): Promise<void> {
@@ -260,7 +264,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   }
 
   async #readLogin(): Promise<void> {
-    const path = await claudeJsonPath(this.home);
+    const path = claudeJsonPath(this.home);
     let key = `${path}:missing`;
     try {
       const st = await stat(path);
@@ -328,13 +332,17 @@ export class ClaudeCodeProvider implements SessionProvider {
     }
     this.#panes = new Map([...paneOwner].map(([id, e]) => [e.sessionId, { id, pid: e.pid, procStart: e.procStart }]));
 
+    // Asks are left out before the cap, so they take no session's place; one that ran in the scratch directory is an ask's even when its id is not (or no longer) known.
+    const askProject = this.#askCwd === undefined ? undefined : join(this.home, 'projects', projectSlug(this.#askCwd));
+    const isAsk = (id: string): boolean =>
+      this.#isAsk(id) || (askProject !== undefined && (newest.get(id)?.cwd === this.#askCwd || dirname(this.#files.get(id)?.path ?? '') === askProject));
     const cutoff = now - this.#historyDays * DAY_MS;
     const history = [...this.#files]
-      .filter(([, f]) => f.mtimeMs >= cutoff)
+      .filter(([id, f]) => f.mtimeMs >= cutoff && !isAsk(id))
       .sort(([, a], [, b]) => b.mtimeMs - a.mtimeMs)
       .slice(0, HISTORY_MAX)
       .map(([id]) => id);
-    const ids = new Set([...live.keys(), ...history].filter((id) => !this.#isAsk(id)));
+    const ids = new Set([...live.keys(), ...history].filter((id) => !isAsk(id)));
 
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
     for (const id of this.#statusContext.keys()) if (!ids.has(id)) this.#statusContext.delete(id);

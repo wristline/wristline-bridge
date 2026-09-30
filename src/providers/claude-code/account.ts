@@ -2,7 +2,7 @@
 // sessions to logins. Only `oauthAccount` of `.claude.json` is read; `.credentials.json` never is.
 // Verified against Claude Code 2.1.284.
 
-import { access, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { LoginEntry } from '../../config.ts';
@@ -12,24 +12,23 @@ import { isNotFound, isObject, printable, str, toIso, type JsonObject } from '..
 /** Logins remembered per home; older ones are forgotten. */
 export const LOGINS_MAX = 20;
 
+/** `~/.claude`: the home Claude Code uses when `CLAUDE_CONFIG_DIR` is unset. */
+export function isDefaultClaudeHome(home: string, homeDir = homedir()): boolean {
+  return resolve(home) === join(homeDir, '.claude');
+}
+
 /**
  * Claude Code writes `.claude.json` into `$CLAUDE_CONFIG_DIR`, or into `$HOME` when the variable
- * is unset (the default `~/.claude` home): the file inside the home wins when it exists.
+ * is unset (the default `~/.claude` home). A `~/.claude/.claude.json` is only kept by runs with
+ * `CLAUDE_CONFIG_DIR=~/.claude` and is not what a plain `claude` logs into.
  */
-export async function claudeJsonPath(home: string, homeDir = homedir()): Promise<string> {
-  const inHome = join(home, '.claude.json');
-  if (resolve(home) !== join(homeDir, '.claude')) return inHome;
-  try {
-    await access(inHome);
-    return inHome;
-  } catch {
-    return join(homeDir, '.claude.json');
-  }
+export function claudeJsonPath(home: string, homeDir = homedir()): string {
+  return isDefaultClaudeHome(home, homeDir) ? join(homeDir, '.claude.json') : join(home, '.claude.json');
 }
 
 /** The home's current login, or undefined when logged out or using an API key. Rejects on invalid JSON. */
 export async function readClaudeAccount(home: string, homeDir = homedir()): Promise<Account | undefined> {
-  const path = await claudeJsonPath(home, homeDir);
+  const path = claudeJsonPath(home, homeDir);
   let text: string;
   try {
     text = await readFile(path, 'utf8');

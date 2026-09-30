@@ -228,6 +228,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string') || (threadId !== undefined && (typeof threadId !== 'string' || !threadId))) {
         return fail(res, 400, 'bad_request');
       }
+      // The CLI cannot take an argument with a NUL byte.
+      if (text.includes('\0') || model?.includes('\0')) return fail(res, 400, 'bad_request');
       if (text.length > TEXT_MAX) return fail(res, 413, 'payload_too_large');
       const ask: AskBody = { provider, text, ...(model ? { model } : {}), ...(threadId ? { threadId } : {}) };
       const started = asks.start(device.id, ask);

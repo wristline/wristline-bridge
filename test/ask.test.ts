@@ -1,13 +1,14 @@
 // Quick Ask through the real server with test/fake-cli.ts standing in for `claude` and `codex`.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { ASK_SYSTEM_PROMPT, parseClaude, parseCodex } from '../src/ask.ts';
+import { ASK_SYSTEM_PROMPT, parseClaude, parseCodex, type AskSpawn } from '../src/ask.ts';
 import type { Ask, ServerEvent } from '../src/protocol.ts';
 import { projectSlug } from '../src/providers/claude-code/home.ts';
-import { FakeProvider, TestSocket, fakeAskRunner, startBridge, waitFor, type Bridge } from './helpers.ts';
+import { FAKE_CLI, FakeProvider, TestSocket, fakeAskRunner, startBridge, waitFor, type Bridge } from './helpers.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-ask-test-'));
 const argvFile = join(root, 'argv.json');
@@ -166,7 +167,7 @@ test('threads expire 24 h after their last ask or on DELETE: the CLI session fil
     await waitFor(() => (existsSync(first.transcript) ? undefined : true));
     assert.ok(!existsSync(join(project, t1.slice('ask-'.length))), 'the sub-agent directory is gone too');
     assert.ok(existsSync(join(project, 'other.jsonl')), 'a transcript of another session stays');
-    assert.ok(!own.asks.ownsClaudeSession(t1.slice('ask-'.length)));
+    await waitFor(() => (own.asks.ownsClaudeSession(t1.slice('ask-'.length)) ? undefined : true));
     assert.equal((await post({ provider: 'claude-code', text: 'x', threadId: t1 }, own.token, own.base)).status, 404, 'an expired thread cannot be continued');
 
     // DELETE: the same at once; a running ask is cancelled first and the files go once it exited.
@@ -199,7 +200,7 @@ test('threads expire 24 h after their last ask or on DELETE: the CLI session fil
     assert.equal((await deleteThread(t5, own.token, own.base)).status, 204);
     assert.equal((await askEvent(socket, 'error')).error, 'cancelled');
     await waitFor(() => (readFileSync(argvFile, 'utf8') === JSON.stringify(['delete', '--force', codexId]) ? true : undefined));
-    assert.ok(!own.asks.ownsCodexThread(codexId));
+    await waitFor(() => (own.asks.ownsCodexThread(codexId) ? undefined : true));
     env.FAKE_MODE = 'ok';
 
     // The registry is on disk: a runner started later (here one without the Codex CLI) still owns the thread and deletes its files by hand.
@@ -211,7 +212,7 @@ test('threads expire 24 h after their last ask or on DELETE: the CLI session fil
       assert.ok(restarted.deleteThread(own.auth.authenticate(own.token)?.id ?? '', t4));
       await waitFor(() => (existsSync(third.rollout) ? undefined : true));
       assert.equal(readFileSync(join(codexHome, 'session_index.jsonl'), 'utf8'), `${JSON.stringify({ id: otherCodex, thread_name: 'keep' })}\n`);
-      assert.ok(!restarted.ownsCodexThread(codexId));
+      await waitFor(() => (restarted.ownsCodexThread(codexId) ? undefined : true));
     } finally {
       restarted.close();
     }
@@ -291,6 +292,13 @@ test('validation: provider, text, size, missing CLI', async () => {
   for (const body of [{ provider: 'gemini', text: 'x' }, { provider: 'codex', text: '' }, { provider: 'codex', text: '   ' }, { provider: 'codex' }, { provider: 'codex', text: 'x', model: 1 }, { provider: 'codex', text: 'x', threadId: '' }, 'text']) {
     assert.equal((await post(body)).status, 400, JSON.stringify(body));
   }
+  // The CLI cannot take an argument with a NUL byte: refused before anything is started or saved.
+  const before = await asks();
+  for (const body of [{ provider: 'claude-code', text: 'a\u0000b' }, { provider: 'codex', text: 'x', model: 'gpt\u0000' }]) {
+    assert.equal((await post(body)).status, 400, JSON.stringify(body));
+  }
+  assert.deepEqual(await asks(), before);
+  assert.equal(ws.pending(), 0);
   assert.equal((await post({ provider: 'codex', text: 'x'.repeat(4001) })).status, 413);
   // Without a provider the bridge's configured default (claude-code) answers.
   await accepted(await post({ text: 'default provider' }));
@@ -390,4 +398,172 @@ test('Claude Code hooks of an ask’s session id never reach the watch', async (
   assert.equal((await cancel(id)).status, 204);
   assert.equal((await askEvent(ws, 'error')).error, 'cancelled');
   fakeEnv.FAKE_MODE = 'ok';
+});
+
+/** The fake CLI behind a spawn that first shows the test what the runner passed. */
+function watchedSpawn(fakeEnv: Record<string, string>, seen: (bin: string, args: string[], options: Parameters<AskSpawn>[2]) => void): AskSpawn {
+  return (bin, args, o) => {
+    seen(bin, args, o);
+    return spawn(process.execPath, [FAKE_CLI, bin, ...args], { cwd: o.cwd, env: { ...o.env, ...fakeEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+}
+
+test('Claude Code runs without CLAUDE_CONFIG_DIR in the default home, so its login stays in ~/.claude.json; a custom home is passed on', async () => {
+  const home = mkdtempSync(join(root, 'home-'));
+  const saved = { HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
+  process.env.HOME = home;
+  process.env.CLAUDE_CONFIG_DIR = join(home, 'inherited'); // The bridge's own environment must not leak into the default home's asks either.
+  try {
+    for (const [claudeHome, expected] of [
+      [join(home, '.claude'), undefined],
+      [join(home, '.claude-school'), join(home, '.claude-school')],
+    ] as const) {
+      const seen: (string | undefined)[] = [];
+      const statuses: string[] = [];
+      const env = { FAKE_MODE: 'ok' };
+      const runner = fakeAskRunner((_, e) => e.type === 'ask' && statuses.push(e.status), env, {
+        dir: mkdtempSync(join(root, 'cfg-')),
+        claudeHome,
+        spawn: watchedSpawn(env, (_bin, _args, o) => seen.push(o.env.CLAUDE_CONFIG_DIR)),
+      });
+      try {
+        assert.equal(typeof runner.start('dev', { provider: 'claude-code', text: 'x' }), 'object');
+        await waitFor(() => (statuses.includes('done') ? true : undefined));
+        assert.deepEqual(seen, [expected], claudeHome);
+      } finally {
+        runner.close();
+      }
+    }
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('a config dir behind a symlink: the scratch cwd is resolved once, for the spawn, Codex -C, the purge and the providers', async () => {
+  const real = mkdtempSync(join(root, 'real-'));
+  const link = join(root, `link-${basename(real)}`);
+  symlinkSync(real, link);
+  const claudeHome = join(real, 'claude');
+  const cwd = join(realpathSync(real), 'wristline', 'ask-cwd');
+  const cwds: string[] = [];
+  const argvs: string[][] = [];
+  const done: string[] = [];
+  const env = { FAKE_MODE: 'ok' };
+  const runner = fakeAskRunner((_, e) => e.type === 'ask' && e.status === 'done' && done.push(e.askId), env, {
+    dir: join(link, 'wristline'),
+    claudeHome,
+    spawn: watchedSpawn(env, (_bin, args, o) => {
+      cwds.push(o.cwd);
+      argvs.push(args);
+    }),
+  });
+  try {
+    assert.equal(runner.cwd, cwd);
+    const claude = runner.start('dev', { provider: 'claude-code', text: 'x' });
+    assert.ok(typeof claude === 'object');
+    await waitFor(() => (done.length === 1 ? true : undefined));
+    runner.start('dev', { provider: 'codex', text: 'x' });
+    await waitFor(() => (done.length === 2 ? true : undefined));
+    assert.deepEqual(cwds, [cwd, cwd]);
+    const codexArgs = argvs[1] ?? [];
+    assert.equal(codexArgs[codexArgs.indexOf('-C') + 1], cwd, 'Codex records -C as given: the real path, as the provider compares');
+    // Claude Code files the transcript under the real path; that is the one the purge deletes.
+    const transcript = join(claudeHome, 'projects', projectSlug(cwd), `${claude.id.slice('ask-'.length)}.jsonl`);
+    mkdirSync(dirname(transcript), { recursive: true });
+    writeFileSync(transcript, '{}\n');
+    assert.ok(runner.deleteThread('dev', claude.id));
+    await waitFor(() => (existsSync(transcript) ? undefined : true));
+  } finally {
+    runner.close();
+  }
+});
+
+test('deleting a thread drops its asks from the list; a running one stays unlisted and busy until its CLI exits; the session stays owned until its files are gone', async () => {
+  const env = { FAKE_MODE: 'ok' };
+  const events: (ServerEvent & { type: 'ask' })[] = [];
+  const runner = fakeAskRunner((_, e) => e.type === 'ask' && events.push(e), env, { dir: mkdtempSync(join(root, 'forget-')) });
+  const ended = (n: number): Promise<boolean> => waitFor(() => (events.filter((e) => e.status !== 'running').length >= n ? true : undefined));
+  const start = (text: string, threadId?: string): Ask => {
+    const ask = runner.start('dev', { provider: 'claude-code', text, ...(threadId ? { threadId } : {}) });
+    assert.ok(typeof ask === 'object', String(ask));
+    return ask;
+  };
+  try {
+    const first = start('first');
+    await ended(1);
+    const followUp = start('follow-up', first.id);
+    await ended(2);
+    const kept = start('another thread');
+    await ended(3);
+    assert.equal(runner.list('dev').length, 3);
+    const session = first.id.slice('ask-'.length);
+    assert.ok(runner.deleteThread('dev', first.id));
+    assert.deepEqual(
+      runner.list('dev').map((a) => a.id),
+      [kept.id],
+      'the thread’s asks go with it; GET /api/asks would otherwise bring the conversation back',
+    );
+    assert.equal(runner.cancel('dev', followUp.id), false);
+    assert.ok(runner.ownsClaudeSession(session), 'owned while its files are being deleted: a refresh then must not list it');
+    await waitFor(() => (runner.ownsClaudeSession(session) ? undefined : true));
+
+    env.FAKE_MODE = 'sleep';
+    const slow = start('slow');
+    const slowSession = slow.id.slice('ask-'.length);
+    assert.ok(runner.deleteThread('dev', slow.id));
+    assert.deepEqual(
+      runner.list('dev').map((a) => a.id),
+      [kept.id],
+    );
+    assert.equal(runner.start('dev', { provider: 'claude-code', text: 'x' }), 'busy', 'its CLI has not exited yet');
+    assert.ok(runner.ownsClaudeSession(slowSession));
+    await ended(4);
+    assert.equal(events.at(-1)?.error, 'cancelled');
+    await waitFor(() => (runner.ownsClaudeSession(slowSession) ? undefined : true));
+    assert.deepEqual(
+      runner.list('dev').map((a) => a.id),
+      [kept.id],
+    );
+    env.FAKE_MODE = 'ok';
+    start('next');
+    await ended(5);
+  } finally {
+    runner.close();
+  }
+});
+
+test('a question spawn refuses (a NUL byte) ends the ask as an error instead of leaving it running, and is not logged', async (t) => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => logged.push(args.map(String).join(' ')));
+  const events: (ServerEvent & { type: 'ask' })[] = [];
+  const runner = fakeAskRunner((_, e) => e.type === 'ask' && events.push(e), { FAKE_MODE: 'ok' }, { dir: mkdtempSync(join(root, 'nul-')) });
+  try {
+    for (const body of [
+      { provider: 'claude-code', text: 'SECRET\u0000question' },
+      { provider: 'codex', text: 'x', model: 'SECRET\u0000model' },
+    ] as const) {
+      events.length = 0;
+      const ask = runner.start('dev', body);
+      assert.ok(typeof ask === 'object');
+      await waitFor(() => (events.length === 2 ? true : undefined));
+      assert.deepEqual(
+        events.map((e) => [e.askId, e.status, e.error]),
+        [
+          [ask.id, 'running', undefined],
+          [ask.id, 'error', 'err_invalid_arg_value'],
+        ],
+        body.provider,
+      );
+      assert.equal(runner.list('dev')[0]?.status, 'error');
+    }
+    assert.ok(logged.length > 0 && !logged.some((line) => line.includes('SECRET')), logged.join('\n'));
+    // Nothing is left running: the device can ask again.
+    assert.equal(typeof runner.start('dev', { provider: 'claude-code', text: 'x' }), 'object');
+    await waitFor(() => (events.at(-1)?.status === 'done' ? true : undefined));
+  } finally {
+    runner.close();
+  }
 });

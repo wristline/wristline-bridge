@@ -85,6 +85,7 @@ async function run(flags: Flags): Promise<void> {
         logins: config.claudeLogins[home] ?? [],
         labels: config.labels,
         isAsk: (id) => asks.ownsClaudeSession(id),
+        askCwd: asks.cwd,
         saveLogins: async (logins) => {
           await updateStored(dir, (stored) => ({ claudeLogins: { ...stored.claudeLogins, [home]: logins } }));
         },

@@ -86,7 +86,7 @@ export async function waitFor<T>(get: () => T | undefined, ms = 5000): Promise<T
   }
 }
 
-const FAKE_CLI = fileURLToPath(new URL('./fake-cli.ts', import.meta.url));
+export const FAKE_CLI = fileURLToPath(new URL('./fake-cli.ts', import.meta.url));
 
 /**
  * An AskRunner whose `claude` and `codex` are test/fake-cli.ts (no real CLI); `fakeEnv` reaches it

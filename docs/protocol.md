@@ -126,10 +126,10 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
-| `POST /api/ask` `{provider, text, model?, threadId?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, non-string or empty `threadId`, a `threadId` of the other provider), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
+| `POST /api/ask` `{provider, text, model?, threadId?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, a NUL character in `text` or `model`, non-string or empty `threadId`, a `threadId` of the other provider), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
 | `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first, each with its `threadId` | `401` | `asks.json` |
 | `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
-| `DELETE /api/asks/thread/:threadId` | `204`: the thread is forgotten and its CLI session deleted (a running ask of it is cancelled first) | `404` (not this device's thread) | |
+| `DELETE /api/asks/thread/:threadId` | `204`: the thread is forgotten, its asks leave `GET /api/asks`, and its CLI session is deleted (a running ask of it is cancelled first) | `404` (not this device's thread) | |
 | `GET /api/ws` | WebSocket upgrade | `401`, `429` | |
 
 `:sid` is URL-encoded. A session that ended and left the list still serves its items (and

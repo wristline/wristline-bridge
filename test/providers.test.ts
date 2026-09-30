@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { Item, Session } from '../src/protocol.ts';
 import { PromptBlocked } from '../src/provider.ts';
-import { tmuxPane } from '../src/providers/claude-code/home.ts';
+import { projectSlug, tmuxPane } from '../src/providers/claude-code/home.ts';
 import { ClaudeCodeProvider } from '../src/providers/claude-code/provider.ts';
 import { CodexProvider } from '../src/providers/codex/provider.ts';
 import { recordingHub, waitFor } from './helpers.ts';
@@ -221,6 +221,47 @@ test('a Quick Ask thread is never listed: its Claude Code transcript and registr
     assert.ok(!codexHub.sessions.some((s) => s.id === `codex:${thread}` || s.id === `codex:${early}`));
   } finally {
     codexProvider.stop();
+  }
+});
+
+test('claude-code: Quick Asks are left out before the 50-session cap; a session in the ask scratch directory is an ask even when its id is not known', async () => {
+  const home = join(root, 'claude-cap');
+  const project = join(home, 'projects', '-work-api');
+  const askCwd = '/home/u/.config/wristline/ask-cwd';
+  const askProject = join(home, 'projects', projectSlug(askCwd));
+  for (const dir of [project, askProject, join(home, 'sessions')]) mkdirSync(dir, { recursive: true });
+  const fixture = readFileSync(new URL('./fixtures/claude/transcript.jsonl', import.meta.url), 'utf8');
+  const nowSec = Date.now() / 1000;
+  const sessions = Array.from({ length: 50 }, (_, i) => `5e550000-2222-4333-8444-${String(i).padStart(12, '0')}`);
+  sessions.forEach((id, i) => {
+    const path = join(project, `${id}.jsonl`);
+    writeFileSync(path, fixture);
+    utimesSync(path, nowSec - 3600 - i, nowSec - 3600 - i);
+  });
+  // Ask transcripts, newer than every session.
+  const asks = Array.from({ length: 3 }, (_, i) => `a5c00000-2222-4333-8444-${String(i).padStart(12, '0')}`);
+  for (const id of asks) writeFileSync(join(askProject, `${id}.jsonl`), fixture);
+  const listed = (provider: ClaudeCodeProvider): string[] => provider.listSessions().map((s) => s.id.slice('claude-code:'.length));
+
+  const byId = new ClaudeCodeProvider({ home, historyDays: 7, isAsk: (id) => asks.includes(id) });
+  await byId.start(recordingHub());
+  try {
+    assert.deepEqual(listed(byId).sort(), [...sessions].sort(), 'all 50 sessions: the asks take none of their places');
+  } finally {
+    byId.stop();
+  }
+
+  // The runner no longer knows these ids (e.g. a thread being deleted): the scratch directory still marks them, and a live process there too.
+  const running = 'a5c10000-2222-4333-8444-555555555555';
+  writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: running, cwd: askCwd, status: 'busy', updatedAt: Date.now() }));
+  const byCwd = new ClaudeCodeProvider({ home, historyDays: 7, askCwd });
+  const hub = recordingHub();
+  await byCwd.start(hub);
+  try {
+    assert.deepEqual(listed(byCwd).sort(), [...sessions].sort());
+    assert.ok(!hub.sessions.some((s) => [...asks, running].some((id) => s.id === `claude-code:${id}`)));
+  } finally {
+    byCwd.stop();
   }
 });
 

@@ -8,6 +8,7 @@ import {
   LOGINS_MAX,
   appendLogin,
   claudeJsonPath,
+  isDefaultClaudeHome,
   isEstimated,
   loginAt,
   readClaudeAccount,
@@ -18,15 +19,19 @@ import { CodexAccounts, readCodexLogin } from '../src/providers/codex/account.ts
 const root = mkdtempSync(join(tmpdir(), 'wristline-accounts-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 
-test('claudeJsonPath: inside a custom home; beside the default home unless that home has its own', async () => {
+test('claudeJsonPath: inside a custom home; beside the default home even when that home holds a copy (as Claude Code without CLAUDE_CONFIG_DIR)', async () => {
   const homeDir = join(root, 'home');
   const home = join(homeDir, '.claude');
   mkdirSync(home, { recursive: true });
-  assert.equal(await claudeJsonPath('/x/.claude-school', homeDir), '/x/.claude-school/.claude.json');
-  assert.equal(await claudeJsonPath(home, homeDir), join(homeDir, '.claude.json'));
-  assert.equal(await claudeJsonPath(`${home}/`, homeDir), join(homeDir, '.claude.json'));
-  writeFileSync(join(home, '.claude.json'), '{}');
-  assert.equal(await claudeJsonPath(home, homeDir), join(home, '.claude.json'));
+  assert.equal(claudeJsonPath('/x/.claude-school', homeDir), '/x/.claude-school/.claude.json');
+  assert.equal(claudeJsonPath(home, homeDir), join(homeDir, '.claude.json'));
+  assert.equal(claudeJsonPath(`${home}/`, homeDir), join(homeDir, '.claude.json'));
+  assert.ok(isDefaultClaudeHome(`${home}/`, homeDir) && !isDefaultClaudeHome('/x/.claude-school', homeDir));
+  // A copy left by a run with CLAUDE_CONFIG_DIR=~/.claude is not where a plain `claude` records its /login.
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'uuid-stale', emailAddress: 'old@example.com' } }));
+  writeFileSync(join(homeDir, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'uuid-live', emailAddress: 'new@example.com' } }));
+  assert.equal(claudeJsonPath(home, homeDir), join(homeDir, '.claude.json'));
+  assert.deepEqual(await readClaudeAccount(home, homeDir), { id: 'uuid-live', label: 'new@example.com' });
 });
 
 test('readClaudeAccount: email, organization and id fallbacks; no oauthAccount or file → undefined; bad JSON rejects', async () => {

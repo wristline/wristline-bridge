@@ -14,6 +14,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AskConfig, Bins } from './config.ts';
 import { TEXT_MAX, type Ask, type AskBody, type ProviderId, type ServerEvent } from './protocol.ts';
+import { isDefaultClaudeHome } from './providers/claude-code/account.ts';
 import { projectSlug } from './providers/claude-code/home.ts';
 import { claudeModelName } from './providers/claude-code/parse.ts';
 import { scanRollouts } from './providers/codex/home.ts';
@@ -98,6 +99,8 @@ export class AskRunner {
   /** Per device, newest first. */
   readonly #byDevice = new Map<string, Entry[]>();
   readonly #threads = new Map<string, Thread>();
+  /** Forgotten threads whose files are not deleted yet: still owned, so a refresh meanwhile does not list their sessions. */
+  readonly #purging = new Set<Thread>();
   readonly #threadsPath: string;
   readonly #sweeper: NodeJS.Timeout;
 
@@ -106,8 +109,10 @@ export class AskRunner {
     this.#spawn = options.spawn ?? ((bin, args, o) => nodeSpawn(bin, args, { ...o, stdio: ['ignore', 'pipe', 'pipe'] }));
     this.#now = options.now ?? Date.now;
     this.#timeoutMs = options.timeoutMs ?? ASK_TIMEOUT_MS;
-    this.#cwd = join(options.dir, 'ask-cwd');
-    mkdirSync(this.#cwd, { recursive: true, mode: 0o700 });
+    const cwd = join(options.dir, 'ask-cwd');
+    mkdirSync(cwd, { recursive: true, mode: 0o700 });
+    // Resolved once: Claude Code files transcripts under the real path, Codex records `-C` as given; the purge and the providers' filters must match both.
+    this.#cwd = realpathSync(cwd);
     this.#threadsPath = join(options.dir, THREADS_FILE);
     for (const t of readThreads(this.#threadsPath)) this.#threads.set(t.id, t);
     this.sweep();
@@ -120,9 +125,9 @@ export class AskRunner {
     return this.#o.ask.provider;
   }
 
-  /** The scratch directory the CLIs run in, resolved as they record it: a Codex provider skips rollouts made there. */
+  /** The scratch directory the CLIs run in, resolved as they record it: the providers skip sessions made there. */
   get cwd(): string {
-    return realpathSync(this.#cwd);
+    return this.#cwd;
   }
 
   /** Starts the CLI for this device; at most one ask runs per device. With `threadId`, continues that thread of this device. */
@@ -155,7 +160,9 @@ export class AskRunner {
 
   list(deviceId: string): Ask[] {
     this.sweep();
-    return this.#recent(deviceId).map((e) => e.ask);
+    return this.#recent(deviceId)
+      .filter((e) => !e.purge)
+      .map((e) => e.ask);
   }
 
   /** True when the ask belongs to the device; a running one is killed and ends `cancelled`. */
@@ -206,14 +213,18 @@ export class AskRunner {
   }
 
   #owns(provider: ProviderId, nativeId: string): boolean {
-    for (const t of this.#threads.values()) if (t.provider === provider && t.sessionId === nativeId) return true;
+    for (const t of [...this.#threads.values(), ...this.#purging]) if (t.provider === provider && t.sessionId === nativeId) return true;
     return false;
   }
 
   #forget(thread: Thread): void {
+    this.#purging.add(thread);
     this.#threads.delete(thread.id);
     this.#saveThreads();
-    const running = this.#byDevice.get(thread.deviceId)?.find((e) => e.run && e.ask.threadId === thread.id);
+    // Its asks go with it; a running one stays, unlisted, until its CLI has exited (one ask per device).
+    const entries = this.#byDevice.get(thread.deviceId);
+    if (entries) this.#byDevice.set(thread.deviceId, entries.filter((e) => e.run || e.ask.threadId !== thread.id));
+    const running = entries?.find((e) => e.run && e.ask.threadId === thread.id);
     if (running?.run) {
       // The CLI still writes its session; delete it once it has exited.
       running.purge = thread;
@@ -225,9 +236,12 @@ export class AskRunner {
   }
 
   #purge(thread: Thread): void {
-    purgeThread(thread, this.#o, this.#cwd, this.#spawn, this.#env()).catch((err: unknown) => {
-      console.error(`wristline: ask thread ${thread.id} (${thread.provider}): could not delete its session: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    this.#purging.add(thread);
+    purgeThread(thread, this.#o, this.#cwd, this.#spawn, this.#env())
+      .catch((err: unknown) => {
+        console.error(`wristline: ask thread ${thread.id} (${thread.provider}): could not delete its session: ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => this.#purging.delete(thread));
   }
 
   /** Via a temporary file and a rename: a crash mid-write must not leave a half file that parses to no threads. */
@@ -271,7 +285,9 @@ export class AskRunner {
       '--',
       body.text,
     ];
-    return { args, env: { ...this.#env(), CLAUDE_CONFIG_DIR: this.#o.claudeHome } };
+    // The default home is Claude Code's without the variable; set, the CLI would keep a `.claude.json` of its own in `~/.claude`.
+    const { CLAUDE_CONFIG_DIR: _d, ...env } = this.#env();
+    return { args, env: isDefaultClaudeHome(this.#o.claudeHome) ? env : { ...env, CLAUDE_CONFIG_DIR: this.#o.claudeHome } };
   }
 
   /** `codex exec resume` takes no `-s`/`-C`: the sandbox goes in as a config override and the cwd is the process's. */
@@ -286,7 +302,17 @@ export class AskRunner {
   }
 
   #launch(entry: Entry, thread: Thread, bin: string, args: string[], env: NodeJS.ProcessEnv, body: AskBody): void {
-    const child = this.#spawn(bin, args, { cwd: this.#cwd, env });
+    let child: ChildProcess;
+    try {
+      child = this.#spawn(bin, args, { cwd: this.#cwd, env });
+    } catch (err) {
+      // spawn throws on an argument it refuses (a NUL byte) and quotes it, i.e. the question: only the code is logged.
+      const code = (isObject(err) && str(err.code)) || 'spawn_failed';
+      console.error(`wristline: ask ${entry.ask.id} (${body.provider}) could not start: ${code}`);
+      // After start() has reported it running, like a CLI that is not installed.
+      process.nextTick(() => this.#end(entry, thread, { error: clip(code.toLowerCase(), ERROR_MAX) }, 0));
+      return;
+    }
     const run: Running = {
       child,
       timer: setTimeout(() => {
@@ -324,24 +350,7 @@ export class AskRunner {
       clearTimeout(run.timer);
       clearTimeout(run.killTimer);
       entry.run = undefined;
-      const durationMs = outcome.durationMs ?? this.#now() - run.startedAt;
-      const { id, provider, threadId, question, createdAt } = entry.ask;
-      entry.ask =
-        outcome.answer === undefined
-          ? { id, provider, threadId, question, status: 'error', durationMs, error: outcome.error ?? 'bad_output', createdAt }
-          : { id, provider, threadId, question, status: 'done', answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
-      if (provider === 'claude-code' && !thread.started && this.#threads.get(threadId) === thread) {
-        if (outcome.answer !== undefined) thread.started = true;
-        else {
-          // Claude Code refuses `--session-id` of a transcript that exists, and a failed run (timeout, cancel,
-          // error) may have written one: the thread starts over under a fresh id and the old files go.
-          this.#purge({ ...thread });
-          thread.sessionId = randomUUID();
-        }
-        this.#saveThreads();
-      }
-      if (entry.purge) this.#purge(entry.purge);
-      this.#emit(entry);
+      this.#end(entry, thread, outcome, this.#now() - run.startedAt);
     };
     child.once('error', (err: NodeJS.ErrnoException) => {
       console.error(`wristline: ask ${entry.ask.id} (${body.provider}) could not start: ${err.code ?? err.message}`);
@@ -365,6 +374,32 @@ export class AskRunner {
       console.error(`wristline: ask ${entry.ask.id} (${body.provider}) failed: ${error}${last ? ` (${clip(last, ERROR_MAX)})` : ''}`);
       finish({ error });
     });
+  }
+
+  /** Records how the ask ended, restarts or purges its thread's files as needed, and reports it. */
+  #end(entry: Entry, thread: Thread, outcome: Outcome, elapsedMs: number): void {
+    const durationMs = outcome.durationMs ?? elapsedMs;
+    const { id, provider, threadId, question, createdAt } = entry.ask;
+    entry.ask =
+      outcome.answer === undefined
+        ? { id, provider, threadId, question, status: 'error', durationMs, error: outcome.error ?? 'bad_output', createdAt }
+        : { id, provider, threadId, question, status: 'done', answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
+    if (provider === 'claude-code' && !thread.started && this.#threads.get(threadId) === thread) {
+      if (outcome.answer !== undefined) thread.started = true;
+      else {
+        // Claude Code refuses `--session-id` of a transcript that exists, and a failed run (timeout, cancel,
+        // error) may have written one: the thread starts over under a fresh id and the old files go.
+        this.#purge({ ...thread });
+        thread.sessionId = randomUUID();
+      }
+      this.#saveThreads();
+    }
+    if (entry.purge) {
+      this.#purge(entry.purge);
+      const entries = this.#byDevice.get(entry.deviceId);
+      if (entries) this.#byDevice.set(entry.deviceId, entries.filter((e) => e !== entry));
+    }
+    this.#emit(entry);
   }
 
   #kill(run: Running): void {
@@ -397,7 +432,7 @@ function readThreads(path: string): Thread[] {
   }
   const raw = parseJson(text)?.threads;
   if (!Array.isArray(raw)) {
-    console.error(`wristline: ${path} is not a thread registry; its threads are lost (their CLI sessions will be listed and never deleted)`);
+    console.error(`wristline: ${path} is not a thread registry; its threads are lost (their CLI sessions will never be deleted)`);
     return [];
   }
   const threads: Thread[] = [];
