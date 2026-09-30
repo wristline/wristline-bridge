@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { connect } from 'node:net';
 import { after, before, test } from 'node:test';
 import { WebSocket } from 'ws';
-import { CLOSE_REVOKED, type Session } from '../src/protocol.ts';
+import { CLOSE_REVOKED, type Item, type ItemKind, type ItemPage, type Session } from '../src/protocol.ts';
 import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
 
 const session: Session = {
@@ -165,6 +165,66 @@ test('revoking closes the device connections even when saving the device list fa
     assert.equal((await fetch(`${own.base}/api/sessions`, auth(second.token))).status, 401);
   } finally {
     await own.close();
+  }
+});
+
+const item = (seq: number, kind: ItemKind, extra: Partial<Item> = {}): Item => ({ seq, kind, ts: '2026-09-29T10:00:00.000Z', text: `${kind} ${seq}`, ...extra });
+
+test('items?kinds= pages over the matching items only; an unknown kind answers 400', async () => {
+  const kinds: ItemKind[] = ['user', 'tool', 'assistant', 'tool', 'tool', 'notice', 'tool', 'user', 'tool', 'assistant', 'tool'];
+  provider.items.set('s1', kinds.map((kind, i) => item(i + 1, kind)));
+  const page = async (query: string): Promise<[number[], boolean]> => {
+    const res = await fetch(`${bridge.base}/api/sessions/claude-code:s1/items?${query}`, auth(bridge.token));
+    assert.equal(res.status, 200, query);
+    const body = (await res.json()) as ItemPage;
+    return [body.items.map((i) => i.seq), body.hasMore];
+  };
+  try {
+    const talk = 'kinds=user,assistant,notice';
+    assert.deepEqual(await page(`${talk}&limit=2`), [[8, 10], true], 'the trailing tool item is skipped');
+    assert.deepEqual(await page(`${talk}&limit=2&before=8`), [[3, 6], true], 'before is the smallest seq of the previous page');
+    assert.deepEqual(await page(`${talk}&limit=2&before=3`), [[1], false]);
+    assert.deepEqual(await page(`${talk}&limit=5`), [[1, 3, 6, 8, 10], false], 'exactly the matching items: no more');
+    assert.deepEqual(await page(`kinds=assistant&limit=1&before=10`), [[3], false], 'hasMore stays false when only other kinds are older');
+    assert.deepEqual(await page('kinds=tool,tool&limit=3'), [[7, 9, 11], true]);
+    assert.deepEqual(await page('limit=3'), [[9, 10, 11], true], 'without kinds, every item counts');
+    for (const bad of ['bogus', 'user,bogus', '', 'user,', 'user,%20assistant', 'USER']) {
+      const res = await fetch(`${bridge.base}/api/sessions/claude-code:s1/items?kinds=${bad}`, auth(bridge.token));
+      assert.equal(res.status, 400, `kinds=${bad}`);
+      assert.deepEqual(await res.json(), { error: 'bad_request' });
+    }
+  } finally {
+    provider.items.set('s1', []);
+  }
+});
+
+test('a subscription with kinds receives only item events of those kinds; without, every item', async () => {
+  const url = `${bridge.base.replace('http', 'ws')}/api/ws`;
+  const open = (): Promise<TestSocket> => new TestSocket(url, bridge.token).open();
+  const [filtered, all, malformed] = await Promise.all([open(), open(), open()]);
+  try {
+    for (const ws of [filtered, all, malformed]) assert.equal((await ws.next()).type, 'snapshot');
+    filtered.send({ type: 'subscribe', sessionId: session.id, kinds: ['user', 'assistant', 'notice', 'future_kind'] });
+    all.send({ type: 'subscribe', sessionId: session.id });
+    malformed.send({ type: 'subscribe', sessionId: session.id, kinds: 'user' }); // Ignored like any malformed subscribe.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const [user, tool, assistant, done, notice] = [item(1, 'user'), item(2, 'tool', { pending: true }), item(3, 'assistant'), item(2, 'tool', { pending: false }), item(4, 'notice')];
+    const sent = [user, tool, assistant, done, notice];
+    for (const i of sent) provider.emit('s1', i);
+    for (const i of sent) assert.deepEqual(await all.next(), { type: 'item', sessionId: session.id, item: i });
+    for (const i of [user, assistant, notice]) assert.deepEqual(await filtered.next(), { type: 'item', sessionId: session.id, item: i });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(filtered.pending(), 0, 'the tool item and its update are not sent');
+    assert.equal(malformed.pending(), 0);
+
+    // Subscribing again without kinds drops the filter.
+    filtered.send({ type: 'subscribe', sessionId: session.id, kinds: null });
+    await new Promise((r) => setTimeout(r, 100));
+    provider.emit('s1', item(5, 'tool'));
+    assert.deepEqual(await filtered.next(), { type: 'item', sessionId: session.id, item: item(5, 'tool') });
+  } finally {
+    for (const ws of [filtered, all, malformed]) ws.close();
   }
 });
 

@@ -95,7 +95,7 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/health` | `200 {name, version, apiVersion, providers[]}`; each provider `{id, status: ok\|not_found, version?, detail?}` (`detail`: English diagnostic text, e.g. the Codex app-server connection) | `401` | `health.json` |
 | `DELETE /api/device` | `204` (revokes the calling device) | `401` | |
 | `GET /api/sessions` | `200 {sessions}` sorted needs_input, running, then most recent | `401` | `sessions.json` |
-| `GET /api/sessions/:sid/items?before=&limit=40` | `200 {items, hasMore}`: the `limit` (max 200) newest items with `seq < before` | `400`, `404` | `items.json` |
+| `GET /api/sessions/:sid/items?before=&limit=40&kinds=` | `200 {items, hasMore}`: the `limit` (max 200) newest items with `seq < before`, only of `kinds` when given; `hasMore`: an older such item exists | `400` (also for an unknown kind), `404` | `items.json`, `items-filtered.json` |
 | `POST /api/sessions/:sid/prompt` `{text}` | `202 {}` | `400`, `404`, `409 {error: PromptBlock}`, `413` (text over 4000) | `error-409-prompt-blocked.json`, `error-409-unsafe-prefix.json` |
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
@@ -104,6 +104,12 @@ All timestamps are ISO 8601 in UTC.
 
 `:sid` is URL-encoded. The first valid answer to a request wins; later answers and answers to
 unknown ids get `409 already_resolved`.
+
+`kinds` is an optional comma-separated list of item kinds without spaces, e.g.
+`kinds=user,assistant,notice` to hide tool rows. Paging then counts matching items only: a page
+holds up to `limit` of them, skipping other kinds, and `hasMore` says whether an older matching
+item exists. `before` is still a `seq`, so the next page asks for `before=<smallest seq of this
+page>`. Bridges that predate `kinds` ignore it (here and in `subscribe`) and send every kind.
 
 ## WebSocket (`/api/ws`)
 
@@ -124,10 +130,16 @@ Client events:
 
 | `type` | Fields | Effect | Fixture |
 |---|---|---|---|
-| `subscribe` | `sessionId: string \| null` | receive `item` events for this session only (`null` stops) | `client-subscribe.json` |
+| `subscribe` | `sessionId: string \| null`, `kinds?: string[]` | receive `item` events for this session only (`null` stops); with `kinds`, only items of those kinds | `client-subscribe.json`, `client-subscribe-kinds.json` |
 
 Unknown client events are ignored. After subscribing, fetch the newest page over REST; items that
 arrive in between may be delivered twice and are identified by `seq`.
+
+`kinds` filters every `item` event of the subscription, updates included: with
+`["user", "assistant", "notice"]` a tool item is not sent when it appears nor when it finishes.
+Absent or `null` means every kind; a kind the bridge does not know simply never matches; a
+`subscribe` whose `kinds` is not an array of strings is ignored. Each `subscribe` replaces the
+previous subscription and its filter.
 
 The server pings every 30 s and drops a connection that missed a pong. Revoking a device closes its
 connections with code `4001`. Reconnecting clients receive a fresh `snapshot` and must subscribe

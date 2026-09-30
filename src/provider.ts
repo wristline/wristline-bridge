@@ -1,4 +1,4 @@
-import type { AlertKind, Item, ItemPage, PromptBlock, ProviderHealth, ProviderId, Session, Usage } from './protocol.ts';
+import type { AlertKind, Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, ProviderId, Session, Usage } from './protocol.ts';
 import type { PendingRegistry } from './pending.ts';
 
 /** What providers call to publish changes; implemented by the WebSocket hub. */
@@ -16,8 +16,8 @@ export interface SessionProvider {
   stop(): void;
   health(): ProviderHealth;
   listSessions(): Session[];
-  /** Resolves undefined for an unknown session. */
-  readItems(nativeId: string, before: number | undefined, limit: number): Promise<ItemPage | undefined>;
+  /** Resolves undefined for an unknown session. With `kinds`, pages count only items of those kinds. */
+  readItems(nativeId: string, before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): Promise<ItemPage | undefined>;
   /** Streams new and updated items of one session; returns the unsubscribe function. */
   watch(nativeId: string, onItem: (item: Item) => void): () => void;
   /** Rejects with PromptBlocked when the session cannot take a prompt right now. */

@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "seq": 2,
+      "kind": "assistant",
+      "ts": "2026-09-29T09:58:05.000Z",
+      "text": "Checking the build log first."
+    },
+    {
+      "seq": 4,
+      "kind": "notice",
+      "ts": "2026-09-29T09:58:30.000Z",
+      "text": "Agent \"Review build\" finished"
+    }
+  ],
+  "hasMore": true
+}

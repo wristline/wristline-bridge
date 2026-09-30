@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { open } from 'node:fs/promises';
-import type { Item, ItemPage } from './protocol.ts';
+import type { Item, ItemKind, ItemPage } from './protocol.ts';
 import { isNotFound } from './util.ts';
 
 const CHUNK_BYTES = 1 << 20;
@@ -159,13 +159,31 @@ export class ItemLog implements ItemSink {
     this.#changed.clear();
   }
 
-  /** The `limit` newest items with seq < `before`. */
-  page(before: number | undefined, limit: number): ItemPage {
-    const total = this.#items.length;
-    const end = before === undefined ? total : Math.max(0, Math.min(total, before - 1));
-    const start = Math.max(0, end - limit);
-    return { items: this.#items.slice(start, end), hasMore: start > 0 };
+  page(before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): ItemPage {
+    return pageItems(this.#items, before, limit, kinds);
   }
+}
+
+/**
+ * The `limit` newest items with seq < `before`, of `kinds` when given; `hasMore` says whether an
+ * older such item exists. `items[i]` must have seq `i + 1`.
+ */
+export function pageItems(items: readonly Item[], before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): ItemPage {
+  const total = items.length;
+  const end = before === undefined ? total : Math.max(0, Math.min(total, before - 1));
+  if (!kinds) {
+    const start = Math.max(0, end - limit);
+    return { items: items.slice(start, end), hasMore: start > 0 };
+  }
+  // Walks back from `end`, skipping other kinds, then on to the next older match for `hasMore`.
+  const page: Item[] = [];
+  let i = end;
+  while (i > 0 && page.length < limit) {
+    const item = items[--i] as Item;
+    if (kinds.has(item.kind)) page.push(item);
+  }
+  while (i > 0 && !kinds.has((items[i - 1] as Item).kind)) i--;
+  return { items: page.reverse(), hasMore: i > 0 };
 }
 
 export type LineParser = (line: string, sink: ItemSink) => void;
@@ -191,9 +209,9 @@ export class Transcript {
     return this.#subscribers.size > 0;
   }
 
-  async page(before: number | undefined, limit: number): Promise<ItemPage> {
+  async page(before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): Promise<ItemPage> {
     await this.sync();
-    return this.#log.page(before, limit);
+    return this.#log.page(before, limit, kinds);
   }
 
   async sync(): Promise<void> {

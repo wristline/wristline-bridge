@@ -6,12 +6,14 @@ import { safeEqual, type Auth } from './auth.ts';
 import type { Device } from './config.ts';
 import type { BridgeHub } from './hub.ts';
 import {
+  ITEM_KINDS,
   TEXT_MAX,
   type Answers,
   type ApiError,
   type BridgeInfo,
   type ErrorCode,
   type Health,
+  type ItemKind,
   type ItemPage,
   type PairResponse,
   type RequestList,
@@ -134,6 +136,13 @@ function positiveInt(value: string | null): number | undefined | null {
   return /^[1-9]\d{0,9}$/.test(value) ? Number(value) : null;
 }
 
+/** A comma list of item kinds; null when any of them is unknown. */
+function itemKinds(value: string | null): Set<ItemKind> | undefined | null {
+  if (value === null) return undefined;
+  const kinds = value.split(',');
+  return kinds.every((k): k is ItemKind => (ITEM_KINDS as readonly string[]).includes(k)) ? new Set(kinds) : null;
+}
+
 /** Undefined for a request-target `URL` rejects (e.g. `//[`), which must not throw in the upgrade listener. */
 function parseUrl(req: IncomingMessage): URL | undefined {
   try {
@@ -213,8 +222,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (session[2] === 'items' && method === 'GET') {
         const before = positiveInt(url.searchParams.get('before'));
         const limit = positiveInt(url.searchParams.get('limit'));
-        if (before === null || limit === null) return fail(res, 400, 'bad_request');
-        const page = target && (await target.provider.readItems(target.nativeId, before, Math.min(limit ?? DEFAULT_PAGE, MAX_PAGE)));
+        const kinds = itemKinds(url.searchParams.get('kinds'));
+        if (before === null || limit === null || kinds === null) return fail(res, 400, 'bad_request');
+        const page = target && (await target.provider.readItems(target.nativeId, before, Math.min(limit ?? DEFAULT_PAGE, MAX_PAGE), kinds));
         return page ? send(res, 200, page satisfies ItemPage) : fail(res, 404, 'not_found');
       }
       if (session[2] === 'prompt' && method === 'POST') {

@@ -155,6 +155,13 @@ test('REST responses', async () => {
   fixture('items', await page.json());
   const older = (await (await get(`/api/sessions/${running.id}/items?before=3&limit=1`)).json()) as { items: Item[]; hasMore: boolean };
   assert.deepEqual([older.items.map((i) => i.seq), older.hasMore], [[2], true]);
+  // Hiding tool rows: the page counts matching items only, so it skips seq 3 and 5; seq 1 is still older.
+  const filtered = await get(`/api/sessions/${encodeURIComponent(running.id)}/items?kinds=user,assistant,notice&limit=2`);
+  assert.equal(filtered.status, 200);
+  fixture('items-filtered', await filtered.json());
+  const rest = (await (await get(`/api/sessions/${running.id}/items?kinds=user,assistant,notice&before=2&limit=2`)).json()) as { items: Item[]; hasMore: boolean };
+  assert.deepEqual([rest.items.map((i) => i.seq), rest.hasMore], [[1], false]);
+  assert.equal((await get(`/api/sessions/${running.id}/items?kinds=user,thinking`)).status, 400);
   assert.equal((await get('/api/sessions/claude-code:nope/items')).status, 404);
   assert.equal((await get(`/api/sessions/${running.id}/items?limit=0`)).status, 400);
 
@@ -251,12 +258,24 @@ test('WebSocket events', async () => {
   ws.send(subscribe);
   other.send({ type: 'subscribe', sessionId: ended.id });
   other.send({ type: 'future_message', value: 1 });
+  const talk = new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token);
+  await talk.open();
+  await talk.next();
+  const subscribeKinds: ClientEvent = { type: 'subscribe', sessionId: running.id, kinds: ['user', 'assistant', 'notice'] };
+  fixture('client-subscribe-kinds', subscribeKinds);
+  talk.send(subscribeKinds);
   await new Promise((r) => setTimeout(r, 100));
 
+  // The pending Edit finishes: only the unfiltered subscriber hears of it.
+  const done: Item = { ...(items[4] as Item), pending: false };
+  provider.emit('6f1c2d3e-0000-4000-8000-000000000001', done);
+  assert.deepEqual(await ws.next(), { type: 'item', sessionId: running.id, item: done });
   const next: Item = { seq: 6, kind: 'assistant', ts: '2026-09-29T10:00:01.000Z', text: '빌드 스크립트를 고쳤습니다. 다시 테스트할게요.' };
   provider.emit('6f1c2d3e-0000-4000-8000-000000000001', next);
   const item = await ws.next();
   fixture('event-item', item);
+  assert.deepEqual(await talk.next(), item, 'the tool update was not sent to the kinds subscription');
+  talk.close();
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(other.pending(), 0, 'items only reach subscribers of that session');
 

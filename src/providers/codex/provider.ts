@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
-import type { Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
+import type { Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isObject, str } from '../../util.ts';
 import { CodexAccounts, type AccountsOptions } from './account.ts';
@@ -122,8 +122,8 @@ export class CodexProvider implements SessionProvider {
     return [...this.#sessions.values()];
   }
 
-  async readItems(nativeId: string, before: number | undefined, limit: number): Promise<ItemPage | undefined> {
-    return this.#transcript(nativeId)?.page(before, limit);
+  async readItems(nativeId: string, before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): Promise<ItemPage | undefined> {
+    return this.#transcript(nativeId)?.page(before, limit, kinds);
   }
 
   watch(nativeId: string, onItem: (item: Item) => void): () => void {

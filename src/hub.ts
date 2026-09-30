@@ -23,6 +23,8 @@ interface Client {
   ws: WebSocket;
   deviceId: string;
   sessionId: string | null;
+  /** Item kinds the subscription wants; undefined for all. */
+  kinds: ReadonlySet<string> | undefined;
   alive: boolean;
 }
 
@@ -40,6 +42,12 @@ export interface Target {
 /** The identity of a usage entry: its provider and account (see the header of protocol.ts). */
 export function usageKey(usage: Pick<Usage, 'provider' | 'account'>): string {
   return `${usage.provider}:${usage.account?.id ?? ''}`;
+}
+
+/** A subscribe message's `kinds`: undefined (all) when absent or null, null when malformed. Unknown kinds just never match. */
+function subscribeKinds(value: unknown): ReadonlySet<string> | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  return Array.isArray(value) && value.every((k) => typeof k === 'string') ? new Set(value) : null;
 }
 
 export interface HubOptions {
@@ -157,7 +165,7 @@ export class BridgeHub implements Hub {
   // WebSocket clients
 
   attach(ws: WebSocket, deviceId: string): void {
-    const client: Client = { ws, deviceId, sessionId: null, alive: true };
+    const client: Client = { ws, deviceId, sessionId: null, kinds: undefined, alive: true };
     this.#clients.add(client);
     this.pending.watchConnected();
     ws.on('pong', () => {
@@ -167,7 +175,10 @@ export class BridgeHub implements Hub {
       if (isBinary) return;
       const msg = parseJson(data.toString());
       // Unknown message types are ignored so newer watches can talk to older bridges.
-      if (msg?.type === 'subscribe' && (msg.sessionId === null || typeof msg.sessionId === 'string')) this.#subscribe(client, msg.sessionId);
+      if (msg?.type === 'subscribe' && (msg.sessionId === null || typeof msg.sessionId === 'string')) {
+        const kinds = subscribeKinds(msg.kinds);
+        if (kinds !== null) this.#subscribe(client, msg.sessionId, kinds);
+      }
     });
     ws.on('close', () => {
       this.#unsubscribe(client);
@@ -190,17 +201,18 @@ export class BridgeHub implements Hub {
     this.#watches.clear();
   }
 
-  #subscribe(client: Client, sessionId: string | null): void {
+  #subscribe(client: Client, sessionId: string | null, kinds: ReadonlySet<string> | undefined): void {
     this.#unsubscribe(client);
     const target = sessionId === null ? undefined : this.resolve(sessionId);
     if (!sessionId || !target) return;
     client.sessionId = sessionId;
+    client.kinds = kinds;
     let watch = this.#watches.get(sessionId);
     if (!watch) {
       const clients = new Set<Client>();
       const stop = target.provider.watch(target.nativeId, (item: Item) => {
         const data = JSON.stringify({ type: 'item', sessionId, item } satisfies ServerEvent);
-        for (const c of clients) this.#sendRaw(c, data);
+        for (const c of clients) if (!c.kinds || c.kinds.has(item.kind)) this.#sendRaw(c, data);
       });
       watch = { stop, clients };
       this.#watches.set(sessionId, watch);

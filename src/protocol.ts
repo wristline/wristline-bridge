@@ -45,7 +45,8 @@ export interface Session {
   effort?: string;
 }
 
-export type ItemKind = 'user' | 'assistant' | 'tool' | 'notice';
+export const ITEM_KINDS = ['user', 'assistant', 'tool', 'notice'] as const;
+export type ItemKind = (typeof ITEM_KINDS)[number];
 
 export interface Item {
   /** Position in the session, starting at 1. An updated item is re-sent with the same seq. */
@@ -121,7 +122,8 @@ export type ServerEvent =
   | { type: 'usage'; usage: Usage }
   | { type: 'alert'; sessionId: string; alert: AlertKind; text?: string };
 
-export type ClientEvent = { type: 'subscribe'; sessionId: string | null };
+/** `kinds`, when present, limits the subscription's `item` events to those kinds. */
+export type ClientEvent = { type: 'subscribe'; sessionId: string | null; kinds?: ItemKind[] };
 
 /** WebSocket close code sent when the device token is revoked. */
 export const CLOSE_REVOKED = 4001;

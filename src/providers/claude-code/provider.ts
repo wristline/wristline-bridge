@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LoginEntry } from '../../config.ts';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
-import type { Account, Item, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
+import type { Account, Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isNotFound, isObject, own, str } from '../../util.ts';
 import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, statuslineFingerprint } from './account.ts';
@@ -139,9 +139,9 @@ export class ClaudeCodeProvider implements SessionProvider {
     return this.#sessions.has(nativeId);
   }
 
-  async readItems(nativeId: string, before: number | undefined, limit: number): Promise<ItemPage | undefined> {
+  async readItems(nativeId: string, before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): Promise<ItemPage | undefined> {
     const transcript = this.#transcript(nativeId);
-    return transcript?.page(before, limit);
+    return transcript?.page(before, limit, kinds);
   }
 
   watch(nativeId: string, onItem: (item: Item) => void): () => void {

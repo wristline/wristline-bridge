@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { ItemLog, JsonlTail, Transcript, TranscriptCache, type ItemSink } from '../src/jsonl.ts';
-import type { Item } from '../src/protocol.ts';
+import type { Item, ItemKind } from '../src/protocol.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'wristline-jsonl-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -78,6 +78,24 @@ test('ItemLog pages backwards by seq', () => {
   assert.deepEqual(texts(log.page(4, 2)), ['2', '3']);
   assert.deepEqual(log.page(2, 10), { items: [log.page(undefined, 5).items[0]], hasMore: false });
   assert.deepEqual(log.page(1, 10), { items: [], hasMore: false });
+});
+
+test('ItemLog pages over the items of the given kinds only; before stays a seq', () => {
+  const log = new ItemLog();
+  const kinds: ItemKind[] = ['user', 'tool', 'tool', 'assistant', 'tool', 'notice', 'tool', 'tool', 'user', 'tool'];
+  kinds.forEach((kind, i) => log.add(`k${i + 1}`, { kind, ts: 't', text: String(i + 1) }));
+  const talk = new Set<ItemKind>(['user', 'assistant', 'notice']);
+  const seqs = (p: { items: Item[]; hasMore: boolean }): [number[], boolean] => [p.items.map((i) => i.seq), p.hasMore];
+  assert.deepEqual(seqs(log.page(undefined, 2, talk)), [[6, 9], true]);
+  assert.deepEqual(seqs(log.page(6, 2, talk)), [[1, 4], false], 'the next page starts below the smallest seq; no older match left');
+  assert.deepEqual(seqs(log.page(undefined, 3, talk)), [[4, 6, 9], true]);
+  assert.deepEqual(seqs(log.page(undefined, 4, talk)), [[1, 4, 6, 9], false], 'exactly the matching items: no more');
+  assert.deepEqual(seqs(log.page(8, 1, talk)), [[6], true], 'before may point at a skipped item');
+  assert.deepEqual(seqs(log.page(undefined, 1, new Set(['assistant']))), [[4], false], 'only other kinds are older');
+  assert.deepEqual(seqs(log.page(undefined, 40, new Set(['tool']))), [[2, 3, 5, 7, 8, 10], false]);
+  assert.deepEqual(seqs(log.page(2, 40, new Set(['tool']))), [[], false]);
+  assert.deepEqual(seqs(log.page(undefined, 40, new Set())), [[], false]);
+  assert.deepEqual(seqs(log.page(undefined, 3)), [[8, 9, 10], true], 'without kinds, every item counts');
 });
 
 const parseText = (line: string, sink: ItemSink): void => {

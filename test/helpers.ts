@@ -2,8 +2,9 @@ import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { Auth, type AuthOptions } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
+import { pageItems } from '../src/jsonl.ts';
 import { PendingRegistry } from '../src/pending.ts';
-import type { Item, ItemPage, ProviderHealth, ProviderId, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
+import type { Item, ItemKind, ItemPage, ProviderHealth, ProviderId, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.ts';
 import { hookHandlers } from '../src/providers/claude-code/hooks.ts';
 import { startServer, type RunningServer } from '../src/server.ts';
@@ -27,12 +28,9 @@ export class FakeProvider implements SessionProvider {
   listSessions(): Session[] {
     return this.sessions;
   }
-  async readItems(nativeId: string, before: number | undefined, limit: number): Promise<ItemPage | undefined> {
+  async readItems(nativeId: string, before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): Promise<ItemPage | undefined> {
     const all = this.items.get(nativeId);
-    if (!all) return undefined;
-    const end = before === undefined ? all.length : Math.min(all.length, before - 1);
-    const start = Math.max(0, end - limit);
-    return { items: all.slice(start, end), hasMore: start > 0 };
+    return all && pageItems(all, before, limit, kinds);
   }
   watch(nativeId: string, onItem: (item: Item) => void): () => void {
     const set = this.#watchers.get(nativeId) ?? new Set();
