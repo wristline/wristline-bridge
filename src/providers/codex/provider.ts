@@ -48,6 +48,8 @@ interface Meta {
   head: JsonlHead[];
   /** The thread the history was taken from, when it is another one (a fork). */
   baseThreadId: string | undefined;
+  /** The first line was not complete yet, so `head` and `baseThreadId` are unknown. */
+  startless: boolean;
 }
 
 export interface CodexOptions extends AccountsOptions {
@@ -183,6 +185,11 @@ export class CodexProvider implements SessionProvider {
     }
   }
 
+  /** The bridge hears a turn finish (and raises `done`) only while the daemon is connected and this client rejoined the thread. */
+  covers(nativeId: string): boolean {
+    return this.#rpc?.ready === true && this.#loaded.get(nativeId)?.joined === true;
+  }
+
   async refresh(): Promise<void> {
     if (this.#refreshing) return;
     this.#refreshing = true;
@@ -202,10 +209,14 @@ export class CodexProvider implements SessionProvider {
     const now = this.#now();
 
     const cutoff = now - this.#historyDays * DAY_MS;
-    const recent = [...this.#files]
-      .filter(([id, f]) => f.mtimeMs >= cutoff && !this.#isAsk(id))
-      .sort(([, a], [, b]) => b.mtimeMs - a.mtimeMs)
-      .slice(0, HISTORY_MAX);
+    // Sub-agents (known from a rollout's first line, memoised) are left out before the cap: they take none of its places.
+    const listable: [string, RolloutFile][] = [];
+    for (const [id, f] of this.#files) {
+      if (f.mtimeMs < cutoff || this.#isAsk(id)) continue;
+      const start = await this.#start(f.path).catch(() => undefined);
+      if (!start?.subagent) listable.push([id, f]);
+    }
+    const recent = listable.sort(([, a], [, b]) => b.mtimeMs - a.mtimeMs).slice(0, HISTORY_MAX);
     const ids = new Set(recent.map(([id]) => id));
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
     const paths = new Set([...this.#files.values()].flatMap((f) => [f, ...f.previous].map((x) => x.path)));
@@ -261,12 +272,15 @@ export class CodexProvider implements SessionProvider {
 
   async #scan(id: string, file: RolloutFile): Promise<CodexMetaScan> {
     let meta = this.#metas.get(id);
-    if (!meta || meta.path !== file.path) {
+    // A rollout first scanned before its first line was complete (a rewind or fork being created) has
+    // no history head: once the line is there, it is scanned afresh with it.
+    if (!meta || meta.path !== file.path || (meta.startless && (await this.#start(file.path)))) {
+      const startless = (await this.#start(file.path)) === undefined;
       const { head, baseThreadId } = await historyHead(file, this.#files, (path) => this.#start(path));
       const scan = new CodexMetaScan();
-      meta = { path: file.path, size: -1, scan, tail: new JsonlTail(file.path, scan, head), head, baseThreadId };
+      meta = { path: file.path, size: -1, scan, tail: new JsonlTail(file.path, scan, head), head, baseThreadId, startless };
       this.#metas.set(id, meta);
-      // The thread went on in a new file (a rewind): a transcript being read follows it there.
+      // The thread went on in a new file (a rewind), or its head is known now: a transcript being read follows.
       this.#transcripts.peek(id)?.rebase(file.path, head);
     }
     // A sub-agent rollout is recognised from its first line; the rest is never needed.

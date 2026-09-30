@@ -63,6 +63,8 @@ export interface RolloutStart {
   /** `ordinal` of the first line; 0 for rollouts that number nothing. */
   ordinal: number;
   base: { threadId: string; endOrdinal: number; endByteOffset: number } | undefined;
+  /** Spawned by another agent (`source.subagent`); such a thread is listed only through its parent. */
+  subagent: boolean;
 }
 
 /** Undefined while the file has no complete first line yet. */
@@ -72,12 +74,14 @@ export async function readRolloutStart(path: string): Promise<RolloutStart | und
   const rec = parseJson(line);
   const payload = rec && isObject(rec.payload) ? rec.payload : undefined;
   const hb = payload && isObject(payload.history_base) ? payload.history_base : undefined;
+  const source = payload && isObject(payload.source) ? payload.source : undefined;
   const threadId = str(hb?.thread_id)?.toLowerCase();
   const endOrdinal = num(hb?.end_ordinal_exclusive);
   const endByteOffset = num(hb?.end_byte_offset);
   return {
     ordinal: num(rec?.ordinal) ?? 0,
     base: threadId && endOrdinal !== undefined && endByteOffset !== undefined ? { threadId, endOrdinal, endByteOffset } : undefined,
+    subagent: isObject(source?.subagent),
   };
 }
 

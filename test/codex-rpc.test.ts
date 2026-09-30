@@ -617,6 +617,81 @@ test('codex provider: a thread forked from another keeps that history and, unnam
   assert.deepEqual(((await provider.readItems(origin, undefined, 10))?.items ?? []).map((i) => i.text), ['first prompt', 'reply one', 'second prompt', 'reply two']);
 });
 
+test('codex provider: a fork scanned before its first line was complete gets the kept history and title once the line is there', async (t) => {
+  const home = join(root, 'codex-fork-partial');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const origin = '019a0000-0000-7000-8000-000000000022';
+  const fork = '019a0000-0000-7000-8000-000000000023';
+  const lines = rollout(origin, 0, 'medium', [['first prompt', 'reply one'], ['second prompt', 'reply two']]);
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${origin}.jsonl`), lines.join(''));
+  const cut = lines.slice(0, 6);
+  const forked = rollout(fork, cut.length, 'low', [['forked prompt', 'forked reply']], { threadId: origin, endOrdinal: cut.length, endByteOffset: Buffer.byteLength(cut.join('')) });
+  const forkPath = join(day, `rollout-2026-09-29T09-30-00-${fork}.jsonl`);
+  writeFileSync(forkPath, (forked[0] ?? '').slice(0, 80)); // Codex is still writing the first line.
+  writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id: origin, thread_name: 'Origin name' })}\n`);
+  const provider = new CodexProvider({ home, historyDays: 3650 });
+  await provider.start(recordingHub());
+  t.after(() => provider.stop());
+  const texts = async (): Promise<string[]> => ((await provider.readItems(fork, undefined, 10))?.items ?? []).map((i) => i.text);
+  assert.deepEqual(await texts(), [], 'a transcript opened meanwhile');
+  writeFileSync(forkPath, forked.join(''));
+  await provider.refresh();
+  assert.equal(provider.listSessions().find((s) => s.id === `codex:${fork}`)?.title, 'Origin name');
+  assert.deepEqual(await texts(), ['first prompt', 'reply one', 'forked prompt', 'forked reply']);
+});
+
+test('codex provider: sub-agent rollouts take none of the 50 places of the list', async (t) => {
+  const home = join(root, 'codex-subagent-cap');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const id = (n: number): string => `019a0000-0000-7000-8000-${String(n).padStart(12, '0')}`;
+  const older = new Date(Math.floor(Date.now() / 1000) * 1000 - 3600_000);
+  const parents = [id(1), id(2)];
+  for (const parent of parents) {
+    const path = join(day, `rollout-2026-09-29T09-00-00-${parent}.jsonl`);
+    writeFileSync(path, rollout(parent, 0, 'low', [['first prompt', 'reply one']]).join(''));
+    utimesSync(path, older, older);
+  }
+  // Fifty sub-agents, all written after their parents.
+  for (let n = 100; n < 150; n++) {
+    const lines = rollout(id(n), 0, 'low', [['task', 'report']]);
+    lines[0] = `${JSON.stringify({ timestamp: '2026-09-29T09:00:00.000Z', ordinal: 0, type: 'session_meta', payload: { id: id(n), cwd: '/w', source: { subagent: { thread_spawn: { parent_thread_id: id(1), depth: 1 } } } } })}\n`;
+    writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${id(n)}.jsonl`), lines.join(''));
+  }
+  const provider = new CodexProvider({ home, historyDays: 3650 });
+  await provider.start(recordingHub());
+  t.after(() => provider.stop());
+  assert.deepEqual(provider.listSessions().map((s) => s.id).sort(), parents.map((p) => `codex:${p}`));
+});
+
+test('codex provider: covers a thread (its finished turns raise done) only while the daemon is connected and the bridge rejoined it', async (t) => {
+  const home = join(root, 'codex-covers');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  // `joined` is loaded and has a rollout; `embedded` has a rollout the daemon never loaded (a TUI with its own server); `fresh` is loaded with no rollout yet (before its first turn).
+  const [joined, embedded, fresh] = ['40', '41', '42'].map((n) => `019a0000-0000-7000-8000-0000000000${n}`) as [string, string, string];
+  for (const id of [joined, embedded]) writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`), rollout(id, 0, 'low', [['first prompt', 'reply one']]).join(''));
+  const { rpc } = fakeRpc('covers', { loaded: [joined, fresh], threads: { [joined]: { status: { type: 'idle' } } } });
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc });
+  t.after(() => provider.stop());
+  assert.equal(provider.covers(joined), false, 'before the daemon is connected');
+  let up = ready(rpc);
+  await provider.start(recordingHub());
+  await up;
+  await waitFor(() => provider.covers(joined));
+  assert.equal(provider.covers(embedded), false);
+  assert.equal(provider.covers(fresh), false, 'loaded but not rejoined');
+
+  up = ready(rpc);
+  await assert.rejects(rpc.request('fake/exit'));
+  assert.equal(provider.covers(joined), false, 'the connection is lost: a turn finishing now is never heard of');
+  await up;
+  await waitFor(() => provider.covers(joined));
+  await rpc.request('fake/notify', { method: 'thread/closed', params: { threadId: joined } });
+  assert.equal(provider.covers(joined), false, 'closed');
+});
+
 test('codex provider: a completed turn raises done by the Stop hook rule; an approval nobody was asked about raises needs_input', async (t) => {
   const home = join(root, 'codex-alerts');
   const day = join(home, 'sessions', '2026', '09', '29');

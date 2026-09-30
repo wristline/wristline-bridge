@@ -265,12 +265,19 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   (closed after 5 wrong codes). `{"token": true, "name": "..."}` → `{token, deviceId}` instead.
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
 - `GET /local/presence` → `{watch, graceUntil?, since}`: `watch` is true only while at least one
-  authenticated WebSocket is open right now, so an alert raised then reaches a watch. After the
-  last one closes, permission requests still go to the watch for 90 s (see below); during that
-  grace `watch` is false and `graceUntil` (ISO) says when it ends. `since` is when `watch` last
-  changed (ISO; the first connect of the run, or the last disconnect), `null` before any watch
-  connected. Other Stop hooks (e.g. a Slack notifier) stay quiet only while `watch` is true: an
-  alert raised in the grace reaches no watch.
+  authenticated WebSocket is open right now and its watch answered a ping (sent every 30 s) or
+  connected at most 35 s ago, so an alert raised then reaches a watch. (A watch that loses its
+  network without closing keeps its socket open until a ping goes unanswered; it counts as gone
+  35 s after its last pong.) After the last one closes, permission requests still go to the watch
+  for 90 s (see below); during that grace `watch` is false and `graceUntil` (ISO) says when it
+  ends. `since` is when `watch` last changed (ISO; the first connect of the run, the last
+  disconnect, or when the last pong got too old), `null` before any watch connected. Other Stop
+  hooks (e.g. a Slack notifier) stay quiet only while `watch` is true: an alert raised in the
+  grace reaches no watch. `?codexThread=<thread id>` adds `covered`: true only while the Codex
+  app-server daemon is connected and the bridge has rejoined that thread, the only case in which a
+  finished turn of it raises a `done` alert (not for a TUI with its own embedded server, nor while
+  the bridge reconnects to the daemon). A Codex `notify` script stays quiet only when `watch` and
+  `covered` are both true.
 - `POST /local/statusline` — the Claude Code statusLine JSON; every `rate_limits` entry with a
   `used_percentage` becomes a usage window (`five_hour` → `5h`, `seven_day` → `7d`,
   `seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`; `resets_at` epoch seconds → ISO),

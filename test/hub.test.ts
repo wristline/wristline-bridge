@@ -416,6 +416,49 @@ test('connections, alerts and requests are logged with ids and client counts, ne
   }
 });
 
+test('presence counts a watch only while it answers pings: one silent for more than 35 s is gone though its socket is still open', async () => {
+  const clock = { now: Date.parse('2026-09-29T10:00:00Z') };
+  const bridge = await startBridge(new FakeProvider(), () => clock.now);
+  try {
+    const presence = async (): Promise<unknown> => (await fetch(`${bridge.local}/local/presence`, { headers: { authorization: `Bearer ${bridge.hookToken}` } })).json();
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    await ws.next();
+    clock.now += 35_000;
+    assert.deepEqual(await presence(), { watch: true, since: '2026-09-29T10:00:00.000Z' }, 'connected 35 s ago: within one ping interval plus 5 s');
+    clock.now += 1;
+    assert.deepEqual(await presence(), { watch: false, since: '2026-09-29T10:00:35.000Z' }, 'no pong since: gone, from 35 s after connecting');
+    ws.ws.pong();
+    await waitFor(() => bridge.hub.presence().watch || undefined);
+    clock.now += 35_000;
+    assert.equal(bridge.hub.presence().watch, true, 'the pong counts like a connect');
+    clock.now += 1;
+    assert.deepEqual(bridge.hub.presence(), { watch: false, since: '2026-09-29T10:01:10.001Z' });
+    ws.close();
+    await waitFor(() => (bridge.hub.pending.presence().watch ? undefined : true));
+    assert.equal(bridge.hub.presence().graceUntil, '2026-09-29T10:02:40.002Z', 'closed: the registry\'s answer as before');
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('presence?codexThread= says whether a Codex provider hears that thread\'s turns finish (raises done), with or without a watch', async () => {
+  const codex = Object.assign(new FakeProvider('codex'), { covers: (id: string) => id === 'th-joined' });
+  const bridge = await startBridge([new FakeProvider(), codex]);
+  try {
+    const presence = async (query: string): Promise<unknown> => (await fetch(`${bridge.local}/local/presence${query}`, { headers: { authorization: `Bearer ${bridge.hookToken}` } })).json();
+    assert.deepEqual(await presence('?codexThread=th-joined'), { watch: false, since: null, covered: true });
+    assert.deepEqual(await presence('?codexThread=th-embedded'), { watch: false, since: null, covered: false }, 'a thread no provider hears (e.g. an embedded-server TUI)');
+    assert.deepEqual(await presence('?codexThread='), { watch: false, since: null, covered: false });
+    assert.deepEqual(await presence(''), { watch: false, since: null }, 'no covered without the query');
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    await ws.next();
+    assert.deepEqual(await presence('?codexThread=th-embedded'), { watch: true, since: '2026-09-29T10:00:00.000Z', covered: false });
+    ws.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('statusLine reports go to the home holding the transcript, else to the instance listing the session, else to the only instance', async () => {
   const homeA = join(root, 'a');
   const homeB = join(root, 'b-real');

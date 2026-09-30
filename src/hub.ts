@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
-import { PendingRegistry, type PendingOptions } from './pending.ts';
+import { PendingRegistry, type PendingOptions, type Presence } from './pending.ts';
 import {
   API_VERSION,
   CLOSE_REVOKED,
@@ -23,6 +23,8 @@ const SESSION_THROTTLE_MS = 2000;
 /** `usage` events per entry: at most one per minute (the first one at once). */
 export const USAGE_THROTTLE_MS = 60_000;
 const PING_MS = 30_000;
+/** A connection counts towards presence while its watch answered a ping (or connected) at most this long ago: one ping interval plus 5 s. */
+const PONG_MAX_MS = 35_000;
 /** Alerts replayed in the snapshot: at most this many, none older than ALERT_TTL_MS. */
 const ALERT_KEEP = 10;
 const ALERT_TTL_MS = 10 * 60_000;
@@ -36,6 +38,8 @@ interface Client {
   kinds: ReadonlySet<string> | undefined;
   mode: ClientMode;
   alive: boolean;
+  /** When the watch last answered a ping; its connect time until then. */
+  lastPong: number;
 }
 
 interface Throttle {
@@ -106,7 +110,7 @@ export interface HubOptions {
   providers: SessionProvider[];
   /** Overrides for deterministic request ids and timestamps in tests. */
   pending?: Pick<PendingOptions, 'now' | 'newId'>;
-  /** The same for alert ids and timestamps; `now` also expires usage windows and times the usage throttle. */
+  /** The same for alert ids and timestamps; `now` also expires usage windows, times the usage throttle and ages pongs. */
   alerts?: Pick<PendingOptions, 'now' | 'newId'>;
   /** Test override of USAGE_THROTTLE_MS. */
   usageThrottleMs?: number;
@@ -290,6 +294,21 @@ export class BridgeHub implements Hub {
     return this.#alerts.filter((a) => Date.parse(a.at) >= since);
   }
 
+  /**
+   * `GET /local/presence`: the registry's, except that open connections whose watch has not answered
+   * a ping for PONG_MAX_MS (e.g. it lost its network without closing) count as gone from then on,
+   * since an alert sent into them reaches nobody. With `codexThread`, whether a finished turn of that
+   * thread raises a `done` alert at all (an embedded-server TUI's does not).
+   */
+  presence(codexThread?: string): Presence {
+    let lastPong = Number.NEGATIVE_INFINITY;
+    for (const c of this.#clients) lastPong = Math.max(lastPong, c.lastPong);
+    let presence = this.pending.presence();
+    if (presence.watch && this.#now() - lastPong > PONG_MAX_MS) presence = { watch: false, since: new Date(lastPong + PONG_MAX_MS).toISOString() };
+    if (codexThread === undefined) return presence;
+    return { ...presence, covered: this.#providers.some((p) => p.id === 'codex' && p.covers?.(codexThread) === true) };
+  }
+
   snapshot(): ServerEvent {
     return { type: 'snapshot', apiVersion: API_VERSION, sessions: this.sessions(), requests: this.pending.list(), usage: this.usageList(), alerts: this.alerts() };
   }
@@ -306,12 +325,13 @@ export class BridgeHub implements Hub {
   // WebSocket clients
 
   attach(ws: WebSocket, deviceId: string): void {
-    const client: Client = { ws, deviceId, sessionId: null, kinds: undefined, mode: 'foreground', alive: true };
+    const client: Client = { ws, deviceId, sessionId: null, kinds: undefined, mode: 'foreground', alive: true, lastPong: this.#now() };
     this.#clients.add(client);
     this.pending.watchConnected();
     this.#log(`wristline: watch ${deviceId.slice(0, 6)} connected`);
     ws.on('pong', () => {
       client.alive = true;
+      client.lastPong = this.#now();
     });
     ws.on('message', (data: RawData, isBinary: boolean) => {
       if (isBinary) return;

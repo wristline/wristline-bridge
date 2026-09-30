@@ -242,8 +242,9 @@ completed turn, without waiting for it, with one JSON argument:
 ```
 
 (`client` may be absent, `last-assistant-message` `null` and `input-messages` empty.) To avoid a second notification, such a script should stay quiet while
-`GET /local/presence` answers `"watch": true` (see the protocol document; it needs the local token
-from `~/.config/wristline/hook-header`), and skip Quick Ask threads (a `sessionId` in
+`GET /local/presence?codexThread=<thread-id>` answers both `"watch": true` and `"covered": true`
+(`covered` is false for a thread the bridge raises no alert for, such as an embedded-server TUI's;
+see the protocol document; it needs the local token from `~/.config/wristline/hook-header`), and skip Quick Ask threads (a `sessionId` in
 `~/.config/wristline/ask-threads.json`, or `cwd` = `~/.config/wristline/ask-cwd`) and sub-agent
 threads (`source.subagent` in the `session_meta` line that starts the thread's rollout).
 

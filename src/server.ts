@@ -341,7 +341,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       return send(res, 200, auth.startPairing() satisfies LocalPairResponse);
     }
-    if (method === 'GET' && path === '/local/presence') return send(res, 200, hub.pending.presence());
+    if (method === 'GET' && path === '/local/presence') return send(res, 200, hub.presence(url.searchParams.get('codexThread') ?? undefined));
     if (method === 'GET' && path === '/local/devices') {
       const devices = auth.devices().map(({ id, name, createdAt }) => ({ id, name, createdAt }));
       return send(res, 200, { devices } satisfies LocalDevices);

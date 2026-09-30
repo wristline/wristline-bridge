@@ -14,12 +14,14 @@ const DEFER: PermissionOption = 'defer';
 export type RequestDraft = Omit<PendingRequest, 'id' | 'createdAt'>;
 /** `GET /local/presence` body. */
 export interface Presence {
-  /** At least one authenticated watch connection is open right now. */
+  /** At least one authenticated watch connection is open right now (`BridgeHub.presence`: and its watch answered a ping within 35 s). */
   watch: boolean;
   /** Only while no watch is connected but one left less than 90 s ago: when that grace ends (`watchPresent()` until then). */
   graceUntil?: string;
-  /** When `watch` last changed: the first connect of the run, or the last disconnect; null before any watch. */
+  /** When `watch` last changed: the first connect of the run, or the last disconnect (`BridgeHub.presence`: or when the last pong got too old); null before any watch. */
   since: string | null;
+  /** Only when asked about a Codex thread (`?codexThread=`): whether its finished turns raise `done` alerts at all. */
+  covered?: boolean;
 }
 export type AnswerResult = 'ok' | 'already_resolved' | 'invalid';
 

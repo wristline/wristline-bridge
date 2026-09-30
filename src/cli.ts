@@ -15,7 +15,7 @@ import { CodexProvider } from './providers/codex/provider.ts';
 import { CodexRpc } from './providers/codex/rpc.ts';
 import { startServer, type LocalDevices, type LocalPairResponse } from './server.ts';
 import { hooksInstall, hooksUninstall, serviceInstall, serviceUninstall, setup } from './setup.ts';
-import { CliError, isObject, str } from './util.ts';
+import { CliError, isObject, printable, str } from './util.ts';
 
 const HELP = `Usage: wristline-bridge [command] [options]
 
@@ -182,7 +182,8 @@ async function local(config: Config, method: string, path: string, body?: unknow
 }
 
 async function pair(config: Config, token: boolean, name: string | undefined): Promise<void> {
-  const { data } = await local(config, 'POST', '/local/pair', token ? { token: true, name } : {});
+  const { status, data } = await local(config, 'POST', '/local/pair', token ? { token: true, name } : {});
+  if (status !== 200) throw new CliError(`The bridge could not ${token ? 'issue a token' : 'open a pairing window'} (HTTP ${status}); see its log.`);
   const res = data as LocalPairResponse;
   const address = config.publicUrl ?? 'not set (run `wristline-bridge setup`)';
   if ('token' in res) {
@@ -201,17 +202,21 @@ async function devices(config: Config, revoke: string | undefined): Promise<void
   if (revoke) {
     const { status } = await local(config, 'DELETE', `/local/devices/${encodeURIComponent(revoke)}`);
     if (status === 404) throw new CliError(`No paired device with id ${revoke}`);
+    // A 500 means config.json could not be saved: the token is refused only until the bridge restarts.
+    if (status !== 204) throw new CliError(`Revoking ${revoke} failed (HTTP ${status}): the bridge could not save it and would accept the token again after a restart. See its log, fix the cause, then restart the bridge and revoke it again.`);
     console.log(`Revoked ${revoke}; its connections were closed.`);
     return;
   }
-  const { data } = await local(config, 'GET', '/local/devices');
+  const { status, data } = await local(config, 'GET', '/local/devices');
+  if (status !== 200) throw new CliError(`The bridge could not list the devices (HTTP ${status}); see its log.`);
   const list = (data as LocalDevices).devices;
   if (list.length === 0) {
     console.log('No paired devices.');
     return;
   }
   console.log(`${'ID'.padEnd(10)}${'NAME'.padEnd(26)}PAIRED`);
-  for (const d of list) console.log(`${d.id.padEnd(10)}${d.name.padEnd(26)}${d.createdAt}`);
+  // A name comes from whoever paired: control characters in it could rewrite this list on the terminal.
+  for (const d of list) console.log(`${d.id.padEnd(10)}${printable(d.name).padEnd(26)}${d.createdAt}`);
 }
 
 async function main(argv: string[]): Promise<void> {

@@ -29,6 +29,8 @@ export interface SessionProvider {
   watch(nativeId: string, onItem: (item: Item) => void): () => void;
   /** Rejects with PromptBlocked when the session cannot take a prompt right now. */
   sendPrompt(nativeId: string, text: string): Promise<void>;
+  /** Whether a finished turn of the session reaches the bridge and so raises its `done` alert (Codex: only a thread it rejoined in the daemon). */
+  covers?(nativeId: string): boolean;
 }
 
 export class PromptBlocked extends Error {
