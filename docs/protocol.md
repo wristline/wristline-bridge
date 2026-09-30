@@ -91,7 +91,11 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   because one report omitted it (a Claude Code statusLine report carries only the limits it happens
   to name). `GET /api/usage` and the `snapshot` always return this merged state; `usage` events are
   sent at once when an entry first appears and then at most once per minute per entry, with the
-  merged state at the time of sending.
+  merged state at the time of sending; an event with empty `windows` means the entry's last
+  window has reset (the entry is then absent from `GET /api/usage`). The windows a provider
+  reported before it named its account belong to the first labelled entry. The bridge sends no
+  event on the passing of a `resetsAt` alone: a watch showing a window past its `resetsAt` shows
+  stale numbers until the next report or `snapshot`.
 
 - **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `threadId` (the id of the
   first ask of the conversation it belongs to; its own id for a first ask), `question` (the
@@ -122,7 +126,7 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
-| `POST /api/ask` `{provider, text, model?, threadId?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model` or `threadId`, a `threadId` of the other provider), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
+| `POST /api/ask` `{provider, text, model?, threadId?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, non-string or empty `threadId`, a `threadId` of the other provider), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
 | `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first, each with its `threadId` | `401` | `asks.json` |
 | `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
 | `DELETE /api/asks/thread/:threadId` | `204`: the thread is forgotten and its CLI session deleted (a running ask of it is cancelled first) | `404` (not this device's thread) | |
@@ -214,10 +218,12 @@ While the watch app is not on screen it only needs what should wake the wearer. 
 - `request` and `resolved`,
 - `alert`,
 - `session` events whose `status` changed to or from `needs_input` (as last sent by the bridge;
-  a session's first event counts as a change only when it is `needs_input`).
+  a session's first event counts as a change only when it is `needs_input`),
+- `session_removed` for a session whose last `session` event was `needs_input` (it ended or left
+  the list without a `session` event: the client would otherwise keep showing it as waiting).
 
 Nothing else: no `usage`, no `item` (the subscription stays and resumes in the foreground), no
-other `session` churn, no `session_removed`, no `ask`. `{"type": "mode", "mode": "foreground"}`
+other `session` churn or `session_removed`, no `ask`. `{"type": "mode", "mode": "foreground"}`
 restores the full stream. A new connection starts in the foreground and always gets its
 `snapshot`; after reconnecting, a client re-sends its `mode` (after its `subscribe`). A `mode`
 with an unknown value is ignored.

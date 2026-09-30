@@ -225,7 +225,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const provider = input.provider ?? asks.defaultProvider;
       const text = str(input.text)?.trim();
       const { model, threadId } = input;
-      if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string') || (threadId !== undefined && typeof threadId !== 'string')) {
+      if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string') || (threadId !== undefined && (typeof threadId !== 'string' || !threadId))) {
         return fail(res, 400, 'bad_request');
       }
       if (text.length > TEXT_MAX) return fail(res, 413, 'payload_too_large');

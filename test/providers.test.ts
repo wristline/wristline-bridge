@@ -206,15 +206,19 @@ test('a Quick Ask thread is never listed: its Claude Code transcript and registr
   const codex = join(root, 'codex-ask');
   const day = join(codex, 'sessions', '2026', '09', '29');
   mkdirSync(day, { recursive: true });
-  const [thread, keep] = ['019a0000-0000-7000-8000-00000000000a', '019a0000-0000-7000-8000-00000000000b'];
+  const [thread, keep, early] = ['019a0000-0000-7000-8000-00000000000a', '019a0000-0000-7000-8000-00000000000b', '019a0000-0000-7000-8000-00000000000c'];
   for (const id of [thread, keep]) copyFileSync(new URL('./fixtures/codex/rollout.jsonl', import.meta.url), join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`));
-  const codexProvider = new CodexProvider({ home: codex, historyDays: 3650, isAsk: (id) => id === thread });
+  // An ask whose thread id the bridge has not read yet: its rollout is known by the scratch cwd it was made in.
+  const askCwd = '/home/u/.config/wristline/ask-cwd';
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${early}.jsonl`), readFileSync(new URL('./fixtures/codex/rollout.jsonl', import.meta.url), 'utf8').replaceAll('/work/api', askCwd));
+  const codexProvider = new CodexProvider({ home: codex, historyDays: 3650, isAsk: (id) => id === thread, askCwd });
   const codexHub = recordingHub();
   await codexProvider.start(codexHub);
   try {
     assert.deepEqual(codexProvider.listSessions().map((s) => s.id), [`codex:${keep}`]);
     assert.equal(await codexProvider.readItems(thread, undefined, 3), undefined);
-    assert.ok(!codexHub.sessions.some((s) => s.id === `codex:${thread}`));
+    assert.equal(await codexProvider.readItems(early, undefined, 3), undefined);
+    assert.ok(!codexHub.sessions.some((s) => s.id === `codex:${thread}` || s.id === `codex:${early}`));
   } finally {
     codexProvider.stop();
   }

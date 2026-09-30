@@ -45,6 +45,8 @@ export interface CodexOptions extends AccountsOptions {
   rpc?: CodexRpc;
   /** True for a thread id that is a Quick Ask thread (src/ask.ts): never listed, its requests never opened. */
   isAsk?: (nativeId: string) => boolean;
+  /** The Quick Ask scratch directory (resolved): a rollout made there is an ask's even before `isAsk` knows its id. */
+  askCwd?: string;
 }
 
 /**
@@ -60,6 +62,7 @@ export class CodexProvider implements SessionProvider {
   readonly #now: () => number;
   readonly #accounts: CodexAccounts;
   readonly #isAsk: (nativeId: string) => boolean;
+  readonly #askCwd: string | undefined;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   /** First lines of rollouts seen, by path; a rollout's first line never changes. */
@@ -96,6 +99,7 @@ export class CodexProvider implements SessionProvider {
     this.#rpc = options.rpc;
     this.#accounts = new CodexAccounts(options);
     this.#isAsk = options.isAsk ?? (() => false);
+    this.#askCwd = options.askCwd;
   }
 
   async start(hub: Hub): Promise<void> {
@@ -219,7 +223,8 @@ export class CodexProvider implements SessionProvider {
     const next = new Map<string, Session>();
     for (const [id, file] of this.#recent) {
       const meta = this.#metas.get(id)?.scan;
-      if (!meta || meta.subagent) continue;
+      // An ask's rollout exists before the bridge has read its id from the CLI: its cwd tells it apart meanwhile.
+      if (!meta || meta.subagent || (meta.cwd !== undefined && meta.cwd === this.#askCwd)) continue;
       next.set(id, this.#build(id, file, meta, now));
     }
     const previous = this.#sessions;

@@ -99,6 +99,7 @@ async function run(flags: Flags): Promise<void> {
         accounts: config.codexAccounts,
         labels: config.labels,
         isAsk: (id) => asks.ownsCodexThread(id),
+        askCwd: asks.cwd,
         saveAccounts: async (accounts) => {
           await updateStored(dir, (stored) => ({ codexAccounts: { ...stored.codexAccounts, ...accounts } }));
         },

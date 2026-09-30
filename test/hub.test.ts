@@ -201,6 +201,21 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(bg.pending(), 0, 'no session_removed, no other session churn');
 
+    // A session removed while it needs input: without this the background client would keep its badge.
+    await new Promise((r) => setTimeout(r, 2100));
+    const dangling = bridge.hub.pending.open({ sessionId: s1.id, kind: 'permission', title: 'Bash', questions: [{ id: 'decision', text: 'rm', multi: false, options: [{ id: 'allow', label: 'Allow' }] }] }, { timeoutMs: 60_000 });
+    assert.deepEqual(await types(bg, 2), ['request', 'session']);
+    bridge.hub.removed(s1.id);
+    assert.equal((await bg.next()).type, 'session_removed');
+    assert.deepEqual(await types(fg, 3), ['request', 'session', 'session_removed']);
+    assert.equal(bridge.hub.pending.answer('req-2', { decision: ['allow'] }), 'ok');
+    await dangling;
+    // The removal forgot the session's last status: its idle session event is not a change from needs_input any more.
+    assert.deepEqual(await types(fg, 2), ['resolved', 'session']);
+    assert.deepEqual(await types(bg, 1), ['resolved']);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(bg.pending(), 0);
+
     // Back in the foreground the client hears everything again.
     bg.send({ type: 'mode', mode: 'foreground' });
     await new Promise((r) => setTimeout(r, 100));
@@ -265,6 +280,22 @@ test('usage windows are merged per entry: a report without a window keeps it unt
     ws.close();
   } finally {
     await bridge.close();
+  }
+});
+
+test('windows reported before the account was known are folded into the first labelled entry', () => {
+  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') } });
+  try {
+    const fiveHour = { id: '5h', usedPercent: 40, resetsAt: '2026-09-29T12:00:00.000Z' };
+    const sevenDay = { id: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z' };
+    hub.usage({ provider: 'claude-code', updatedAt: '2026-09-29T10:00:00.000Z', windows: [fiveHour, sevenDay] });
+    hub.usage({ provider: 'claude-code', updatedAt: '2026-09-29T10:00:01.000Z', windows: [{ ...sevenDay, usedPercent: 13 }], account: { id: 'acc-a', label: 'me' } });
+    assert.deepEqual(
+      hub.usageList().map((u) => [usageKey(u), u.windows]),
+      [['claude-code:acc-a', [{ ...sevenDay, usedPercent: 13 }, fiveHour]]],
+    );
+  } finally {
+    hub.close();
   }
 });
 

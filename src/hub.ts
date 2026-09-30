@@ -158,8 +158,10 @@ export class BridgeHub implements Hub {
   removed(sessionId: string): void {
     clearTimeout(this.#throttles.get(sessionId)?.timer);
     this.#throttles.delete(sessionId);
+    // A background client told the session needs input would otherwise keep showing that.
+    const waited = this.#lastStatus.get(sessionId) === 'needs_input';
     this.#lastStatus.delete(sessionId);
-    this.#broadcast({ type: 'session_removed', sessionId });
+    this.#broadcast({ type: 'session_removed', sessionId }, waited);
   }
 
   usage(usage: Usage): void {
@@ -168,13 +170,19 @@ export class BridgeHub implements Hub {
     const previous = this.#usage.get(key);
     // Another home's older snapshot of this account (a rollout) must not replace its live numbers.
     if (previous && usage.updatedAt < previous.updatedAt) return;
-    const merged = mergeUsage(previous, usage, this.#now());
-    this.#usage.set(key, merged);
+    const now = this.#now();
+    let merged = mergeUsage(previous, usage, now);
     // Once the provider names an account, its unlabelled entry is stale; a watch drops it with the next snapshot.
+    // The windows it reported before the account was known are this account's: they are folded in, not dropped.
     if (usage.account) {
+      const unlabelledKey = usageKey({ provider: usage.provider });
+      merged = mergeUsage(this.#usage.get(unlabelledKey), merged, now);
       this.#labelled.add(usage.provider);
-      this.#usage.delete(usageKey({ provider: usage.provider }));
+      this.#usage.delete(unlabelledKey);
+      clearTimeout(this.#usageThrottles.get(unlabelledKey)?.timer);
+      this.#usageThrottles.delete(unlabelledKey);
     }
+    this.#usage.set(key, merged);
     // Unchanged numbers are not worth waking the watch radio for; GET /api/usage has the fresh timestamp.
     const changed = !previous || JSON.stringify([previous.windows, previous.account]) !== JSON.stringify([merged.windows, merged.account]);
     if (changed) this.#publishUsage(key);
@@ -202,9 +210,11 @@ export class BridgeHub implements Hub {
     }, t.last + this.#usageThrottleMs - now);
   }
 
+  /** An entry whose last window has reset is sent with no windows, so the watch clears its stale numbers. */
   #sendUsage(key: string): void {
-    const usage = this.#current(key);
-    if (usage) this.#broadcast({ type: 'usage', usage });
+    const stored = this.#usage.get(key);
+    if (!stored) return;
+    this.#broadcast({ type: 'usage', usage: this.#current(key) ?? { ...stored, windows: [] } });
   }
 
   /** The entry as the watch should see it now: without windows whose reset time has passed; undefined when none is left. */
@@ -363,13 +373,12 @@ export class BridgeHub implements Hub {
     }
   }
 
-  #broadcast(event: ServerEvent): void {
+  #broadcast(event: ServerEvent, background = this.#forBackground(event)): void {
     const data = JSON.stringify(event);
-    const background = this.#forBackground(event);
     for (const c of this.#clients) if (c.mode === 'foreground' || background) this.#sendRaw(c, data);
   }
 
-  /** What a background client hears: requests and their resolution, alerts, and a session entering or leaving needs_input. */
+  /** What a background client hears: requests and their resolution, alerts, and a session entering or leaving needs_input (`removed` adds the removal of one that needed input). */
   #forBackground(event: ServerEvent): boolean {
     switch (event.type) {
       case 'request':

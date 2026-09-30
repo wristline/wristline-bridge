@@ -188,6 +188,20 @@ test('threads expire 24 h after their last ask or on DELETE: the CLI session fil
     await waitFor(() => (readFileSync(argvFile, 'utf8') === JSON.stringify(['delete', '--force', codexId]) ? true : undefined));
     assert.ok(existsSync(third.rollout), 'the fake CLI deletes nothing; the real one removes the rollout and index line');
 
+    // Deleted while its first ask still runs, before the CLI printed the thread id: the id printed on the way out is still purged.
+    env.FAKE_MODE = 'late';
+    writeFileSync(pidFile, '');
+    const t5 = await accepted(await post({ provider: 'codex', text: 'slow start' }, own.token, own.base));
+    await askEvent(socket, 'running');
+    await waitFor(() => (readFileSync(pidFile, 'utf8') ? true : undefined));
+    assert.ok(!own.asks.ownsCodexThread(codexId), 'the thread id is not known yet');
+    writeFileSync(argvFile, '[]');
+    assert.equal((await deleteThread(t5, own.token, own.base)).status, 204);
+    assert.equal((await askEvent(socket, 'error')).error, 'cancelled');
+    await waitFor(() => (readFileSync(argvFile, 'utf8') === JSON.stringify(['delete', '--force', codexId]) ? true : undefined));
+    assert.ok(!own.asks.ownsCodexThread(codexId));
+    env.FAKE_MODE = 'ok';
+
     // The registry is on disk: a runner started later (here one without the Codex CLI) still owns the thread and deletes its files by hand.
     const t4 = await ask('codex', 'codex again');
     plant(t4);
@@ -242,6 +256,26 @@ test('one running ask per device: a second POST is 409 busy, another device may 
   assert.equal((await askEvent(otherWs, 'error')).error, 'cancelled');
   otherWs.close();
   assert.deepEqual((await asks()).map((a) => [a.status, a.error]).slice(0, 1), [['error', 'cancelled']]);
+
+  // A Claude thread whose first ask failed starts over under a fresh session id: Claude Code refuses
+  // `--session-id` of a transcript the failed run may have written.
+  fakeEnv.FAKE_MODE = 'ok';
+  const oldSession = argv()[argv().indexOf('--session-id') + 1] ?? '';
+  const followUp = await accepted(await post({ provider: 'claude-code', text: 'again', threadId: id }));
+  await askEvent(ws, 'running');
+  await askEvent(ws, 'done');
+  const args = argv();
+  const fresh = args[args.indexOf('--session-id') + 1] ?? '';
+  assert.match(fresh, /^[0-9a-f-]{36}$/);
+  assert.notEqual(fresh, oldSession);
+  assert.ok(!args.includes('--resume'));
+  assert.ok(bridge.asks.ownsClaudeSession(fresh) && !bridge.asks.ownsClaudeSession(oldSession));
+  assert.equal((await asks()).find((a) => a.id === followUp)?.threadId, id);
+  // Answered, the thread resumes that session from then on.
+  await accepted(await post({ provider: 'claude-code', text: 'more', threadId: id }));
+  await askEvent(ws, 'running');
+  await askEvent(ws, 'done');
+  assert.deepEqual(argv().slice(12, 14), ['--resume', fresh]);
 });
 
 test('timeout ends the ask with error timeout', async () => {
@@ -254,7 +288,7 @@ test('timeout ends the ask with error timeout', async () => {
 
 test('validation: provider, text, size, missing CLI', async () => {
   fakeEnv.FAKE_MODE = 'ok';
-  for (const body of [{ provider: 'gemini', text: 'x' }, { provider: 'codex', text: '' }, { provider: 'codex', text: '   ' }, { provider: 'codex' }, { provider: 'codex', text: 'x', model: 1 }, 'text']) {
+  for (const body of [{ provider: 'gemini', text: 'x' }, { provider: 'codex', text: '' }, { provider: 'codex', text: '   ' }, { provider: 'codex' }, { provider: 'codex', text: 'x', model: 1 }, { provider: 'codex', text: 'x', threadId: '' }, 'text']) {
     assert.equal((await post(body)).status, 400, JSON.stringify(body));
   }
   assert.equal((await post({ provider: 'codex', text: 'x'.repeat(4001) })).status, 413);

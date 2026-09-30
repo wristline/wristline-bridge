@@ -9,7 +9,7 @@
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AskConfig, Bins } from './config.ts';
@@ -74,7 +74,7 @@ interface Thread {
   deviceId: string;
   /** ISO 8601; the thread expires ASK_MAX_AGE_MS after it. */
   lastAskAt: string;
-  /** Claude Code: the `--session-id` (the uuid of `id`); Codex: `thread.started.thread_id`, once seen. */
+  /** Claude Code: the `--session-id` (the uuid of `id`; a fresh one after a failed first ask); Codex: `thread.started.thread_id`, once seen. */
   sessionId?: string;
   /** The CLI has a conversation to resume (Claude Code: an ask answered; Codex: the thread id is known). */
   started: boolean;
@@ -118,6 +118,11 @@ export class AskRunner {
   /** For a watch that names no provider. */
   get defaultProvider(): ProviderId {
     return this.#o.ask.provider;
+  }
+
+  /** The scratch directory the CLIs run in, resolved as they record it: a Codex provider skips rollouts made there. */
+  get cwd(): string {
+    return realpathSync(this.#cwd);
   }
 
   /** Starts the CLI for this device; at most one ask runs per device. With `threadId`, continues that thread of this device. */
@@ -225,9 +230,12 @@ export class AskRunner {
     });
   }
 
+  /** Via a temporary file and a rename: a crash mid-write must not leave a half file that parses to no threads. */
   #saveThreads(): void {
     try {
-      writeFileSync(this.#threadsPath, `${JSON.stringify({ threads: [...this.#threads.values()] }, null, 2)}\n`, { mode: 0o600 });
+      const tmp = `${this.#threadsPath}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify({ threads: [...this.#threads.values()] }, null, 2)}\n`, { mode: 0o600 });
+      renameSync(tmp, this.#threadsPath);
     } catch (err) {
       console.error(`wristline: could not save ${this.#threadsPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -300,8 +308,10 @@ export class AskRunner {
       const lines = (partial + chunk).split('\n');
       partial = lines.pop() ?? '';
       const id = lines.map(codexThreadId).find((x) => x !== undefined);
-      if (id && this.#threads.get(thread.id) === thread) {
-        thread.sessionId = id;
+      if (!id) return;
+      // Recorded even for a thread deleted meanwhile: its rollout is purged by that id once the CLI has exited.
+      thread.sessionId = id;
+      if (this.#threads.get(thread.id) === thread) {
         thread.started = true;
         this.#saveThreads();
       }
@@ -320,8 +330,14 @@ export class AskRunner {
         outcome.answer === undefined
           ? { id, provider, threadId, question, status: 'error', durationMs, error: outcome.error ?? 'bad_output', createdAt }
           : { id, provider, threadId, question, status: 'done', answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
-      if (outcome.answer !== undefined && provider === 'claude-code' && !thread.started && this.#threads.get(threadId) === thread) {
-        thread.started = true;
+      if (provider === 'claude-code' && !thread.started && this.#threads.get(threadId) === thread) {
+        if (outcome.answer !== undefined) thread.started = true;
+        else {
+          // Claude Code refuses `--session-id` of a transcript that exists, and a failed run (timeout, cancel,
+          // error) may have written one: the thread starts over under a fresh id and the old files go.
+          this.#purge({ ...thread });
+          thread.sessionId = randomUUID();
+        }
         this.#saveThreads();
       }
       if (entry.purge) this.#purge(entry.purge);
@@ -380,23 +396,34 @@ function readThreads(path: string): Thread[] {
     return [];
   }
   const raw = parseJson(text)?.threads;
+  if (!Array.isArray(raw)) {
+    console.error(`wristline: ${path} is not a thread registry; its threads are lost (their CLI sessions will be listed and never deleted)`);
+    return [];
+  }
   const threads: Thread[] = [];
-  for (const t of Array.isArray(raw) ? raw : []) {
+  for (const t of raw) {
     const id = isObject(t) ? str(t.id) : undefined;
     const deviceId = isObject(t) ? str(t.deviceId) : undefined;
     const lastAskAt = isObject(t) ? str(t.lastAskAt) : undefined;
     if (!isObject(t) || !id || !deviceId || !lastAskAt || (t.provider !== 'claude-code' && t.provider !== 'codex')) continue;
+    // The session id names files to delete under the CLI's home: only a uuid is ever used as one.
     const sessionId = str(t.sessionId);
+    if (sessionId !== undefined && !isUuid(sessionId)) continue;
     threads.push({ id, provider: t.provider, deviceId, lastAskAt, ...(sessionId ? { sessionId } : {}), started: t.started === true });
   }
   return threads;
+}
+
+function isUuid(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 }
 
 /** The `thread.started` line of `codex exec --json`, if this is one. */
 function codexThreadId(line: string): string | undefined {
   if (!line.includes('thread.started')) return undefined;
   const event = parseJson(line);
-  return event?.type === 'thread.started' ? str(event.thread_id) : undefined;
+  const id = event?.type === 'thread.started' ? str(event.thread_id) : undefined;
+  return id !== undefined && isUuid(id) ? id : undefined;
 }
 
 /**

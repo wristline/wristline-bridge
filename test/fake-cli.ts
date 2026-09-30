@@ -1,14 +1,15 @@
 // Stands in for `claude` and `codex` in tests: `node test/fake-cli.ts claude|codex <args...>`.
 // Records its argv in $FAKE_ARGV_FILE and its pid in $FAKE_PID_FILE, then behaves per $FAKE_MODE:
 // `ok` prints the output recorded from the real CLIs (Claude Code 2.1.285, codex-cli 0.159.2),
-// `sleep` waits for a signal, `fail` reports a failed run, `garbage` prints something else.
-// `codex delete` only records its argv and exits 0.
+// `sleep` waits for a signal, `late` waits for SIGTERM and only then prints its `thread.started`
+// (codex; a CLI flushing its output while it shuts down), `fail` reports a failed run, `garbage`
+// prints something else. `codex delete` only records its argv and exits 0. The pid file is
+// written last, once the mode's handlers are in place.
 import { writeFileSync } from 'node:fs';
 
 const kind = process.argv[2];
 const args = process.argv.slice(3);
 if (process.env.FAKE_ARGV_FILE) writeFileSync(process.env.FAKE_ARGV_FILE, JSON.stringify(args));
-if (process.env.FAKE_PID_FILE) writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
 const sessionFlag = args.includes('--session-id') ? '--session-id' : '--resume';
 const sessionId = args[args.indexOf(sessionFlag) + 1] ?? 'd1ffcf59-1253-446e-81e1-7444697bafe3';
 if (kind === 'codex' && args[0] === 'delete') process.exit(0);
@@ -45,6 +46,13 @@ switch (process.env.FAKE_MODE) {
   case 'sleep':
     setInterval(() => {}, 1000);
     break;
+  case 'late':
+    setInterval(() => {}, 1000);
+    process.on('SIGTERM', () => {
+      if (kind === 'codex') console.log(JSON.stringify(codexOk[0]));
+      process.exit(0);
+    });
+    break;
   case 'fail':
     if (kind === 'claude') {
       console.log(JSON.stringify({ ...claudeOk, subtype: 'error_during_execution', is_error: true, result: 'The request failed', modelUsage: {} }));
@@ -61,3 +69,4 @@ switch (process.env.FAKE_MODE) {
     if (kind === 'claude') console.log(JSON.stringify(claudeOk));
     else for (const e of codexOk) console.log(JSON.stringify(e));
 }
+if (process.env.FAKE_PID_FILE) writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
