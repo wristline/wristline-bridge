@@ -1,5 +1,11 @@
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
+import { AskRunner, type AskRunnerOptions } from '../src/ask.ts';
 import { Auth, type AuthOptions } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
 import { pageItems } from '../src/jsonl.ts';
@@ -77,9 +83,30 @@ export async function waitFor<T>(get: () => T | undefined, ms = 5000): Promise<T
   }
 }
 
+const FAKE_CLI = fileURLToPath(new URL('./fake-cli.ts', import.meta.url));
+
+/**
+ * An AskRunner whose `claude` and `codex` are test/fake-cli.ts (no real CLI); `fakeEnv` reaches it
+ * (FAKE_MODE, FAKE_ARGV_FILE, FAKE_PID_FILE) and can be changed between asks.
+ */
+export function fakeAskRunner(onEvent: AskRunnerOptions['onEvent'], fakeEnv: Record<string, string>, options: Partial<AskRunnerOptions> = {}): AskRunner {
+  const dir = mkdtempSync(join(tmpdir(), 'wristline-ask-'));
+  return new AskRunner({
+    dir,
+    bins: { claude: 'claude', codex: 'codex' },
+    claudeHome: '/home/u/.claude',
+    codexHome: '/home/u/.codex',
+    ask: { provider: 'claude-code', claudeModel: 'haiku', codexModel: 'gpt-6-astra' },
+    onEvent,
+    spawn: (bin, args, o) => spawn(process.execPath, [FAKE_CLI, bin, ...args], { cwd: o.cwd, env: { ...o.env, ...fakeEnv }, stdio: ['ignore', 'pipe', 'pipe'] }),
+    ...options,
+  });
+}
+
 export interface Bridge {
   hub: BridgeHub;
   auth: Auth;
+  asks: AskRunner;
   server: RunningServer;
   base: string;
   local: string;
@@ -93,11 +120,14 @@ export async function startBridge(
   now = () => Date.parse('2026-09-29T10:00:00Z'),
   waitMs = 60_000,
   save: AuthOptions['save'] = async () => {},
+  asks?: (onEvent: AskRunnerOptions['onEvent']) => AskRunner,
 ): Promise<Bridge> {
   let n = 0;
   const hub = new BridgeHub({ providers: Array.isArray(provider) ? provider : [provider], pending: { now, newId: () => `req-${++n}` } });
   const auth = new Auth({ devices: [], save, now });
   const hookToken = 'hook-token';
+  const onEvent: AskRunnerOptions['onEvent'] = (deviceId, event) => hub.sendToDevice(deviceId, event);
+  const runner = asks ? asks(onEvent) : fakeAskRunner(onEvent, { FAKE_MODE: 'ok' });
   const server = await startServer({
     hub,
     auth,
@@ -106,18 +136,21 @@ export async function startBridge(
     apiPort: 0,
     hookPort: 0,
     onStatusline: () => {},
-    hooks: hookHandlers(hub, waitMs),
+    hooks: hookHandlers(hub, waitMs, (id) => runner.ownsClaudeSession(id)),
+    asks: runner,
   });
   const { token } = await auth.issue('test watch');
   return {
     hub,
     auth,
+    asks: runner,
     server,
     token,
     hookToken,
     base: `http://127.0.0.1:${server.apiPort}`,
     local: `http://127.0.0.1:${server.hookPort}`,
     close: async () => {
+      runner.close();
       hub.close();
       await server.close();
     },

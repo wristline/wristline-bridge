@@ -2,6 +2,7 @@ import { createServer, STATUS_CODES, type IncomingMessage, type Server, type Ser
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
+import type { AskRunner } from './ask.ts';
 import { safeEqual, type Auth } from './auth.ts';
 import type { Device } from './config.ts';
 import type { BridgeHub } from './hub.ts';
@@ -10,6 +11,9 @@ import {
   TEXT_MAX,
   type Answers,
   type ApiError,
+  type AskAccepted,
+  type AskBody,
+  type AskList,
   type BridgeInfo,
   type ErrorCode,
   type Health,
@@ -53,6 +57,7 @@ export interface ServerOptions {
   host?: string;
   onStatusline(body: unknown): void;
   hooks?: ReadonlyMap<string, HookHandler>;
+  asks: AskRunner;
 }
 
 export interface RunningServer {
@@ -162,7 +167,7 @@ function decodeId(segment: string | undefined): string | undefined {
 }
 
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
-  const { hub, auth, bridge } = options;
+  const { hub, auth, bridge, asks } = options;
   const host = options.host ?? '127.0.0.1';
   const wss = new WebSocketServer({ noServer: true, maxPayload: PUBLIC_BODY_MAX });
 
@@ -213,6 +218,28 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (method === 'GET' && path === '/api/sessions') return send(res, 200, { sessions: hub.sessions() } satisfies SessionList);
     if (method === 'GET' && path === '/api/requests') return send(res, 200, { requests: hub.pending.list() } satisfies RequestList);
     if (method === 'GET' && path === '/api/usage') return send(res, 200, { usage: hub.usageList() } satisfies UsageList);
+
+    if (method === 'POST' && path === '/api/ask') {
+      const input = await body(req, res, PUBLIC_BODY_MAX);
+      if (!input) return;
+      const provider = input.provider ?? asks.defaultProvider;
+      const text = str(input.text)?.trim();
+      const model = input.model;
+      if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string')) return fail(res, 400, 'bad_request');
+      if (text.length > TEXT_MAX) return fail(res, 413, 'payload_too_large');
+      const ask: AskBody = { provider, text, ...(model ? { model } : {}) };
+      const started = asks.start(device.id, ask);
+      if (started === 'busy') return fail(res, 409, 'busy');
+      if (started === 'unavailable') return fail(res, 503, 'ask_unavailable');
+      return send(res, 202, { askId: started.id } satisfies AskAccepted);
+    }
+    if (method === 'GET' && path === '/api/asks') return send(res, 200, { asks: asks.list(device.id) } satisfies AskList);
+    const askId = /^\/api\/asks\/([^/]+)$/.exec(path);
+    if (askId && method === 'DELETE') {
+      const id = decodeId(askId[1]);
+      if (id === undefined) return fail(res, 400, 'bad_request');
+      return asks.cancel(device.id, id) ? send(res, 204) : fail(res, 404, 'not_found');
+    }
 
     const session = /^\/api\/sessions\/([^/]+)\/(items|prompt)$/.exec(path);
     if (session) {

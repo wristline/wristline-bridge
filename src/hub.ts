@@ -134,6 +134,12 @@ export class BridgeHub implements Hub {
     this.#broadcast({ type: 'alert', sessionId, alert, ...(text === undefined ? {} : { text }), ...(title === undefined ? {} : { title }) });
   }
 
+  /** To every connection of one device only (a Quick Ask answer is nobody else's business). */
+  sendToDevice(deviceId: string, event: ServerEvent): void {
+    const data = JSON.stringify(event);
+    for (const c of this.#clients) if (c.deviceId === deviceId) this.#sendRaw(c, data);
+  }
+
   // Queries
 
   /** Live sessions only (not ended): needs_input first, then running, then most recent activity. A session two instances list (a copied home) counts once, from the first, as in `resolve`. */

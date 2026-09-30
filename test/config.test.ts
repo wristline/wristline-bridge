@@ -50,6 +50,8 @@ test('invalid values in config.json are ignored, invalid JSON is an error', asyn
   await updateStored(dir, {});
   writeFileSync(join(dir, 'config.json'), JSON.stringify({ apiPort: 'x', historyDays: -1, devices: [{ id: 1 }], bins: { tmux: '/t' } }));
   assert.deepEqual(await readStored(dir), { devices: [], bins: { tmux: '/t' } });
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ ask: { provider: 'gemini', claudeModel: '', codexModel: 3 }, bins: { claude: 1 } }));
+  assert.deepEqual(await readStored(dir), { ask: {}, bins: {} });
   writeFileSync(join(dir, 'config.json'), '{');
   await assert.rejects(readStored(dir), /not valid JSON/);
 });
@@ -96,4 +98,14 @@ test('account lists round-trip through config.json; malformed shapes are dropped
     }),
   );
   assert.deepEqual(await readStored(dir), { extraClaudeHomes: ['/ok'], claudeLogins: { '/ok': [{ at: 't', id: 'i', label: 'l' }] }, codexAccounts: { ok: 'e' } });
+});
+
+test('the ask section and bins.claude round-trip; defaults are claude-code and haiku', async () => {
+  const dir = join(root, 'ask');
+  const stored = { ask: { provider: 'codex' as const, claudeModel: 'sonnet', codexModel: 'gpt-6-astra' }, bins: { claude: '/usr/bin/claude', codex: '/usr/bin/codex' } };
+  await updateStored(dir, stored);
+  assert.deepEqual(await readStored(dir), stored);
+  assert.deepEqual(resolveConfig(await readStored(dir), {}, {}, '/home/u').ask, stored.ask);
+  assert.deepEqual(resolveConfig({}, {}, {}, '/home/u').ask, { provider: 'claude-code', claudeModel: 'haiku' });
+  assert.deepEqual(resolveConfig({ ask: { codexModel: 'm' } }, {}, {}, '/home/u').ask, { provider: 'claude-code', claudeModel: 'haiku', codexModel: 'm' });
 });

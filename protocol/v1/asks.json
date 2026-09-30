@@ -1,0 +1,23 @@
+{
+  "asks": [
+    {
+      "id": "ask-3f6a1c2e-0000-4000-8000-000000000002",
+      "provider": "claude-code",
+      "question": "What is the capital of France?",
+      "status": "error",
+      "durationMs": 0,
+      "error": "cancelled",
+      "createdAt": "2026-09-29T10:00:00.000Z"
+    },
+    {
+      "id": "ask-3f6a1c2e-0000-4000-8000-000000000001",
+      "provider": "claude-code",
+      "question": "Reply with the single word OK",
+      "status": "done",
+      "answer": "OK",
+      "model": "Haiku 4.5",
+      "durationMs": 1389,
+      "createdAt": "2026-09-29T10:00:00.000Z"
+    }
+  ]
+}

@@ -5,8 +5,8 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
-import type { Answers, ClientEvent, Item, Session, Usage } from '../src/protocol.ts';
-import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
+import type { Answers, AskBody, ClientEvent, Item, Session, Usage } from '../src/protocol.ts';
+import { FakeProvider, TestSocket, fakeAskRunner, startBridge, type Bridge } from './helpers.ts';
 
 const DIR = new URL('../protocol/v1/', import.meta.url);
 const UPDATE = process.env.UPDATE_FIXTURES === '1';
@@ -113,9 +113,12 @@ codexProvider.sessions = [codex];
 let permission: Promise<Answers | null>;
 let question: Promise<Answers | null>;
 const terminal = new AbortController();
+const now = (): number => Date.parse('2026-09-29T10:00:00Z');
+/** The fake `claude` only: a Codex ask is `ask_unavailable`. */
+const fakeEnv = { FAKE_MODE: 'ok' };
 
 before(async () => {
-  bridge = await startBridge([provider, codexProvider]);
+  bridge = await startBridge([provider, codexProvider], now, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { bins: { claude: 'claude' }, now }));
   for (const u of claudeUsage) bridge.hub.usage(u);
   bridge.hub.usage(usage);
 });
@@ -303,6 +306,45 @@ test('WebSocket events', async () => {
 
   ws.close();
   other.close();
+});
+
+test('Quick Ask: request, events, list and its errors', async () => {
+  const ws = new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token);
+  await ws.open();
+  await ws.next();
+  const ids = new Map<string, string>();
+  // Ask ids are random; the fixtures show fixed ones.
+  const fixed = (value: unknown): unknown => JSON.parse([...ids].reduce((text, [id, shown]) => text.replaceAll(id, shown), JSON.stringify(value)));
+  const del = (id: string): Promise<Response> => fetch(`${bridge.base}/api/asks/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${bridge.token}` } });
+
+  const ask: AskBody = { provider: 'claude-code', text: 'Reply with the single word OK' };
+  fixture('ask', ask);
+  const accepted = await post('/api/ask', ask);
+  assert.equal(accepted.status, 202);
+  const { askId } = (await accepted.json()) as { askId: string };
+  ids.set(askId, 'ask-3f6a1c2e-0000-4000-8000-000000000001');
+  fixture('ask-accepted', fixed({ askId }));
+  fixture('event-ask-running', fixed(await ws.next()));
+  fixture('event-ask-done', fixed(await ws.next()));
+
+  fakeEnv.FAKE_MODE = 'sleep';
+  const slow = await post('/api/ask', { provider: 'claude-code', text: 'What is the capital of France?' });
+  assert.equal(slow.status, 202);
+  ids.set(((await slow.json()) as { askId: string }).askId, 'ask-3f6a1c2e-0000-4000-8000-000000000002');
+  assert.equal((await ws.next()).type, 'ask');
+  const busy = await post('/api/ask', { provider: 'claude-code', text: 'another' });
+  assert.equal(busy.status, 409);
+  fixture('error-409-ask-busy', await busy.json());
+  assert.equal((await del([...ids.keys()][1] ?? '')).status, 204);
+  fixture('event-ask-error', fixed(await ws.next()));
+  assert.equal((await del('ask-unknown')).status, 404);
+  fakeEnv.FAKE_MODE = 'ok';
+
+  const unavailable = await post('/api/ask', { provider: 'codex', text: 'x' });
+  assert.equal(unavailable.status, 503);
+  fixture('error-503-ask-unavailable', await unavailable.json());
+  fixture('asks', fixed(await (await get('/api/asks')).json()));
+  ws.close();
 });
 
 test('every committed fixture is produced by this test', () => {

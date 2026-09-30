@@ -21,9 +21,10 @@ terminal. It never sends your data anywhere except to the watches you pair with 
 Early development. For Claude Code the watch can follow sessions live, answer permission prompts
 and questions, and send prompts (sessions running in tmux). For Codex it does the same through
 Codex's background app-server (see [Codex](#codex)); without it, Codex sessions are read-only.
-Context and plan usage are shown for both.
+Context and plan usage are shown for both, and either CLI answers one-off questions from the
+watch ([Quick Ask](#quick-ask)).
 
-Verified with Claude Code 2.1.284 and Codex CLI 0.159.0 on Linux (WSL2). Requires Node.js 22 or
+Verified with Claude Code 2.1.285 and Codex CLI 0.159.2 on Linux (WSL2). Requires Node.js 22 or
 newer.
 
 ## Install
@@ -117,6 +118,48 @@ shell command; `/` commands are allowed. Known limitation: the prompt is typed a
 already in the session's input box. If you left half-typed text there, it becomes part of the
 prompt; if you left the input in `!` (shell) mode, the prompt runs as a shell command. Clear the
 input box before walking away.
+
+## Quick Ask
+
+The watch's "Ask" button sends a spoken question to the bridge, which runs the agent CLI on your
+PC once, headless, and returns a short answer (about 80 words, in the language of the question).
+Nothing is added to the session list. `setup` records the `claude` binary in `config.json`
+(`bins.claude`, next to `codex`); without it the watch gets `ask_unavailable`.
+
+What runs, in an empty scratch directory (`~/.config/wristline/ask-cwd`, so no project
+`CLAUDE.md`/`AGENTS.md` applies) with the question passed as an argument (no shell):
+
+```sh
+claude -p --output-format json --model haiku --max-turns 1 --no-session-persistence \
+  --tools "" --permission-prompts none --strict-mcp-config --session-id <uuid> \
+  --append-system-prompt "<answer briefly, in the user's language>" --safe-mode -- "<question>"
+
+codex exec --json -s read-only --skip-git-repo-check --ephemeral -C <scratch dir> \
+  [-m <codexModel>] -- "<instruction + question>"
+```
+
+- **No tools.** Claude Code runs with every tool disabled and permission prompts auto-denied;
+  Codex runs in its read-only sandbox (`codex exec` cannot ask for approval). `--safe-mode` also
+  leaves your hooks, MCP servers and CLAUDE.md out.
+- **No session.** Neither CLI writes session files for the run, so the bridge (and your
+  `claude --resume` picker) never lists it. The bridge chooses the Claude Code session id and
+  ignores any Stop/Notification hook that reports it.
+- **Uses your plan.** Each question is one API turn on the account the CLI is logged into
+  (the primary Claude Code home and `CODEX_HOME`). A Haiku answer cost about $0.03 of plan
+  usage in our test; Codex sends about 15k input tokens (mostly cached).
+- **Limits.** One question at a time per watch (`busy` otherwise), 90 s timeout, answers cut
+  at 4000 characters, the last 20 questions kept in memory until the bridge restarts.
+
+`config.json` defaults, all optional:
+
+```json
+"ask": { "provider": "claude-code", "claudeModel": "haiku", "codexModel": "gpt-6-astra" }
+```
+
+`provider` is used only when a watch names none; the watch chooses per question. `claudeModel`
+is any `--model` value Claude Code accepts (`haiku`, `sonnet`, a full model id). `codexModel`,
+when set, is passed as `-m` and shown on the watch; otherwise Codex uses its own configured model
+and the watch shows none.
 
 ## Codex
 

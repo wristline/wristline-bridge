@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import type { ProviderId } from './protocol.ts';
 import { isNotFound, isObject, num, str, type JsonObject } from './util.ts';
 
 export interface Device {
@@ -12,9 +13,17 @@ export interface Device {
 }
 
 export interface Bins {
+  claude?: string;
   codex?: string;
   tmux?: string;
   tailscale?: string;
+}
+
+/** Quick Ask defaults; `provider` only serves a watch that names none. */
+export interface AskConfig {
+  provider: ProviderId;
+  claudeModel: string;
+  codexModel?: string;
 }
 
 /** A login the bridge saw in a Claude Code home; `at` is when the bridge first observed it (not a file mtime). */
@@ -44,12 +53,14 @@ export interface Config {
   bins: Bins;
   permissionWaitSec: number;
   historyDays: number;
+  ask: AskConfig;
 }
 
 /** What `config.json` holds; every key is optional. */
-export interface StoredConfig extends Partial<Omit<Config, 'claudeHomes' | 'codexHomes'>> {
+export interface StoredConfig extends Partial<Omit<Config, 'claudeHomes' | 'codexHomes' | 'ask'>> {
   extraClaudeHomes?: string[];
   extraCodexHomes?: string[];
+  ask?: Partial<AskConfig>;
 }
 
 /** Values given on the command line; they beat env, config.json and defaults. */
@@ -91,6 +102,7 @@ export function resolveConfig(stored: StoredConfig, flags: Flags = {}, env: Env 
     bins: stored.bins ?? {},
     permissionWaitSec: stored.permissionWaitSec ?? 590,
     historyDays: stored.historyDays ?? 7,
+    ask: { provider: 'claude-code', claudeModel: 'haiku', ...stored.ask },
   };
 }
 
@@ -182,11 +194,20 @@ function pickStored(raw: JsonObject): StoredConfig {
   if (isObject(raw.bins)) {
     const bins = raw.bins;
     const picked: Bins = {};
-    for (const key of ['codex', 'tmux', 'tailscale'] as const) {
+    for (const key of ['claude', 'codex', 'tmux', 'tailscale'] as const) {
       const value = str(bins[key]);
       if (value) picked[key] = value;
     }
     set('bins', picked);
+  }
+  if (isObject(raw.ask)) {
+    const ask: Partial<AskConfig> = {};
+    if (raw.ask.provider === 'claude-code' || raw.ask.provider === 'codex') ask.provider = raw.ask.provider;
+    for (const key of ['claudeModel', 'codexModel'] as const) {
+      const value = str(raw.ask[key]);
+      if (value) ask[key] = value;
+    }
+    set('ask', ask);
   }
   return out;
 }

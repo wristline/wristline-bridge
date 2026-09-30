@@ -1,0 +1,8 @@
+{
+  "type": "ask",
+  "askId": "ask-3f6a1c2e-0000-4000-8000-000000000002",
+  "provider": "claude-code",
+  "status": "error",
+  "durationMs": 0,
+  "error": "cancelled"
+}

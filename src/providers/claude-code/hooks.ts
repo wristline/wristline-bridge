@@ -29,11 +29,13 @@ export interface HookContext {
   waitMs: number;
   /** Aborted when Claude Code drops the hook request. */
   signal: AbortSignal;
+  /** True for a session id that is a Quick Ask run (src/ask.ts), whose hooks must not reach the watch. */
+  isAsk?: (sessionId: string) => boolean;
 }
 
 /** Handlers for the local listener's `/hooks/<name>` routes. */
-export function hookHandlers(hub: HookContext['hub'], waitMs: number): Map<string, HookHandler> {
-  return new Map(HOOK_NAMES.map((name) => [name, (input, signal) => handleHook(name, input, { hub, waitMs, signal })]));
+export function hookHandlers(hub: HookContext['hub'], waitMs: number, isAsk?: HookContext['isAsk']): Map<string, HookHandler> {
+  return new Map(HOOK_NAMES.map((name) => [name, (input, signal) => handleHook(name, input, { hub, waitMs, signal, ...(isAsk ? { isAsk } : {}) })]));
 }
 
 /** Resolves the hook's JSON output, or undefined for "no decision" (an empty 200). */
@@ -183,6 +185,7 @@ export function describeSuggestions(suggestions: unknown[]): string | undefined 
 }
 
 function notification(input: JsonObject, ctx: HookContext): void {
+  if (ctx.isAsk?.(str(input.session_id) ?? '')) return;
   const sessionId = sessionOf(input);
   if (!sessionId || !NEEDS_INPUT.has(str(input.notification_type) ?? '')) return;
   // An open request already told the watch.
@@ -196,6 +199,7 @@ function notification(input: JsonObject, ctx: HookContext): void {
  * answer; otherwise the answer's head, titled by the prompt of a human-typed turn, else the session title.
  */
 async function stop(input: JsonObject, ctx: HookContext): Promise<void> {
+  if (ctx.isAsk?.(str(input.session_id) ?? '')) return;
   const sessionId = sessionOf(input);
   if (!sessionId) return;
   const answer = (str(input.last_assistant_message) ?? '').trim();

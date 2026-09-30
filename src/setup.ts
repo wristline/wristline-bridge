@@ -310,9 +310,11 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
   const stored = await readStored(dir);
   const config = resolveConfig(stored, flags);
   const bins: Bins = {};
+  const claude = await which('claude');
   const codex = await which('codex');
   const tmux = await which('tmux');
   const tailscale = (await executable(WINDOWS_TAILSCALE)) ? WINDOWS_TAILSCALE : await which('tailscale');
+  if (claude) bins.claude = claude;
   if (codex) bins.codex = codex;
   if (tmux) bins.tmux = tmux;
   if (tailscale) bins.tailscale = tailscale;
@@ -329,7 +331,7 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
   const extraClaudeHomes = await proposeHomes('claude-code', detected.claude, config.claudeHomes, stored.extraClaudeHomes ?? [], yes);
   const extraCodexHomes = await proposeHomes('codex', detected.codex, config.codexHomes, stored.extraCodexHomes ?? [], yes);
   console.log('Tools');
-  for (const name of ['codex', 'tmux', 'tailscale'] as const) console.log(`  ${name.padEnd(10)} ${bins[name] ?? 'not found'}`);
+  for (const name of ['claude', 'codex', 'tmux', 'tailscale'] as const) console.log(`  ${name.padEnd(10)} ${bins[name] ?? 'not found'}`);
 
   let publicUrl = config.publicUrl;
   if (!publicUrl && tailscale) {

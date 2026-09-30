@@ -36,7 +36,7 @@ token (and all pairing attempts) then get `429` with `Retry-After`.
 Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the body
 `{"error": <code>}` ([`error-401.json`](../protocol/v1/error-401.json)); codes:
 `unauthorized`, `rate_limited`, `bad_request`, `not_found`, `payload_too_large`, `invalid_code`,
-`already_resolved`, `internal`, and the prompt block codes below.
+`already_resolved`, `internal`, `ask_unavailable`, and the prompt block codes below.
 
 ## Model
 
@@ -87,6 +87,15 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   provider's unlabelled one (a watch sees it go on its next `snapshot`) and ignores later unlabelled
   reports of that provider.
 
+- **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `question` (the watch's
+  text, trimmed), `status` (`running`, `done`, `error`), `createdAt`; when `done`, `answer` (at
+  most 4000 code units) and `model` when known (Claude Code: the model's name for people, e.g.
+  `Haiku 4.5`; Codex: the bridge's configured `codexModel`, absent when unset); when `done` or
+  `error`, `durationMs` (CLI start to exit); when `error`, `error`: `timeout`, `cancelled`,
+  `exit_<code>`, `bad_output` (the CLI's output could not be read), or a short message from the
+  CLI (e.g. Claude Code's result `subtype` such as `error_max_turns`). Clients show unknown
+  codes with a generic message.
+
 All timestamps are ISO 8601 in UTC.
 
 ## REST endpoints (public)
@@ -102,6 +111,9 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
+| `POST /api/ask` `{provider, text, model?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
+| `GET /api/asks` | `200 {asks}`: this device's 20 most recent asks, newest first | `401` | `asks.json` |
+| `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
 | `GET /api/ws` | WebSocket upgrade | `401`, `429` | |
 
 `:sid` is URL-encoded. A session that ended and left the list still serves its items (and
@@ -118,6 +130,21 @@ holds up to `limit` of them, skipping other kinds, and `hasMore` says whether an
 item exists. `before` is still a `seq`, so the next page asks for `before=<smallest seq of this
 page>`. Bridges that predate `kinds` ignore it (here and in `subscribe`) and send every kind.
 
+### Quick Ask
+
+`POST /api/ask` runs the agent CLI once, headless and without tools, for a short answer (Claude
+Code: `claude -p --model haiku …`, Codex: `codex exec -s read-only …`; the exact commands are in
+the README). It is not a session: nothing appears in `GET /api/sessions`, no `session` event is
+sent, and the run leaves no session files (`--no-session-persistence`, `--ephemeral`). Claude
+Code's Stop and Notification hooks for the run are recognised by its session id and never become
+`alert` events. `provider` may be omitted by older clients; the bridge then uses its configured
+default. `model` overrides the bridge's configured model for that ask.
+
+One ask runs per device at a time: a second `POST` while one runs gets `409 busy` (there is no
+queue; cancel or wait). A run is killed after 90 s (`error: timeout`). Asks are kept in memory,
+20 per device, and are gone after a bridge restart. `ask` events go to the asking device only;
+after reconnecting, a watch refreshes `GET /api/asks` (the `snapshot` does not carry asks).
+
 ## WebSocket (`/api/ws`)
 
 Server events (JSON text frames):
@@ -132,6 +159,7 @@ Server events (JSON text frames):
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed | `event-usage.json` |
 | `alert` | `sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) | `event-alert.json` |
+| `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
 Client events:
 

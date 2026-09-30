@@ -3,10 +3,11 @@ import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
 import { accountsAdd, accountsList, accountsRemove, type AccountTarget } from './accounts.ts';
+import { AskRunner } from './ask.ts';
 import { Auth, newToken } from './auth.ts';
 import { configDir, readStored, resolveConfig, updateStored, type Config, type Flags } from './config.ts';
 import { BridgeHub } from './hub.ts';
-import { API_VERSION } from './protocol.ts';
+import { API_VERSION, type ProviderId } from './protocol.ts';
 import { hookHandlers } from './providers/claude-code/hooks.ts';
 import { ClaudeCodeProvider } from './providers/claude-code/provider.ts';
 import { statuslineRouter } from './providers/claude-code/statusline.ts';
@@ -94,6 +95,14 @@ async function run(flags: Flags): Promise<void> {
   );
   const providers = [...claudes, ...codexes];
   const hub = new BridgeHub({ providers });
+  const asks = new AskRunner({
+    dir,
+    bins: config.bins,
+    claudeHome: config.claudeHome,
+    codexHome: config.codexHome,
+    ask: config.ask,
+    onEvent: (deviceId, event) => hub.sendToDevice(deviceId, event),
+  });
   const auth = new Auth({
     devices: config.devices,
     save: async (devices) => {
@@ -115,7 +124,8 @@ async function run(flags: Flags): Promise<void> {
     apiPort: config.apiPort,
     hookPort: config.hookPort,
     onStatusline: statuslineRouter(claudes),
-    hooks: hookHandlers(hub, config.permissionWaitSec * 1000),
+    hooks: hookHandlers(hub, config.permissionWaitSec * 1000, (id) => asks.ownsClaudeSession(id)),
+    asks,
   }).catch((err: unknown) => {
     for (const p of providers) p.stop();
     hub.close();
@@ -131,9 +141,14 @@ async function run(flags: Flags): Promise<void> {
     console.log(`  ${h.id.padEnd(11)} ${p.home}  ${h.status === 'ok' ? `${p.listSessions().length} sessions` : 'not found'}${h.version ? ` (v${h.version})` : ''}`);
     if (h.detail) console.log(`              ${h.detail}`);
   }
+  const mark = (provider: ProviderId): string => (config.ask.provider === provider ? ' (default)' : '');
+  const claudeAsk = config.bins.claude ? config.ask.claudeModel : 'not found';
+  const codexAsk = config.bins.codex ? (config.ask.codexModel ?? 'default model') : 'not found';
+  console.log(`  ask         claude ${claudeAsk}${mark('claude-code')} / codex ${codexAsk}${mark('codex')}`);
   console.log(`  ${config.devices.length} paired device(s); run \`wristline-bridge pair\` to add one`);
 
   const shutdown = (): void => {
+    asks.close();
     for (const p of providers) p.stop();
     hub.close();
     void server.close().then(() => process.exit(0));

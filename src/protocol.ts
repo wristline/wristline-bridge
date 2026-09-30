@@ -12,7 +12,7 @@ export const DETAIL_MAX = 600;
 
 export type ProviderId = 'claude-code' | 'codex';
 export type SessionStatus = 'running' | 'idle' | 'needs_input' | 'ended';
-/** `unsafe_prefix` is only ever a prompt error (409), never a session's `promptBlock`. */
+/** `unsafe_prefix` is only ever a prompt error (409), never a session's `promptBlock`. `busy` is also the 409 of `POST /api/ask`. */
 export type PromptBlock = 'not_live' | 'no_tmux' | 'awaiting_input' | 'busy' | 'unsupported' | 'unsafe_prefix';
 
 export interface Account {
@@ -112,6 +112,28 @@ export interface Usage {
 export type ResolvedBy = 'watch' | 'terminal' | 'timeout';
 export type AlertKind = 'needs_input' | 'done';
 
+export type AskStatus = 'running' | 'done' | 'error';
+
+/** A Quick Ask: one headless, tool-less run of the agent CLI for a short answer. Kept in memory per device; never a session. */
+export interface Ask {
+  /** `ask-<uuid>` */
+  id: string;
+  provider: ProviderId;
+  /** The watch's text, trimmed. */
+  question: string;
+  status: AskStatus;
+  /** When `done`; at most TEXT_MAX code units. */
+  answer?: string;
+  /** When `done`. Claude Code: the model's name for people (e.g. `Haiku 4.5`); Codex: the configured `codexModel`, absent when unset. */
+  model?: string;
+  /** When `done` or `error`: child start to exit. */
+  durationMs?: number;
+  /** When `error`: `timeout`, `cancelled`, `exit_<code>`, `bad_output`, or a short message from the CLI. */
+  error?: string;
+  /** ISO 8601 */
+  createdAt: string;
+}
+
 export type ServerEvent =
   | { type: 'snapshot'; apiVersion: typeof API_VERSION; sessions: Session[]; requests: PendingRequest[]; usage: Usage[] }
   | { type: 'session'; session: Session }
@@ -120,7 +142,9 @@ export type ServerEvent =
   | { type: 'request'; request: PendingRequest }
   | { type: 'resolved'; requestId: string; by: ResolvedBy }
   | { type: 'usage'; usage: Usage }
-  | { type: 'alert'; sessionId: string; alert: AlertKind; text?: string; title?: string };
+  | { type: 'alert'; sessionId: string; alert: AlertKind; text?: string; title?: string }
+  /** Sent to the asking device only; `text` is the answer. `running` once after the 202, then `done` or `error` once. */
+  | { type: 'ask'; askId: string; provider: ProviderId; status: AskStatus; text?: string; model?: string; durationMs?: number; error?: string };
 
 /** `kinds`, when present, limits the subscription's `item` events to those kinds. */
 export type ClientEvent = { type: 'subscribe'; sessionId: string | null; kinds?: ItemKind[] };
@@ -185,6 +209,21 @@ export interface UsageList {
   usage: Usage[];
 }
 
+export interface AskBody {
+  provider: ProviderId;
+  text: string;
+  /** Overrides the bridge's configured model for this ask. */
+  model?: string;
+}
+
+export interface AskAccepted {
+  askId: string;
+}
+
+export interface AskList {
+  asks: Ask[];
+}
+
 export type ErrorCode =
   | 'unauthorized'
   | 'rate_limited'
@@ -194,6 +233,7 @@ export type ErrorCode =
   | 'invalid_code'
   | 'already_resolved'
   | 'internal'
+  | 'ask_unavailable'
   | PromptBlock;
 
 export interface ApiError {
