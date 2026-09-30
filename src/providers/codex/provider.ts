@@ -60,6 +60,8 @@ export interface CodexOptions extends AccountsOptions {
   isAsk?: (nativeId: string) => boolean;
   /** The Quick Ask scratch directory (resolved): a rollout made there is an ask's even before `isAsk` knows its id. */
   askCwd?: string;
+  /** Default NEEDS_INPUT_DELAY_MS; tests shorten it. */
+  needsInputDelayMs?: number;
 }
 
 /**
@@ -76,6 +78,7 @@ export class CodexProvider implements SessionProvider {
   readonly #accounts: CodexAccounts;
   readonly #isAsk: (nativeId: string) => boolean;
   readonly #askCwd: string | undefined;
+  readonly #needsInputDelayMs: number;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   /** First lines of rollouts seen, by path; a rollout's first line never changes. */
@@ -117,6 +120,7 @@ export class CodexProvider implements SessionProvider {
     this.#accounts = new CodexAccounts(options);
     this.#isAsk = options.isAsk ?? (() => false);
     this.#askCwd = options.askCwd;
+    this.#needsInputDelayMs = options.needsInputDelayMs ?? NEEDS_INPUT_DELAY_MS;
   }
 
   async start(hub: Hub): Promise<void> {
@@ -517,7 +521,7 @@ export class CodexProvider implements SessionProvider {
       const session = this.#sessions.get(loaded?.parent ?? threadId);
       if (!session || !awaitsApproval(loaded?.status) || this.#hub?.pending.hasSession(session.id)) return;
       this.#hub?.alert(session.id, 'needs_input');
-    }, NEEDS_INPUT_DELAY_MS);
+    }, this.#needsInputDelayMs);
     this.#waiting.set(threadId, timer);
   }
 

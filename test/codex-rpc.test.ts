@@ -629,7 +629,7 @@ test('codex provider: a completed turn raises done by the Stop hook rule; an app
   writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id: named, thread_name: 'Named thread' })}\n`);
   const idle = { status: { type: 'idle' } };
   const { rpc, log } = fakeRpc('alerts', { loaded: [named, other, sub, ask], threads: { [named]: idle, [other]: idle, [sub]: { ...idle, parentThreadId: named }, [ask]: idle } });
-  const provider = new CodexProvider({ home, historyDays: 3650, rpc, isAsk: (id) => id === ask });
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, isAsk: (id) => id === ask, needsInputDelayMs: 100 });
   const hub = recordingHub();
   t.after(() => provider.stop());
   const up = ready(rpc);
@@ -664,21 +664,33 @@ test('codex provider: a completed turn raises done by the Stop hook rule; an app
   ]);
 
   // Waiting on an approval: the request that follows the status is the notification; without one, needs_input.
+  // Each thread's wait starts a timer of the same length, so they fire in the order the waits began:
+  // once the last one has alerted, the earlier ones have had their say.
   hub.alerts.length = 0;
   const waiting = { type: 'active', activeFlags: ['waitingOnApproval'] };
-  await notify('thread/status/changed', { threadId: named, status: waiting });
-  await rpc.request('fake/request', { method: 'item/commandExecution/requestApproval', params: { threadId: named, turnId: 't9', itemId: 'i9', command: 'ls' } });
-  await notify('thread/status/changed', { threadId: other, status: waiting });
+  const working = { type: 'active', activeFlags: [] };
+  const [, { id: approval }] = (await Promise.all([
+    notify('thread/status/changed', { threadId: named, status: waiting }),
+    rpc.request('fake/request', { method: 'item/commandExecution/requestApproval', params: { threadId: named, turnId: 't9', itemId: 'i9', command: 'ls' } }),
+  ])) as [unknown, { id: number }];
   // A sub-agent that waits shows on its parent, which already has a request open.
   await notify('thread/status/changed', { threadId: sub, status: waiting });
-  await new Promise((r) => setTimeout(r, 1300));
+  await notify('thread/status/changed', { threadId: other, status: waiting });
+  await waitFor(() => hub.alerts.length > 0);
   assert.deepEqual(hub.alerts, [[`codex:${other}`, 'needs_input', undefined, undefined]]);
   assert.equal(hub.pending.list().length, 1);
 
-  // Answered in the terminal within the delay: no alert.
-  await notify('thread/status/changed', { threadId: other, status: { type: 'active', activeFlags: [] } });
-  await notify('thread/status/changed', { threadId: other, status: waiting });
-  await notify('thread/status/changed', { threadId: other, status: { type: 'active', activeFlags: [] } });
-  await new Promise((r) => setTimeout(r, 1300));
-  assert.equal(hub.alerts.length, 1);
+  // Answered in the terminal within the delay: no alert. Then, with the parent's request answered,
+  // a sub-agent that waits raises needs_input on its parent.
+  await notify('serverRequest/resolved', { threadId: named, requestId: approval });
+  await waitFor(() => hub.pending.list().length === 0);
+  await Promise.all([
+    notify('thread/status/changed', { threadId: other, status: working }),
+    notify('thread/status/changed', { threadId: other, status: waiting }),
+    notify('thread/status/changed', { threadId: other, status: working }),
+  ]);
+  await notify('thread/status/changed', { threadId: sub, status: working });
+  await notify('thread/status/changed', { threadId: sub, status: waiting });
+  await waitFor(() => hub.alerts.length > 1);
+  assert.deepEqual(hub.alerts.slice(1), [[`codex:${named}`, 'needs_input', undefined, undefined]]);
 });
