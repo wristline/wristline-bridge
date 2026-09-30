@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { PendingRegistry } from '../src/pending.ts';
-import type { PendingRequest, Session, Usage } from '../src/protocol.ts';
+import type { Item, PendingRequest, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub } from '../src/provider.ts';
 import { codexAsk } from '../src/providers/codex/ask.ts';
 import { CodexProvider } from '../src/providers/codex/provider.ts';
@@ -14,22 +14,56 @@ const root = mkdtempSync(join(tmpdir(), 'wristline-codex-rpc-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const FAKE = new URL('./fake-codex-proxy.ts', import.meta.url).pathname;
 
-function fakeRpc(name: string, state: unknown): { rpc: CodexRpc; log: () => Record<string, unknown>[] } {
-  const logFile = join(root, `${name}.log`);
+interface Fake {
+  rpc: CodexRpc;
+  home: string;
+  log: () => Record<string, unknown>[];
+  /** Pids of every proxy started, in order. */
+  pids: () => number[];
+  /** Points the control socket symlink at `daemon` (a file standing in for the daemon's socket), or removes it. */
+  daemon: (name: string | undefined) => void;
+}
+
+/** A Codex home whose control socket links to a stand-in file (`daemon('d1')`), plus an rpc that runs the fake proxy. */
+function fakeRpc(name: string, state: unknown, options: { retryMs?: number; socket?: boolean } = {}): Fake {
+  const home = join(root, name);
+  mkdirSync(join(home, 'app-server-control'), { recursive: true });
+  const socket = join(home, 'app-server-control', 'app-server-control.sock');
+  const daemon = (target: string | undefined): void => {
+    if (existsSync(socket)) unlinkSync(socket);
+    if (!target) return;
+    writeFileSync(join(home, target), '');
+    symlinkSync(join(home, target), socket);
+  };
+  if (options.socket !== false) daemon('d1');
+  const logFile = join(home, 'proxy.log');
+  const pidFile = join(home, 'proxy.pids');
   const rpc = new CodexRpc({
-    codexHome: root,
+    codexHome: home,
     clientVersion: '0.1.0',
-    command: { file: process.execPath, args: [FAKE, JSON.stringify(state), logFile] },
-    backoffMs: { min: 20, max: 80 },
+    command: { file: process.execPath, args: [FAKE, JSON.stringify(state), logFile, pidFile] },
+    retryMs: options.retryMs ?? 50,
   });
-  const log = (): Record<string, unknown>[] =>
-    existsSync(logFile)
-      ? readFileSync(logFile, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .map((l) => JSON.parse(l) as Record<string, unknown>)
-      : [];
-  return { rpc, log };
+  const read = (path: string): string[] => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : []);
+  return { rpc, home, log: () => read(logFile).map((l) => JSON.parse(l) as Record<string, unknown>), pids: () => read(pidFile).map(Number), daemon };
+}
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Captures `wristline: codex ...` connection log lines. */
+function captureLog(t: { after: (fn: () => void) => void }): string[] {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => void lines.push(args.map(String).join(' '));
+  t.after(() => void (console.log = original));
+  return lines;
 }
 
 async function waitFor<T>(get: () => T | undefined | false, ms = 5000): Promise<T> {
@@ -56,7 +90,7 @@ test('rpc: handshake, requests, errors, notifications and server requests over t
     return request.method === 'item/commandExecution/requestApproval' ? Promise.resolve({ decision: 'accept' }) : undefined;
   });
   const up = ready(rpc);
-  rpc.start();
+  await rpc.start();
   await up;
   assert.equal(rpc.ready, true);
   assert.equal(rpc.detail, 'app-server connected');
@@ -87,35 +121,98 @@ test('rpc: handshake, requests, errors, notifications and server requests over t
   assert.deepEqual(answers, [{ id: 0, result: { decision: 'accept' } }], 'only the handled request is answered');
 });
 
-test('rpc: reconnects with backoff and handshakes again after the proxy exits', async (t) => {
-  const { rpc, log } = fakeRpc('reconnect', {});
+test('rpc: retries after the proxy exits, handshakes again, and leaves no proxy behind', async (t) => {
+  const { rpc, log, pids } = fakeRpc('reconnect', {});
   t.after(() => rpc.stop());
+  const lines = captureLog(t);
   let closed = 0;
   rpc.on('closed', () => closed++);
   let up = ready(rpc);
-  rpc.start();
+  await rpc.start();
   await up;
   up = ready(rpc);
   await assert.rejects(rpc.request('fake/exit'), /closed/);
   assert.equal(rpc.ready, false);
+  assert.equal(rpc.detail, 'app-server reconnecting (connection lost); read-only');
   await assert.rejects(rpc.request('thread/loaded/list'), /not connected/);
   await up;
   assert.equal(closed, 1);
   assert.equal(log().filter((m) => m.method === 'initialize').length, 2);
   assert.deepEqual(await rpc.request('thread/loaded/list'), { data: [], nextCursor: null });
+  await waitFor(() => pids().length === 2 && !alive(pids()[0] ?? 0));
+  assert.deepEqual(pids().map(alive), [false, true], 'only the current proxy runs');
+  assert.deepEqual(lines, [
+    'wristline: codex app-server connected',
+    'wristline: codex app-server reconnecting (connection lost); read-only',
+    'wristline: codex app-server connected',
+  ]);
 });
 
-test('rpc: without the daemon socket it stays read-only and spawns nothing', async (t) => {
-  const home = join(root, 'no-daemon');
-  mkdirSync(home);
-  const rpc = new CodexRpc({ codexHome: home, bin: join(root, 'no-such-codex'), clientVersion: '0.1.0', backoffMs: { min: 20, max: 40 } });
+test('rpc: without the daemon socket it retries, spawns nothing, logs once, and connects as soon as the socket appears', async (t) => {
+  // A retry interval far beyond the test: only the socket watch can connect it in time.
+  const { rpc, pids, daemon } = fakeRpc('no-daemon', {}, { socket: false, retryMs: 60_000 });
   t.after(() => rpc.stop());
-  rpc.start();
-  // A spawn attempt would report "codex CLI not found".
-  await waitFor(() => rpc.detail === 'app-server not running; read-only');
-  await new Promise((r) => setTimeout(r, 100));
-  assert.equal(rpc.detail, 'app-server not running; read-only');
+  const lines = captureLog(t);
+  await rpc.start();
+  assert.equal(rpc.detail, 'app-server reconnecting (not running); read-only');
+  await new Promise((r) => setTimeout(r, 150));
+  assert.deepEqual(pids(), [], 'no proxy without a socket');
   assert.equal(rpc.ready, false);
+  const up = ready(rpc);
+  daemon('d1');
+  await up;
+  assert.equal(rpc.detail, 'app-server connected');
+  assert.deepEqual(lines, ['wristline: codex app-server reconnecting (not running); read-only', 'wristline: codex app-server connected']);
+
+  // The daemon goes away with its socket: one log line, and nothing spawned without a socket.
+  daemon(undefined);
+  await assert.rejects(rpc.request('fake/exit'));
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(rpc.detail, 'app-server reconnecting (connection lost); read-only');
+  assert.equal(lines.length, 3);
+  assert.equal(pids().length, 1);
+});
+
+test('rpc: repeated retries without a socket log nothing further', async (t) => {
+  const { rpc, pids } = fakeRpc('quiet', {}, { socket: false, retryMs: 20 });
+  t.after(() => rpc.stop());
+  const lines = captureLog(t);
+  await rpc.start();
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(lines, ['wristline: codex app-server reconnecting (not running); read-only']);
+  assert.deepEqual(pids(), []);
+});
+
+test('rpc: a replaced socket reconnects at once through a single new proxy', async (t) => {
+  const { rpc, log, pids, daemon } = fakeRpc('replaced', {}, { retryMs: 60_000 });
+  t.after(() => rpc.stop());
+  let up = ready(rpc);
+  await rpc.start();
+  await up;
+  const [first] = pids();
+  up = ready(rpc);
+  daemon('d2');
+  await up;
+  await waitFor(() => pids().length === 2 && !alive(first ?? 0));
+  assert.deepEqual(pids().map(alive), [false, true]);
+  assert.equal(log().filter((m) => m.method === 'initialize').length, 2);
+  assert.deepEqual(await rpc.request('thread/loaded/list'), { data: [], nextCursor: null });
+  assert.equal(rpc.detail, 'app-server connected');
+});
+
+test('rpc: a missing codex binary is reported and retried without piling up', async (t) => {
+  const home = join(root, 'no-binary');
+  mkdirSync(join(home, 'app-server-control'), { recursive: true });
+  writeFileSync(join(home, 'd1'), '');
+  symlinkSync(join(home, 'd1'), join(home, 'app-server-control', 'app-server-control.sock'));
+  const rpc = new CodexRpc({ codexHome: home, bin: join(root, 'no-such-codex'), clientVersion: '0.1.0', retryMs: 30 });
+  t.after(() => rpc.stop());
+  const lines = captureLog(t);
+  await rpc.start();
+  await waitFor(() => rpc.detail === 'app-server reconnecting (codex CLI not found); read-only');
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(rpc.ready, false);
+  assert.deepEqual(lines, ['wristline: codex app-server reconnecting (codex CLI not found); read-only']);
 });
 
 test('codexAsk: decisions follow availableDecisions; questions map to labels', () => {
@@ -414,4 +511,106 @@ test('codex provider: a failed rate-limit read is retried on the next update, th
     [B, 'b2b2b2b2', [['primary', 50]]],
     [B, 'b2b2b2b2', [['primary', 50], ['secondary', 40]]],
   ]);
+});
+
+/** Rollout lines of `turns` (prompt and reply per turn) with ordinals from `first`; a `base` makes it a rewind segment. */
+function rollout(id: string, first: number, effort: string, turns: [string, string][], base?: { threadId: string; endOrdinal: number; endByteOffset: number }): string[] {
+  const meta: Record<string, unknown> = { id, cwd: '/w', cli_version: '0.159.2', history_mode: 'paginated' };
+  if (base) meta.history_base = { thread_id: base.threadId, end_ordinal_exclusive: base.endOrdinal, end_byte_offset: base.endByteOffset };
+  const records: unknown[] = [
+    { type: 'session_meta', payload: meta },
+    { type: 'turn_context', payload: { cwd: '/w', model: 'gpt-6-astra', effort } },
+  ];
+  turns.forEach(([prompt, reply], i) => {
+    const turn = `turn-${first}-${i}`;
+    const item = (item: unknown): unknown => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: id, turn_id: turn, item } });
+    records.push(
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: turn } },
+      item({ type: 'UserMessage', id: `${turn}-user`, content: [{ type: 'text', text: prompt }] }),
+      item({ type: 'AgentMessage', id: `${turn}-reply`, content: [{ type: 'Text', text: reply }] }),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn } },
+    );
+  });
+  return records.map((r, i) => `${JSON.stringify({ timestamp: '2026-09-29T09:00:00.000Z', ordinal: first + i, ...(r as object) })}\n`);
+}
+
+test('codex provider: a rewound thread stays one session under its thread id, with the kept history and the new segment', async (t) => {
+  const home = join(root, 'codex-rewind');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const thread = '019a0000-0000-7000-8000-000000000010';
+  const segment = '019a0000-0000-7000-8000-000000000011';
+  const origin = rollout(thread, 0, 'medium', [['first prompt', 'reply one'], ['second prompt', 'reply two']]);
+  const originPath = join(day, `rollout-2026-09-29T09-00-00-${thread}.jsonl`);
+  writeFileSync(originPath, origin.join(''));
+  writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id: thread, thread_name: 'Named thread' })}\n`);
+  const { rpc, log } = fakeRpc('rewind', { loaded: [thread], threads: { [thread]: { status: { type: 'idle' }, model: null } } });
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc });
+  const hub = recordingHub();
+  const published: string[] = [];
+  hub.session = (s) => void published.push(s.id);
+  t.after(() => provider.stop());
+  const up = ready(rpc);
+  await provider.start(hub);
+  await up;
+  const texts = async (): Promise<string[]> => ((await provider.readItems(thread, undefined, 10))?.items ?? []).map((i) => i.text);
+  assert.deepEqual(await texts(), ['first prompt', 'reply one', 'second prompt', 'reply two']);
+  const seen: Item[] = [];
+  t.after(provider.watch(thread, (item) => seen.push(item)));
+
+  // The rewind keeps turn 1 (lines 0-5) and goes on in a new file that carries the thread id and a segment id.
+  const cut = origin.slice(0, 6);
+  const rewound = rollout(thread, cut.length, 'high', [['third prompt', 'reply three']], { threadId: thread, endOrdinal: cut.length, endByteOffset: Buffer.byteLength(cut.join('')) });
+  const segmentPath = join(day, `rollout-2026-09-29T09-30-00-${thread}_${segment}.jsonl`);
+  writeFileSync(segmentPath, rewound.join(''));
+  const later = new Date(Math.ceil(Date.now() / 1000) * 1000 + 5000); // Whole seconds: mtimeMs is a float.
+  utimesSync(segmentPath, later, later);
+  await rpc.request('fake/notify', { method: 'thread/reverted', params: { threadId: thread } });
+  const session = await waitFor(() => provider.listSessions().find((s) => s.lastActivity === later.toISOString()));
+  assert.equal(session.id, `codex:${thread}`);
+  assert.equal(provider.listSessions().length, 1, 'the segment is not a session of its own');
+  assert.ok(!published.includes(`codex:${segment}`));
+  assert.deepEqual([session.title, session.effort, session.promptBlock], ['Named thread', 'high', undefined]);
+  assert.deepEqual(await texts(), ['first prompt', 'reply one', 'third prompt', 'reply three']);
+  await waitFor(() => seen.some((i) => i.text === 'reply three'));
+  assert.deepEqual(seen.map((i) => [i.seq, i.text]), [[1, 'first prompt'], [2, 'reply one'], [3, 'third prompt'], [4, 'reply three']]);
+
+  // Prompts and live items address the thread id the daemon knows.
+  await provider.sendPrompt(thread, 'go on');
+  assert.equal((log().find((m) => m.method === 'turn/start')?.params as { threadId: string }).threadId, thread);
+  await rpc.request('fake/notify', { method: 'item/completed', params: { threadId: thread, turnId: 't', item: { type: 'agentMessage', id: 'live-1', text: 'live reply' } } });
+  await waitFor(() => seen.some((i) => i.text === 'live reply'));
+  assert.equal(seen.at(-1)?.seq, 5);
+
+  // A restart sees both files and still lists the thread once, from the segment.
+  provider.stop();
+  const again = new CodexProvider({ home, historyDays: 3650 });
+  await again.start(recordingHub());
+  t.after(() => again.stop());
+  assert.deepEqual(again.listSessions().map((s) => [s.id, s.title, s.effort]), [[`codex:${thread}`, 'Named thread', 'high']]);
+  assert.deepEqual(((await again.readItems(thread, undefined, 10))?.items ?? []).map((i) => i.text), ['first prompt', 'reply one', 'third prompt', 'reply three']);
+});
+
+test('codex provider: a thread forked from another keeps that history and, unnamed, its title', async (t) => {
+  const home = join(root, 'codex-fork');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const origin = '019a0000-0000-7000-8000-000000000020';
+  const fork = '019a0000-0000-7000-8000-000000000021';
+  const lines = rollout(origin, 0, 'medium', [['first prompt', 'reply one'], ['second prompt', 'reply two']]);
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${origin}.jsonl`), lines.join(''));
+  const cut = lines.slice(0, 6);
+  const forked = rollout(fork, cut.length, 'low', [['forked prompt', 'forked reply']], { threadId: origin, endOrdinal: cut.length, endByteOffset: Buffer.byteLength(cut.join('')) });
+  writeFileSync(join(day, `rollout-2026-09-29T09-30-00-${fork}.jsonl`), forked.join(''));
+  writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id: origin, thread_name: 'Origin name' })}\n`);
+  const provider = new CodexProvider({ home, historyDays: 3650 });
+  await provider.start(recordingHub());
+  t.after(() => provider.stop());
+  const brief = provider.listSessions().map((s) => [s.id, s.title, s.effort]).sort();
+  assert.deepEqual(brief, [
+    [`codex:${origin}`, 'Origin name', 'medium'],
+    [`codex:${fork}`, 'Origin name', 'low'],
+  ]);
+  assert.deepEqual(((await provider.readItems(fork, undefined, 10))?.items ?? []).map((i) => i.text), ['first prompt', 'reply one', 'forked prompt', 'forked reply']);
+  assert.deepEqual(((await provider.readItems(origin, undefined, 10))?.items ?? []).map((i) => i.text), ['first prompt', 'reply one', 'second prompt', 'reply two']);
 });

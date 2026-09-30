@@ -275,8 +275,10 @@ export class CodexMetaScan implements LineHandler {
       if (rec?.type !== 'turn_context' || !isObject(rec.payload)) return;
       this.model = str(rec.payload.model);
       this.effort = str(rec.payload.effort);
-    } else if (this.id === undefined && line.includes('"type":"session_meta"')) {
-      const payload = parseJson(line)?.payload;
+    } else if (line.includes('"type":"session_meta"')) {
+      // A rewound thread's file starts with its base's lines; the last session_meta is its own.
+      const rec = parseJson(line);
+      const payload = rec?.type === 'session_meta' ? rec.payload : undefined;
       if (!isObject(payload)) return;
       this.id = str(payload.id);
       this.cwd = str(payload.cwd);

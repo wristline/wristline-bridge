@@ -125,8 +125,10 @@ the Codex **app-server daemon**, the shared background server that `codex` start
 (`daemon_auto_start`). The bridge connects to its control socket
 (`$CODEX_HOME/app-server-control/app-server-control.sock`) through `codex app-server proxy`,
 which needs no extra setup. `GET /api/health` (and the `run` banner) shows the connection in
-the Codex provider's `detail`; while the daemon is not running the bridge stays read-only and
-looks again every 30 s.
+the Codex provider's `detail`, and the log gets a line whenever it changes (`app-server
+connected`, `app-server reconnecting (...)`). While the daemon is not running the bridge stays
+read-only, looks again every 15 s, and connects at once when the daemon (re)creates its control
+socket — e.g. after a reboot, where the socket appears only when the first `codex` starts.
 
 For threads the daemon has loaded — a `codex` TUI in daemon mode, or other clients of the daemon:
 
@@ -151,6 +153,15 @@ Limits:
 - The daemon keeps a thread loaded after its TUI exits; prompts sent then run in the daemon
   without a terminal showing them.
 - Free-text and secret questions are answered in the terminal only.
+
+Rewinds (`thread/revert`, "rewind" in the TUI) keep the thread id but continue it in a new
+rollout file (`rollout-<time>-<thread id>_<segment id>.jsonl`) whose `session_meta.history_base`
+names the kept prefix of the earlier file. The bridge lists such a thread once, under its thread
+id, from its newest file; the watch sees the kept history followed by the new turns, and prompts
+and approvals keep working because the daemon knows the thread by that id. The same
+`history_base` link on a thread with a new id (a fork) prepends the origin's kept history and,
+until the fork is named, reuses the origin's title; the origin stays listed as its own thread.
+Without a `history_base` link a rollout is a thread of its own.
 
 ## Accounts
 

@@ -243,6 +243,35 @@ Bridge built from this commit (`dist/cli.js run`, separate `XDG_CONFIG_HOME`, po
 - After the TUI was killed, the daemon still listed the thread in `thread/loaded/list` — a
   loaded thread may have no terminal attached (README: limits).
 
+## Codex rewind and daemon restart (2026-09-30)
+
+**Setup.** Codex CLI 0.159.2, the user's own `CODEX_HOME=~/.codex-wsl`, a TUI in daemon mode
+that had rewound a thread (`thread/revert`), and a bridge that had been started ~2.5 h before the
+daemon (after a WSL restart, where `/tmp` — and with it the socket the control symlink points to —
+is gone).
+
+- **Rewind keeps the thread id and starts a new file.** The new rollout is
+  `rollout-<time>-<thread id>_<segment id>.jsonl`; its `session_meta` carries the same `id` and
+  `history_base: {thread_id, end_ordinal_exclusive, end_byte_offset}` naming the kept prefix of
+  the earlier file (the offset is exactly the byte length of the kept lines; ordinals continue
+  across the two files). The earlier file gets no further writes. The segment id is not a thread:
+  `thread/loaded/list` and `session_index.jsonl` know only the thread id, `thread/read` of the
+  segment id resolves by filename to the thread, and Codex's own `thread/list` shows the thread
+  twice (both files). `thread/fork` is a different operation (new id, `forkedFromId`).
+- The bridge's filename regex captured the **last** UUID, so the segment was listed as a second,
+  uncontrollable session (`unsupported`: the daemon never loads that id) while the thread's real
+  session pointed at the dead file. **Decision:** key rollouts by the first UUID, follow the
+  newest file per thread, replay the `history_base` prefix chain before it (`JsonlHead`), and
+  rebase an open transcript when the file changes; `thread/reverted` triggers a refresh.
+- **The daemon socket appears late after a reboot.** Nothing starts the managed daemon at boot;
+  the first daemon-mode `codex` does, and the control symlink's target in `/tmp` reappears then.
+  The old client retried with a 1–30 s backoff and did reconnect, but the only connection-state
+  text in the journal was the startup banner (`app-server not connected`). **Decision:** a fixed
+  15 s retry plus an `fs.watch` on the control directory (the socket's inode identity decides,
+  since the `/tmp` path is a stable hash), a log line on every state change, `detail` =
+  `app-server reconnecting (...)` while retrying, and the old proxy child is killed before a new
+  one is spawned.
+
 ## Claude Code plan-limit windows (2026-09-30)
 
 **Setup.** Claude Code 2.1.285, the user's own sessions relaying their statusLine every 10 s. A

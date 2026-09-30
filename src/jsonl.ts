@@ -14,21 +14,32 @@ export interface LineHandler {
   reset(): void;
 }
 
+/** A finished file whose lines precede those of a tailed file; only bytes before `end` count. */
+export interface JsonlHead {
+  path: string;
+  end: number;
+}
+
 /**
  * Incremental reader of an append-only JSONL file. Lines are split on the `\n` byte before
  * decoding, so a multibyte UTF-8 character cut by a read boundary stays intact in the carry.
+ * `head` files are read once, in order, before the first byte of the tailed file (and again
+ * whenever it is read from the start).
  */
 export class JsonlTail {
   readonly path: string;
   readonly #handler: LineHandler;
+  readonly #head: readonly JsonlHead[];
+  #headRead = false;
   #offset = 0;
   #ino: number | undefined;
   #carry: Buffer = EMPTY;
   #queue: Promise<boolean> = Promise.resolve(false);
 
-  constructor(path: string, handler: LineHandler) {
+  constructor(path: string, handler: LineHandler, head: readonly JsonlHead[] = []) {
     this.path = path;
     this.#handler = handler;
+    this.#head = head;
   }
 
   /** Consumes bytes appended since the last call; calls are serialized. Resolves true if anything changed. */
@@ -55,10 +66,18 @@ export class JsonlTail {
       if (size < this.#offset || (this.#ino !== undefined && ino !== this.#ino)) {
         this.#offset = 0;
         this.#carry = EMPTY;
+        this.#headRead = false;
         this.#handler.reset();
         changed = true;
       }
       this.#ino = ino;
+      if (!this.#headRead) {
+        this.#headRead = true;
+        for (const head of this.#head) {
+          await this.#readHead(head);
+          changed = true;
+        }
+      }
       while (this.#offset < size) {
         const length = Math.min(CHUNK_BYTES, size - this.#offset);
         const chunk = Buffer.allocUnsafe(length);
@@ -71,6 +90,31 @@ export class JsonlTail {
       return changed;
     } finally {
       await file.close();
+    }
+  }
+
+  async #readHead(head: JsonlHead): Promise<void> {
+    let file;
+    try {
+      file = await open(head.path, 'r');
+    } catch (err) {
+      if (isNotFound(err)) return; // Deleted history: the tailed file still has its own lines.
+      throw err;
+    }
+    try {
+      let offset = 0;
+      while (offset < head.end) {
+        const length = Math.min(CHUNK_BYTES, head.end - offset);
+        const chunk = Buffer.allocUnsafe(length);
+        const { bytesRead } = await file.read(chunk, 0, length, offset);
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+        this.#consume(chunk.subarray(0, bytesRead));
+      }
+    } finally {
+      await file.close();
+      // `end` is a line boundary; anything after the last newline was cut away by the rewind.
+      this.#carry = EMPTY;
     }
   }
 
@@ -190,23 +234,44 @@ export type LineParser = (line: string, sink: ItemSink) => void;
 
 /** One session's items, kept current from its JSONL file while anyone watches it. */
 export class Transcript {
-  readonly #path: string;
-  readonly #tail: JsonlTail;
+  readonly #parse: LineParser;
   readonly #log = new ItemLog();
   readonly #subscribers = new Set<(item: Item) => void>();
+  #path: string;
+  #tail: JsonlTail;
   #unfollow: (() => void) | undefined;
   #loaded = false;
 
-  constructor(path: string, parse: LineParser) {
+  constructor(path: string, parse: LineParser, head: readonly JsonlHead[] = []) {
+    this.#parse = parse;
     this.#path = path;
-    this.#tail = new JsonlTail(path, {
-      line: (line) => parse(line, this.#log),
-      reset: () => this.#log.reset(),
-    });
+    this.#tail = this.#open(path, head);
+  }
+
+  get path(): string {
+    return this.#path;
   }
 
   get watched(): boolean {
     return this.#subscribers.size > 0;
+  }
+
+  /**
+   * Continues from another file (a Codex thread rewound into a new segment). Items are read
+   * again from the start and sent to subscribers with their new `seq`, as after a shrunk file.
+   */
+  rebase(path: string, head: readonly JsonlHead[] = []): void {
+    this.#path = path;
+    this.#tail = this.#open(path, head);
+    this.#log.reset();
+    if (!this.#unfollow) return;
+    this.#unfollow();
+    this.#unfollow = followFile(path, this.#kick);
+    this.#kick();
+  }
+
+  #open(path: string, head: readonly JsonlHead[]): JsonlTail {
+    return new JsonlTail(path, { line: (line) => this.#parse(line, this.#log), reset: () => this.#log.reset() }, head);
   }
 
   async page(before: number | undefined, limit: number, kinds?: ReadonlySet<ItemKind>): Promise<ItemPage> {
@@ -235,14 +300,15 @@ export class Transcript {
     for (const item of this.#log.drain()) for (const fn of this.#subscribers) fn(item);
   }
 
+  readonly #kick = (): void => {
+    this.sync().catch((err: unknown) => console.error(`wristline: reading ${this.#path}:`, err));
+  };
+
   subscribe(onItem: (item: Item) => void): () => void {
     this.#subscribers.add(onItem);
     if (!this.#unfollow) {
-      const kick = (): void => {
-        this.sync().catch((err: unknown) => console.error(`wristline: reading ${this.#path}:`, err));
-      };
-      this.#unfollow = followFile(this.#path, kick);
-      kick();
+      this.#unfollow = followFile(this.#path, this.#kick);
+      this.#kick();
     }
     return () => {
       this.#subscribers.delete(onItem);

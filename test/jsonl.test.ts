@@ -132,3 +132,39 @@ test('TranscriptCache evicts the least recently used unwatched transcript', () =
   stop();
   cache.clear();
 });
+
+test('a tail replays its head files before its own lines, again after a reset, and can be rebased', async () => {
+  const base = join(dir, 'base.jsonl');
+  const lines = ['{"n":1}\n', '{"n":2}\n', '{"n":3}\n'];
+  writeFileSync(base, lines.join(''));
+  const end = Buffer.byteLength(lines[0]! + lines[1]!);
+  const segment = join(dir, 'segment.jsonl');
+  writeFileSync(segment, '{"n":4}\n');
+  const seen: string[] = [];
+  const resets: number[] = [];
+  const tail = new JsonlTail(segment, { line: (l) => seen.push(l), reset: () => resets.push(seen.length) }, [{ path: base, end }]);
+  await tail.sync();
+  assert.deepEqual(seen, ['{"n":1}', '{"n":2}', '{"n":4}'], 'the third base line lies past the cut');
+  appendFileSync(segment, '{"n":5}\n');
+  await tail.sync();
+  assert.deepEqual(seen.slice(3), ['{"n":5}']);
+  truncateSync(segment, 0);
+  writeFileSync(segment, '{"n":6}\n');
+  await tail.sync();
+  assert.deepEqual([resets, seen.slice(4)], [[4], ['{"n":1}', '{"n":2}', '{"n":6}']]);
+
+  const parse = (line: string, sink: ItemSink): void => sink.add(line, { kind: 'notice', ts: '', text: line });
+  const transcript = new Transcript(base, parse);
+  const items: Item[] = [];
+  transcript.subscribe((item) => items.push(item));
+  assert.deepEqual((await transcript.page(undefined, 10)).items.map((i) => i.text), ['{"n":1}', '{"n":2}', '{"n":3}']);
+  assert.equal(items.length, 0, 'history is not streamed');
+  transcript.rebase(segment, [{ path: base, end }]);
+  assert.equal(transcript.path, segment);
+  assert.deepEqual((await transcript.page(undefined, 10)).items.map((i) => [i.seq, i.text]), [[1, '{"n":1}'], [2, '{"n":2}'], [3, '{"n":6}']]);
+  assert.deepEqual(items.map((i) => [i.seq, i.text]), [[1, '{"n":1}'], [2, '{"n":2}'], [3, '{"n":6}']], 'the rebased items are streamed with their new seq');
+  appendFileSync(segment, '{"n":7}\n');
+  await transcript.sync();
+  assert.deepEqual(items.at(-1), { seq: 4, kind: 'notice', ts: '', text: '{"n":7}' });
+  transcript.close();
+});

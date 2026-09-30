@@ -1,12 +1,12 @@
 import { join } from 'node:path';
-import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
+import { JsonlTail, Transcript, TranscriptCache, type JsonlHead } from '../../jsonl.ts';
 import type { Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isObject, str } from '../../util.ts';
 import { CodexAccounts, type AccountsOptions } from './account.ts';
 import { codexAsk } from './ask.ts';
 import { LoadedThreads, daemonStatus, loadedThreadIds, type Ask } from './daemon.ts';
-import { scanRollouts, type RolloutFile } from './home.ts';
+import { historyHead, readRolloutStart, scanRollouts, type RolloutFile, type RolloutStart } from './home.ts';
 import {
   CodexMetaScan,
   SessionIndex,
@@ -31,6 +31,10 @@ interface Meta {
   size: number;
   scan: CodexMetaScan;
   tail: JsonlTail;
+  /** Earlier files this rollout continues (rewinds), oldest first. */
+  head: JsonlHead[];
+  /** The thread the history was taken from, when it is another one (a fork). */
+  baseThreadId: string | undefined;
 }
 
 export interface CodexOptions extends AccountsOptions {
@@ -55,6 +59,8 @@ export class CodexProvider implements SessionProvider {
   readonly #accounts: CodexAccounts;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
+  /** First lines of rollouts seen, by path; a rollout's first line never changes. */
+  readonly #starts = new Map<string, Promise<RolloutStart | undefined>>();
   readonly #index = new SessionIndex();
   readonly #indexTail: JsonlTail;
   readonly #rpc: CodexRpc | undefined;
@@ -102,7 +108,7 @@ export class CodexProvider implements SessionProvider {
     rpc.on('closed', () => this.#disconnected());
     rpc.on('notification', (method: string, params: unknown) => this.#notification(method, params));
     rpc.onRequest((request) => this.#serverRequest(request));
-    rpc.start();
+    await rpc.start();
   }
 
   stop(): void {
@@ -171,6 +177,8 @@ export class CodexProvider implements SessionProvider {
       .slice(0, HISTORY_MAX);
     const ids = new Set(recent.map(([id]) => id));
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
+    const paths = new Set([...this.#files.values()].flatMap((f) => [f, ...f.previous].map((x) => x.path)));
+    for (const path of this.#starts.keys()) if (!paths.has(path)) this.#starts.delete(path);
 
     // The newest rate-limit snapshot per account (the thread's creator; `''` for rollouts naming none).
     const latest = new Map<string, NonNullable<CodexMetaScan['rateLimits']>>();
@@ -222,9 +230,12 @@ export class CodexProvider implements SessionProvider {
   async #scan(id: string, file: RolloutFile): Promise<CodexMetaScan> {
     let meta = this.#metas.get(id);
     if (!meta || meta.path !== file.path) {
+      const { head, baseThreadId } = await historyHead(file, this.#files, (path) => this.#start(path));
       const scan = new CodexMetaScan();
-      meta = { path: file.path, size: -1, scan, tail: new JsonlTail(file.path, scan) };
+      meta = { path: file.path, size: -1, scan, tail: new JsonlTail(file.path, scan, head), head, baseThreadId };
       this.#metas.set(id, meta);
+      // The thread went on in a new file (a rewind): a transcript being read follows it there.
+      this.#transcripts.peek(id)?.rebase(file.path, head);
     }
     // A sub-agent rollout is recognised from its first line; the rest is never needed.
     if (meta.size !== file.size && !meta.scan.subagent) {
@@ -232,6 +243,17 @@ export class CodexProvider implements SessionProvider {
       meta.size = file.size;
     }
     return meta.scan;
+  }
+
+  #start(path: string): Promise<RolloutStart | undefined> {
+    let start = this.#starts.get(path);
+    if (!start) {
+      start = readRolloutStart(path);
+      this.#starts.set(path, start);
+      // Not memoised until the line is there (a rollout being created) or the read worked.
+      start.then((s) => s === undefined && this.#starts.delete(path), () => this.#starts.delete(path));
+    }
+    return start;
   }
 
   #build(id: string, file: RolloutFile, meta: CodexMetaScan, now: number): Session {
@@ -250,7 +272,7 @@ export class CodexProvider implements SessionProvider {
     const session: Session = {
       id: sessionKey(this.id, id),
       provider: this.id,
-      title: this.#index.titles.get(id) ?? meta.firstPrompt ?? '',
+      title: this.#index.titles.get(id) ?? this.#baseTitle(id) ?? meta.firstPrompt ?? '',
       cwd: meta.cwd ?? '',
       status,
       lastActivity: new Date(file.mtimeMs).toISOString(),
@@ -263,6 +285,12 @@ export class CodexProvider implements SessionProvider {
     if (settings.model) session.model = settings.model;
     if (settings.effort) session.effort = settings.effort;
     return session;
+  }
+
+  /** A thread forked from another one keeps that one's name until it gets its own. */
+  #baseTitle(id: string): string | undefined {
+    const base = this.#metas.get(id)?.baseThreadId;
+    return base && base !== id ? this.#index.titles.get(base) : undefined;
   }
 
   // App-server daemon
@@ -371,6 +399,10 @@ export class CodexProvider implements SessionProvider {
         this.#abortWhere((a) => a.threadId === threadId);
         this.#publish();
         return;
+      case 'thread/reverted':
+        // The thread continues in a new rollout file; pick it up now rather than at the next tick.
+        this.refresh().catch((err: unknown) => console.error('wristline: codex refresh failed:', err));
+        return;
       case 'serverRequest/resolved': {
         const id = params.requestId;
         if (typeof id === 'string' || typeof id === 'number') this.#abortWhere((_, key) => key === id);
@@ -442,7 +474,7 @@ export class CodexProvider implements SessionProvider {
   }
 
   #transcript(nativeId: string): Transcript | undefined {
-    const file = this.#sessions.has(nativeId) ? this.#files.get(nativeId) : undefined;
-    return file && this.#transcripts.get(nativeId, () => new Transcript(file.path, parseCodexLine));
+    const meta = this.#sessions.has(nativeId) ? this.#metas.get(nativeId) : undefined;
+    return meta && this.#transcripts.get(nativeId, () => new Transcript(meta.path, parseCodexLine, meta.head));
   }
 }

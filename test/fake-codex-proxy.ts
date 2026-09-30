@@ -1,6 +1,6 @@
 // Stands in for `codex app-server proxy` in tests: a WebSocket server on stdio that answers like
-// the Codex app-server daemon. argv: <state JSON> <log file>. Every message it receives is
-// appended to the log file. Test-only methods: fake/notify {method, params} sends a notification,
+// the Codex app-server daemon. argv: <state JSON> <log file> [<pid file>]. Every message it
+// receives is appended to the log file; the pid file gets this process's pid at startup. Test-only methods: fake/notify {method, params} sends a notification,
 // fake/request {method, params} sends a server request and returns its id, fake/state {...} changes
 // the state (e.g. the login) for later requests, fake/exit quits.
 import { appendFileSync } from 'node:fs';
@@ -32,6 +32,7 @@ const state: State = {
   ...(JSON.parse(process.argv[2] ?? '{}') as Partial<State>),
 };
 const logFile = process.argv[3];
+if (process.argv[4]) appendFileSync(process.argv[4], `${process.pid}\n`);
 let nextServerId = 0;
 
 const server = createServer();
