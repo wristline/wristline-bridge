@@ -108,13 +108,25 @@ test('meta scan reads id, cwd, first prompt, turn state and latest rate limits',
   assert.equal(meta.turnOpen, false);
   assert.deepEqual(meta.context, { used: 40500, window: 258400 });
   assert.equal(meta.rateLimits?.at, '2026-09-29T09:00:09.000Z');
+  assert.deepEqual([meta.model, meta.effort], ['gpt-6-astra', 'medium']);
   meta.reset();
   assert.equal(meta.accountId, undefined);
+  assert.deepEqual([meta.model, meta.effort], [undefined, undefined]);
 
   const sub = new CodexMetaScan();
   sub.line(JSON.stringify({ type: 'session_meta', payload: { id: 'x', cwd: '/w', source: { subagent: { thread_spawn: { depth: 1 } } } } }));
   assert.equal(sub.subagent, true);
   assert.equal(sub.accountId, undefined, 'an older codex names no creator');
+});
+
+test('meta scan: model and effort follow the latest turn_context; a null effort is unset', () => {
+  const meta = new CodexMetaScan();
+  const turn = (payload: object): string =>
+    JSON.stringify({ timestamp: '2026-09-29T09:00:01.000Z', type: 'turn_context', payload: { cwd: '/w', sandbox_policy: { type: 'read-only' }, ...payload } });
+  meta.line(turn({ model: 'gpt-6-astra', effort: 'low' }));
+  assert.deepEqual([meta.model, meta.effort], ['gpt-6-astra', 'low']);
+  meta.line(turn({ model: 'gpt-6-astra-mini', effort: null }));
+  assert.deepEqual([meta.model, meta.effort], ['gpt-6-astra-mini', undefined]);
 });
 
 test('session_index: the last name per thread wins', () => {

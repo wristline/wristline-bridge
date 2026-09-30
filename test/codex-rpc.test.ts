@@ -211,7 +211,7 @@ test('codex provider: daemon status, usage, approvals, questions and prompts for
   for (const id of [loaded, other]) copyFileSync(new URL('./fixtures/codex/rollout.jsonl', import.meta.url), join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`));
   const { rpc, log } = fakeRpc('provider', {
     loaded: [loaded],
-    threads: { [loaded]: { status: { type: 'idle' } } },
+    threads: { [loaded]: { status: { type: 'idle' }, model: 'gpt-6-astra', reasoningEffort: 'xhigh' } },
     rateLimits: { limitId: 'codex', primary: { usedPercent: 2, windowDurationMins: 10080, resetsAt: 1791279979 }, secondary: null },
   });
   const provider = new CodexProvider({ home, historyDays: 3650, rpc });
@@ -227,6 +227,9 @@ test('codex provider: daemon status, usage, approvals, questions and prompts for
   assert.equal(session(loaded)?.promptBlock, undefined);
   assert.equal(session(other)?.promptBlock, 'unsupported');
   assert.equal(provider.health().detail, 'app-server connected');
+  const model = (id: string): unknown[] => [session(id)?.model, session(id)?.effort];
+  assert.deepEqual(model(loaded), ['gpt-6-astra', 'xhigh'], 'thread/read wins over the rollout');
+  assert.deepEqual(model(other), ['gpt-6-astra', 'medium'], 'the rollout\'s last turn_context');
 
   // Usage from account/rateLimits/read, merged with sparse updates of the plan's limit only.
   await waitFor(() => hub.usages.length > 0);
@@ -242,12 +245,17 @@ test('codex provider: daemon status, usage, approvals, questions and prompts for
     ],
   );
 
+  // Model and effort from thread/settings/updated; a null effort is unset.
+  await notify('thread/settings/updated', { threadId: loaded, threadSettings: { cwd: '/work/api', model: 'gpt-6-astra-mini', effort: null } });
+  assert.deepEqual(model(loaded), ['gpt-6-astra-mini', undefined]);
+
   // Status overlay from thread/status/changed.
   const status = (value: unknown): Promise<unknown> => notify('thread/status/changed', { threadId: loaded, status: value });
   await status({ type: 'active', activeFlags: ['waitingOnApproval'] });
   assert.deepEqual([session(loaded)?.status, session(loaded)?.promptBlock], ['needs_input', 'awaiting_input']);
   await status({ type: 'active', activeFlags: [] });
   assert.deepEqual([session(loaded)?.status, session(loaded)?.promptBlock], ['running', 'busy']);
+  assert.deepEqual(model(loaded), ['gpt-6-astra-mini', undefined], 'a status change keeps the model');
   await assert.rejects(provider.sendPrompt(loaded, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'busy');
 
   // A command approval: allow/always/deny, no defer; "always" becomes acceptForSession.

@@ -251,6 +251,9 @@ export class CodexMetaScan implements LineHandler {
   turnOpen = false;
   context: { used: number; window: number } | undefined;
   rateLimits: { at: string; snapshot: RateLimitSnapshot } | undefined;
+  /** Model and reasoning effort of the last turn (`turn_context`); effort is null there when unset. */
+  model: string | undefined;
+  effort: string | undefined;
 
   line(line: string): void {
     if (line.includes('"type":"token_count"')) {
@@ -267,6 +270,11 @@ export class CodexMetaScan implements LineHandler {
       const type = isObject(payload) ? payload.type : undefined;
       if (type === 'task_started') this.turnOpen = true;
       else if (type === 'task_complete' || type === 'turn_aborted') this.turnOpen = false;
+    } else if (line.includes('"type":"turn_context"')) {
+      const rec = parseJson(line);
+      if (rec?.type !== 'turn_context' || !isObject(rec.payload)) return;
+      this.model = str(rec.payload.model);
+      this.effort = str(rec.payload.effort);
     } else if (this.id === undefined && line.includes('"type":"session_meta"')) {
       const payload = parseJson(line)?.payload;
       if (!isObject(payload)) return;
@@ -288,6 +296,7 @@ export class CodexMetaScan implements LineHandler {
     this.id = this.cwd = this.version = this.accountId = this.firstPrompt = undefined;
     this.subagent = this.turnOpen = false;
     this.context = this.rateLimits = undefined;
+    this.model = this.effort = undefined;
   }
 }
 

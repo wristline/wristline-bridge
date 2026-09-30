@@ -39,6 +39,10 @@ export interface Session {
   context?: { used: number; window: number };
   /** Absent for a single or unknown account. */
   account?: Account;
+  /** Model name for people, e.g. `Fable 5.1` (Claude Code) or `gpt-6-astra` (Codex). */
+  model?: string;
+  /** Reasoning effort, e.g. `xhigh`, `high`, `medium`, `low`; absent when unset or unsupported by the model. */
+  effort?: string;
 }
 
 export type ItemKind = 'user' | 'assistant' | 'tool' | 'notice';

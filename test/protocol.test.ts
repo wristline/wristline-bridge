@@ -39,6 +39,8 @@ const running: Session = {
   lastActivity: '2026-09-29T09:59:30.000Z',
   context: { used: 86000, window: 200000 },
   account: { id: 'acc-school', label: 'school', estimated: true },
+  model: 'Fable 5.1',
+  effort: 'xhigh',
 };
 const codex: Session = {
   id: 'codex:019a0000-0000-7000-8000-000000000001',
@@ -49,6 +51,8 @@ const codex: Session = {
   lastActivity: '2026-09-29T09:52:00.000Z',
   context: { used: 38500, window: 272000 },
   account: { id: 'c0a1b2c3-0000-4000-8000-000000000001', label: 'dev@example.com' },
+  model: 'gpt-6-astra',
+  effort: 'medium',
 };
 const ended: Session = {
   id: 'claude-code:6f1c2d3e-0000-4000-8000-000000000002',

@@ -11,6 +11,9 @@ export interface Loaded {
   status: ThreadStatus;
   /** The thread that spawned this one (sub-agents); requests are shown on the parent's session. */
   parent: string | undefined;
+  /** Model and reasoning effort the thread is configured with (`Thread.model`/`reasoningEffort`, `thread/settings/updated`). */
+  model: string | undefined;
+  effort: string | undefined;
   /** True once this client rejoined the thread (`thread/resume`) and receives its requests. */
   joined: boolean;
   joining?: Promise<boolean>;
@@ -73,7 +76,7 @@ export class LoadedThreads {
     this.#ephemeral.delete(id);
   }
 
-  /** Records a loaded thread from a Thread object (or just its id); ephemeral threads are skipped. */
+  /** Records a loaded thread from a Thread object (or just its id or status); ephemeral threads are skipped. */
   track(id: string, thread: unknown): void {
     const t = isObject(thread) ? thread : {};
     if (t.ephemeral === true || this.#ephemeral.has(id)) {
@@ -86,7 +89,15 @@ export class LoadedThreads {
       return;
     }
     const previous = this.#threads.get(id);
-    this.#threads.set(id, { status, parent: str(t.parentThreadId) ?? previous?.parent, joined: previous?.joined ?? false });
+    // A Thread object names its model (null when unavailable); a status change keeps the last one.
+    const named = t.model !== undefined;
+    this.#threads.set(id, {
+      status,
+      parent: str(t.parentThreadId) ?? previous?.parent,
+      model: named ? str(t.model) : previous?.model,
+      effort: named ? str(t.reasoningEffort) : previous?.effort,
+      joined: previous?.joined ?? false,
+    });
   }
 
   /** Rejoins a thread the daemon has loaded so this client receives its requests. */

@@ -134,6 +134,8 @@ test('codex: rollouts with index titles, sub-agents hidden, threads and usage la
         promptBlock: 'unsupported',
         context: { used: 40500, window: 258400 },
         account: { id: CODEX_A, label: 'me' },
+        model: 'gpt-6-astra',
+        effort: 'medium',
       },
     );
     const account = (tid: string): Session['account'] => sessions.find((s) => s.id === `codex:${tid}`)?.account;
@@ -385,4 +387,32 @@ test('claude-code: a compaction newer than the statusLine report outdates its co
   clock += 2000;
   await provider.statusline({ session_id: sid, context_window: { context_window_size: 200_000, current_usage: { input_tokens: 456 } } });
   assert.deepEqual(context(), { used: 456, window: 200_000 });
+});
+
+test('claude-code: model and effort follow the transcript\'s last turn; a statusLine report wins and is published at once', async () => {
+  const home = join(root, 'claude-model');
+  const sid = 'eeeeeeee-0000-4000-8000-000000000002';
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  mkdirSync(join(home, 'projects', '-w'), { recursive: true });
+  const transcript = join(home, 'projects', '-w', `${sid}.jsonl`);
+  const turn = (model: string, effort: string): string =>
+    `${JSON.stringify({ type: 'assistant', uuid: model, timestamp: '2026-09-29T10:00:00.000Z', effort, message: { role: 'assistant', model, content: [] } })}\n`;
+  writeFileSync(transcript, turn('claude-opus-5-5', 'high'));
+  writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, cwd: '/w', status: 'idle', updatedAt: Date.now() }));
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7 });
+  const hub = recordingHub();
+  await provider.start(hub);
+  provider.stop();
+  const latest = (): unknown[] => [hub.sessions.at(-1)?.model, hub.sessions.at(-1)?.effort];
+  assert.deepEqual(latest(), ['Opus 5.5', 'high']);
+  appendFileSync(transcript, turn('claude-sonnet-5-5', 'medium'));
+  await provider.refresh();
+  assert.deepEqual(latest(), ['Sonnet 5.5', 'medium'], 'a model change is a session change');
+  await provider.statusline({ session_id: sid, model: { id: 'claude-fable-5-1', display_name: 'Fable 5.1' }, effort: { level: 'xhigh' } });
+  assert.deepEqual(latest(), ['Fable 5.1', 'xhigh']);
+  await provider.statusline({ session_id: sid, model: { id: 'claude-haiku-4-5-20251001', display_name: 'Haiku 4.5' } });
+  assert.deepEqual(latest(), ['Haiku 4.5', undefined], 'the report wins as a whole: no effort, not the transcript\'s');
+  const published = hub.sessions.length;
+  await provider.refresh();
+  assert.equal(hub.sessions.length, published, 'a refresh rebuilds the same session');
 });

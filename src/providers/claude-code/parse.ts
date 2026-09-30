@@ -2,7 +2,7 @@
 // statusLine input. Verified against Claude Code 2.1.284.
 
 import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
-import { DETAIL_MAX, TEXT_MAX, type Usage, type UsageWindow } from '../../protocol.ts';
+import { DETAIL_MAX, TEXT_MAX, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
 import { clip, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 
 const TITLE_MAX = 40;
@@ -156,6 +156,9 @@ export class ClaudeMetaScan implements LineHandler {
   contextUsed: number | undefined;
   /** When the last compaction happened (its record's timestamp, ms). */
   compactedAt: number | undefined;
+  /** Model id (`message.model`) and `effort` of the last assistant turn. */
+  model: string | undefined;
+  effort: string | undefined;
 
   line(line: string): void {
     if (line.includes('"custom-title"')) {
@@ -168,6 +171,12 @@ export class ClaudeMetaScan implements LineHandler {
       const rec = parseJson(line);
       if (rec?.type !== 'assistant' || rec.isSidechain === true || !isObject(rec.message)) return;
       this.contextUsed = contextTokens(rec.message) ?? this.contextUsed;
+      const model = str(rec.message.model);
+      // Synthetic messages (API errors, interrupts) name no real model; models without effort levels (Haiku) write no `effort`.
+      if (model && model !== '<synthetic>') {
+        this.model = model;
+        this.effort = str(rec.effort);
+      }
     } else if (line.includes('"subtype":"compact_boundary"')) {
       // /compact writes no assistant usage; the boundary carries the size the context shrank to.
       const rec = parseJson(line);
@@ -187,6 +196,7 @@ export class ClaudeMetaScan implements LineHandler {
   reset(): void {
     this.customTitle = this.aiTitle = this.firstPrompt = this.cwd = undefined;
     this.contextUsed = this.compactedAt = undefined;
+    this.model = this.effort = undefined;
   }
 }
 
@@ -197,6 +207,19 @@ export class ClaudeMetaScan implements LineHandler {
 export function sessionTitle(meta: ClaudeMetaScan | undefined, registryName: string | undefined, nameSource?: string): string {
   const name = nameSource === 'derived' ? undefined : registryName;
   return meta?.customTitle || name || meta?.aiTitle || meta?.firstPrompt || '';
+}
+
+const MODEL_NAMES = [
+  ['claude-fable-5-1', 'Fable 5.1'],
+  ['claude-opus-5-5', 'Opus 5.5'],
+  ['claude-sonnet-5-5', 'Sonnet 5.5'],
+  ['claude-haiku-4-5', 'Haiku 4.5'],
+] as const;
+
+/** Name for people of a transcript's model id (a dated id matches too); unknown ids lose their `claude-` prefix. */
+export function claudeModelName(id: string): string {
+  const known = MODEL_NAMES.find(([prefix]) => id === prefix || id.startsWith(`${prefix}-`));
+  return known?.[1] ?? id.replace(/^claude-/, '');
 }
 
 const LIMITS = [
@@ -239,4 +262,16 @@ export function statuslineContext(input: JsonObject): StatuslineContext | undefi
   const used = isObject(ctx.current_usage) ? contextTokens({ usage: ctx.current_usage }) : undefined;
   if (used !== undefined) out.used = used;
   return out.window || out.used !== undefined ? out : undefined;
+}
+
+/** `model` and `effort` of the statusLine JSON; `effort` is absent for models without effort levels. */
+export function statuslineModel(input: JsonObject): Pick<Session, 'model' | 'effort'> | undefined {
+  const model = isObject(input.model) ? input.model : {};
+  const id = str(model.id);
+  const out: Pick<Session, 'model' | 'effort'> = {};
+  const name = str(model.display_name) || (id ? claudeModelName(id) : undefined);
+  if (name) out.model = name;
+  const effort = isObject(input.effort) ? str(input.effort.level) : undefined;
+  if (effort) out.effort = effort;
+  return out.model || out.effort ? out : undefined;
 }

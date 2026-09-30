@@ -18,6 +18,8 @@
         "label": "school",
         "estimated": true
       },
+      "model": "Fable 5.1",
+      "effort": "xhigh",
       "promptBlock": "awaiting_input"
     },
     {
@@ -35,6 +37,8 @@
         "id": "c0a1b2c3-0000-4000-8000-000000000001",
         "label": "dev@example.com"
       },
+      "model": "gpt-6-astra",
+      "effort": "medium",
       "promptBlock": "awaiting_input"
     },
     {

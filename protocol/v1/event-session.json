@@ -15,6 +15,8 @@
       "id": "acc-school",
       "label": "school",
       "estimated": true
-    }
+    },
+    "model": "Fable 5.1",
+    "effort": "xhigh"
   }
 }

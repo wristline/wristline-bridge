@@ -49,6 +49,13 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   returned by `POST …/prompt` (never as `promptBlock`): Claude Code prompts whose first
   non-space character is `!` would run as a shell command and are refused. Clients show unknown
   codes with a generic message. `account`, when present, is the account the session belongs to.
+  `model`, when known, is the model's name for people and `effort` its reasoning effort (`low`,
+  `medium`, `high`, `xhigh`, …; absent when unset or when the model has no effort levels). Claude
+  Code: the statusLine's `model.display_name` and `effort.level` once it has reported, else the
+  transcript's last assistant turn (`message.model` mapped to a name such as `Fable 5.1`, and
+  `effort`). Codex: the model slug (e.g. `gpt-6-astra`) and effort the daemon reports for a thread
+  it has loaded (`thread/read`, `thread/started`, `thread/settings/updated`), else the rollout's
+  last `turn_context`. A change is sent as a `session` event like any other.
 - **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
@@ -133,7 +140,8 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
 - `POST /local/statusline` — the Claude Code statusLine JSON; `rate_limits` becomes `5h`/`7d`
   usage (`resets_at` epoch seconds → ISO) and `context_window` the session's context
-  (`context_window_size`, and `current_usage` input tokens when present). With several Claude
+  (`context_window_size`, and `current_usage` input tokens when present); `model.display_name`
+  and `effort.level` become the session's `model` and `effort`. With several Claude
   Code homes, the report goes to the home whose `projects/` holds `transcript_path` (real paths
   compared), else to the home that lists `session_id`, else to the only home unless the path lies
   under some other `projects/` directory; otherwise it is dropped (logged once per session). The

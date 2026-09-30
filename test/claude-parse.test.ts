@@ -5,9 +5,11 @@ import { ItemLog } from '../src/jsonl.ts';
 import { TEXT_MAX } from '../src/protocol.ts';
 import {
   ClaudeMetaScan,
+  claudeModelName,
   classifyUserText,
   parseClaudeLine,
   sessionTitle,
+  statuslineModel,
   statuslineUsage,
   statuslineContext,
   toolText,
@@ -125,6 +127,26 @@ test('context usage comes from the last non-synthetic assistant usage', () => {
   assert.equal(meta.contextUsed, undefined);
 });
 
+test('model and effort come from the last real assistant turn; model ids map to names', () => {
+  const assistant = (model: string, extra: object = {}): string =>
+    JSON.stringify({ type: 'assistant', uuid: `a-${model}`, timestamp: '2026-09-29T10:05:00.000Z', message: { role: 'assistant', model, content: [] }, ...extra });
+  assert.deepEqual([scan(lines).model, scan(lines).effort], [undefined, undefined], 'the fixture predates model/effort and has a synthetic message');
+  const meta = scan([...lines, assistant('claude-fable-5-1', { effort: 'xhigh' })]);
+  assert.deepEqual([meta.model, meta.effort], ['claude-fable-5-1', 'xhigh']);
+  meta.line(assistant('<synthetic>'));
+  meta.line(assistant('claude-sonnet-5-5', { effort: 'low', isSidechain: true }));
+  assert.deepEqual([meta.model, meta.effort], ['claude-fable-5-1', 'xhigh'], 'synthetic and sidechain messages are skipped');
+  meta.line(assistant('claude-haiku-4-5-20251001'));
+  assert.deepEqual([meta.model, meta.effort], ['claude-haiku-4-5-20251001', undefined], 'a model without effort levels writes none');
+  meta.reset();
+  assert.deepEqual([meta.model, meta.effort], [undefined, undefined]);
+
+  assert.deepEqual(
+    ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'claude-fable-5', 'claude-fable-5-10'].map(claudeModelName),
+    ['Fable 5.1', 'Opus 5.5', 'Sonnet 5.5', 'Haiku 4.5', 'fable-5', 'fable-5-10'],
+  );
+});
+
 test('a compaction resets the context to its post-compaction size', () => {
   const boundary = (extra: object): string =>
     JSON.stringify({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', timestamp: '2026-09-29T11:00:00.000Z', uuid: 's-c', ...extra });
@@ -197,4 +219,14 @@ test('real statusLine JSON: rate limits to 5h/7d with ISO resets, context before
   assert.deepEqual(statuslineContext(after), { sessionId: realStatusline.session_id, window: 200000, used: 15500 });
   const { rate_limits: _, ...noLimits } = realStatusline;
   assert.equal(statuslineUsage(noLimits, 0), undefined);
+});
+
+test('statusLine model and effort: display_name (else the id\'s name) and effort.level', () => {
+  assert.deepEqual(statuslineModel(realStatusline), { model: 'Haiku 4.5' }, 'Haiku has no effort levels');
+  assert.deepEqual(statuslineModel({ ...realStatusline, model: { id: 'claude-fable-5-1', display_name: 'Fable 5.1' }, effort: { level: 'xhigh' } }), {
+    model: 'Fable 5.1',
+    effort: 'xhigh',
+  });
+  assert.deepEqual(statuslineModel({ session_id: 'x', model: { id: 'claude-opus-5-5' } }), { model: 'Opus 5.5' });
+  assert.equal(statuslineModel({ session_id: 'x' }), undefined);
 });

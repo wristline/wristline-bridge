@@ -258,6 +258,10 @@ export class CodexProvider implements SessionProvider {
     if (promptBlock) session.promptBlock = promptBlock;
     if (meta.context) session.context = meta.context;
     if (meta.accountId) session.account = this.#accounts.account(meta.accountId);
+    // The daemon's configured model is newer than the rollout's last turn (e.g. changed for the next one).
+    const settings = loaded?.model ? loaded : meta;
+    if (settings.model) session.model = settings.model;
+    if (settings.effort) session.effort = settings.effort;
     return session;
   }
 
@@ -354,6 +358,13 @@ export class CodexProvider implements SessionProvider {
         if (this.#loaded.has(threadId) && this.#files.has(threadId)) void this.#loaded.join(threadId, this.#rpc);
         this.#publish();
         return;
+      case 'thread/settings/updated': {
+        const settings = isObject(params.threadSettings) ? params.threadSettings : undefined;
+        if (!threadId || !settings || !this.#loaded.has(threadId)) return;
+        this.#loaded.track(threadId, { model: settings.model, reasoningEffort: settings.effort });
+        this.#publish();
+        return;
+      }
       case 'thread/closed':
         if (!threadId) return;
         this.#loaded.forget(threadId);

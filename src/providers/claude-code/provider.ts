@@ -8,7 +8,7 @@ import type { Account, Item, ItemPage, PromptBlock, ProviderHealth, Session, Ses
 import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isNotFound, isObject, own, str } from '../../util.ts';
 import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, statuslineFingerprint } from './account.ts';
-import { ClaudeMetaScan, parseClaudeLine, sessionTitle, statuslineContext, statuslineUsage } from './parse.ts';
+import { ClaudeMetaScan, claudeModelName, parseClaudeLine, sessionTitle, statuslineContext, statuslineModel, statuslineUsage } from './parse.ts';
 import {
   descendsFrom,
   isLive,
@@ -78,6 +78,8 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly #metas = new Map<string, Meta>();
   /** Context reported by the statusLine, by session id; `at` is when the report arrived. */
   readonly #statusContext = new Map<string, { used?: number; window?: number; at: number }>();
+  /** Model and effort reported by the statusLine, by session id. */
+  readonly #statusModel = new Map<string, Pick<Session, 'model' | 'effort'>>();
   /** statusLine fingerprint (`resets_at`) → account id, learned from processes born after the login was observed. */
   readonly #fingerprints = new Map<string, string>();
   /** Session id → account id known for certain (via a learned fingerprint). */
@@ -200,15 +202,22 @@ export class ClaudeCodeProvider implements SessionProvider {
       this.#hub?.usage(usage);
     }
     const ctx = statuslineContext(input);
-    if (!ctx) return;
-    const window = ctx.window ?? this.#statusContext.get(ctx.sessionId)?.window;
-    this.#statusContext.set(ctx.sessionId, { used: ctx.used, window, at: this.#now() });
-    const session = this.#sessions.get(ctx.sessionId);
-    const context = this.#context(ctx.sessionId, this.#metas.get(ctx.sessionId)?.scan);
-    if (session && context && JSON.stringify(session.context) !== JSON.stringify(context)) {
-      session.context = context;
-      this.#hub?.session(session);
+    if (ctx) {
+      const window = ctx.window ?? this.#statusContext.get(ctx.sessionId)?.window;
+      this.#statusContext.set(ctx.sessionId, { used: ctx.used, window, at: this.#now() });
     }
+    const id = str(input.session_id);
+    if (!id) return;
+    const model = statuslineModel(input);
+    if (model) this.#statusModel.set(id, model);
+    const session = this.#sessions.get(id);
+    if (!session) return;
+    const meta = this.#metas.get(id)?.scan;
+    const before = JSON.stringify(session);
+    const context = this.#context(id, meta);
+    if (context) session.context = context;
+    setModel(session, this.#model(id, meta));
+    if (JSON.stringify(session) !== before) this.#hub?.session(session);
   }
 
   /** A learned fingerprint names the account for certain; otherwise the report goes to the home's current login. */
@@ -275,6 +284,11 @@ export class ClaudeCodeProvider implements SessionProvider {
     return { used, window: reported?.window ?? (used > DEFAULT_WINDOW ? EXTENDED_WINDOW : DEFAULT_WINDOW) };
   }
 
+  /** The statusLine's model and effort when it reported them (fresher: a `/model` switch shows before the next turn), else the transcript's last assistant turn. */
+  #model(id: string, meta: ClaudeMetaScan | undefined): Pick<Session, 'model' | 'effort'> {
+    return this.#statusModel.get(id) ?? { model: meta?.model && claudeModelName(meta.model), effort: meta?.effort };
+  }
+
   /** Re-reads the live registry and recent transcripts; publishes sessions that changed. */
   async refresh(): Promise<void> {
     if (this.#refreshing) return;
@@ -319,6 +333,7 @@ export class ClaudeCodeProvider implements SessionProvider {
 
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
     for (const id of this.#statusContext.keys()) if (!ids.has(id)) this.#statusContext.delete(id);
+    for (const id of this.#statusModel.keys()) if (!ids.has(id)) this.#statusModel.delete(id);
     for (const id of this.#sessionAccounts.keys()) if (!ids.has(id)) this.#sessionAccounts.delete(id);
     const next = new Map<string, Session>();
     for (const id of ids) {
@@ -397,6 +412,7 @@ export class ClaudeCodeProvider implements SessionProvider {
       const login = loginAt(this.#logins, lastActivity);
       if (login) session.account = this.#account(login.id, isEstimated(this.#logins, newest?.startedAt));
     }
+    setModel(session, this.#model(id, meta));
     return session;
   }
 
@@ -412,6 +428,14 @@ export class ClaudeCodeProvider implements SessionProvider {
     const cwd = this.#liveCwd.get(nativeId);
     return cwd ? join(this.home, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${nativeId}.jsonl`) : undefined;
   }
+}
+
+/** Sets or clears the session's model and effort (after `account`, so an update in place keeps the key order `#build` produces). */
+function setModel(session: Session, { model, effort }: Pick<Session, 'model' | 'effort'>): void {
+  if (model) session.model = model;
+  else delete session.model;
+  if (effort) session.effort = effort;
+  else delete session.effort;
 }
 
 function promptBlock(status: SessionStatus, hasPane: boolean): PromptBlock | undefined {
