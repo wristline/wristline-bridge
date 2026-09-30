@@ -183,6 +183,43 @@ test('codex without the daemon: an unfinished turn counts as running only while 
   assert.deepEqual(status(stale), ['ended', 'not_live']);
 });
 
+test('a Quick Ask thread is never listed: its Claude Code transcript and registry entry, and its Codex rollout, are skipped', async () => {
+  const claude = join(root, 'claude-ask');
+  const askId = '7a000000-2222-4333-8444-555555555555';
+  const other = '7b000000-2222-4333-8444-555555555555';
+  mkdirSync(join(claude, 'sessions'), { recursive: true });
+  mkdirSync(join(claude, 'projects', '-home-u--config-wristline-ask-cwd'), { recursive: true });
+  for (const id of [askId, other]) copyFileSync(new URL('./fixtures/claude/transcript.jsonl', import.meta.url), join(claude, 'projects', '-home-u--config-wristline-ask-cwd', `${id}.jsonl`));
+  writeFileSync(join(claude, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: askId, cwd: '/home/u/.config/wristline/ask-cwd', status: 'busy', updatedAt: Date.now() }));
+  const claudeProvider = new ClaudeCodeProvider({ home: claude, historyDays: 7, isAsk: (id) => id === askId });
+  const claudeHub = recordingHub();
+  await claudeProvider.start(claudeHub);
+  try {
+    assert.deepEqual(claudeProvider.listSessions().map((s) => s.id), [`claude-code:${other}`]);
+    assert.ok(!claudeProvider.hasSession(askId));
+    assert.equal(await claudeProvider.readItems(askId, undefined, 3), undefined);
+    assert.ok(!claudeHub.sessions.some((s) => s.id === `claude-code:${askId}`));
+  } finally {
+    claudeProvider.stop();
+  }
+
+  const codex = join(root, 'codex-ask');
+  const day = join(codex, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const [thread, keep] = ['019a0000-0000-7000-8000-00000000000a', '019a0000-0000-7000-8000-00000000000b'];
+  for (const id of [thread, keep]) copyFileSync(new URL('./fixtures/codex/rollout.jsonl', import.meta.url), join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`));
+  const codexProvider = new CodexProvider({ home: codex, historyDays: 3650, isAsk: (id) => id === thread });
+  const codexHub = recordingHub();
+  await codexProvider.start(codexHub);
+  try {
+    assert.deepEqual(codexProvider.listSessions().map((s) => s.id), [`codex:${keep}`]);
+    assert.equal(await codexProvider.readItems(thread, undefined, 3), undefined);
+    assert.ok(!codexHub.sessions.some((s) => s.id === `codex:${thread}`));
+  } finally {
+    codexProvider.stop();
+  }
+});
+
 test('a missing agent home is reported as not_found', async () => {
   const provider = new CodexProvider({ home: join(root, 'nowhere'), historyDays: 7 });
   await provider.start(recordingHub());

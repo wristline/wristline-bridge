@@ -133,6 +133,8 @@ export interface Ask {
   /** `ask-<uuid>` */
   id: string;
   provider: ProviderId;
+  /** The conversation this ask continues: the id of the thread's first ask (its own id for a first ask). */
+  threadId: string;
   /** The watch's text, trimmed. */
   question: string;
   status: AskStatus;
@@ -236,6 +238,8 @@ export interface AskBody {
   text: string;
   /** Overrides the bridge's configured model for this ask. */
   model?: string;
+  /** Continues that thread (a `threadId` of this device's asks); absent for a new thread. */
+  threadId?: string;
 }
 
 export interface AskAccepted {

@@ -340,19 +340,28 @@ test('Quick Ask: request, events, list and its errors', async () => {
   fixture('ask-accepted', fixed({ askId }));
   fixture('event-ask-running', fixed(await ws.next()));
   fixture('event-ask-done', fixed(await ws.next()));
+  // A follow-up in the same thread: the first ask's id is the thread id.
+  const followUp: AskBody = { provider: 'claude-code', text: 'And in French?', threadId: 'ask-3f6a1c2e-0000-4000-8000-000000000001' };
+  fixture('ask-thread', followUp);
+  const continued = await post('/api/ask', { ...followUp, threadId: askId });
+  assert.equal(continued.status, 202);
+  ids.set(((await continued.json()) as { askId: string }).askId, 'ask-3f6a1c2e-0000-4000-8000-000000000002');
+  assert.equal((await ws.next()).type, 'ask');
+  assert.equal((await ws.next()).type, 'ask');
 
   fakeEnv.FAKE_MODE = 'sleep';
   const slow = await post('/api/ask', { provider: 'claude-code', text: 'What is the capital of France?' });
   assert.equal(slow.status, 202);
-  ids.set(((await slow.json()) as { askId: string }).askId, 'ask-3f6a1c2e-0000-4000-8000-000000000002');
+  ids.set(((await slow.json()) as { askId: string }).askId, 'ask-3f6a1c2e-0000-4000-8000-000000000003');
   assert.equal((await ws.next()).type, 'ask');
   const busy = await post('/api/ask', { provider: 'claude-code', text: 'another' });
   assert.equal(busy.status, 409);
   fixture('error-409-ask-busy', await busy.json());
-  assert.equal((await del([...ids.keys()][1] ?? '')).status, 204);
+  assert.equal((await del([...ids.keys()][2] ?? '')).status, 204);
   fixture('event-ask-error', fixed(await ws.next()));
   assert.equal((await del('ask-unknown')).status, 404);
   fakeEnv.FAKE_MODE = 'ok';
+  assert.equal((await fetch(`${bridge.base}/api/asks/thread/ask-unknown`, { method: 'DELETE', headers: { authorization: `Bearer ${bridge.token}` } })).status, 404);
 
   const unavailable = await post('/api/ask', { provider: 'codex', text: 'x' });
   assert.equal(unavailable.status, 503);

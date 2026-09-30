@@ -224,16 +224,26 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!input) return;
       const provider = input.provider ?? asks.defaultProvider;
       const text = str(input.text)?.trim();
-      const model = input.model;
-      if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string')) return fail(res, 400, 'bad_request');
+      const { model, threadId } = input;
+      if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string') || (threadId !== undefined && typeof threadId !== 'string')) {
+        return fail(res, 400, 'bad_request');
+      }
       if (text.length > TEXT_MAX) return fail(res, 413, 'payload_too_large');
-      const ask: AskBody = { provider, text, ...(model ? { model } : {}) };
+      const ask: AskBody = { provider, text, ...(model ? { model } : {}), ...(threadId ? { threadId } : {}) };
       const started = asks.start(device.id, ask);
       if (started === 'busy') return fail(res, 409, 'busy');
       if (started === 'unavailable') return fail(res, 503, 'ask_unavailable');
+      if (started === 'not_found') return fail(res, 404, 'not_found');
+      if (started === 'bad_request') return fail(res, 400, 'bad_request');
       return send(res, 202, { askId: started.id } satisfies AskAccepted);
     }
     if (method === 'GET' && path === '/api/asks') return send(res, 200, { asks: asks.list(device.id) } satisfies AskList);
+    const thread = /^\/api\/asks\/thread\/([^/]+)$/.exec(path);
+    if (thread && method === 'DELETE') {
+      const id = decodeId(thread[1]);
+      if (id === undefined) return fail(res, 400, 'bad_request');
+      return asks.deleteThread(device.id, id) ? send(res, 204) : fail(res, 404, 'not_found');
+    }
     const askId = /^\/api\/asks\/([^/]+)$/.exec(path);
     if (askId && method === 'DELETE') {
       const id = decodeId(askId[1]);

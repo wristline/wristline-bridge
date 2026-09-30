@@ -65,6 +65,15 @@ async function run(flags: Flags): Promise<void> {
   const config = resolveConfig(stored, flags);
   const version = packageVersion();
 
+  // Quick Ask threads are CLI sessions of their own; the providers must not list them (the hub they report to is created below).
+  const asks = new AskRunner({
+    dir,
+    bins: config.bins,
+    claudeHome: config.claudeHome,
+    codexHome: config.codexHome,
+    ask: config.ask,
+    onEvent: (deviceId, event) => hub.sendToDevice(deviceId, event),
+  });
   // One instance per home. Each save patches only its own key inside updateStored's read-modify-write, so a
   // timeline cleared by hand while the bridge runs stays cleared and another command's keys are kept.
   const claudes = config.claudeHomes.map(
@@ -75,6 +84,7 @@ async function run(flags: Flags): Promise<void> {
         ...(config.bins.tmux ? { tmux: config.bins.tmux } : {}),
         logins: config.claudeLogins[home] ?? [],
         labels: config.labels,
+        isAsk: (id) => asks.ownsClaudeSession(id),
         saveLogins: async (logins) => {
           await updateStored(dir, (stored) => ({ claudeLogins: { ...stored.claudeLogins, [home]: logins } }));
         },
@@ -88,6 +98,7 @@ async function run(flags: Flags): Promise<void> {
         rpc: new CodexRpc({ codexHome: home, clientVersion: version, ...(config.bins.codex ? { bin: config.bins.codex } : {}) }),
         accounts: config.codexAccounts,
         labels: config.labels,
+        isAsk: (id) => asks.ownsCodexThread(id),
         saveAccounts: async (accounts) => {
           await updateStored(dir, (stored) => ({ codexAccounts: { ...stored.codexAccounts, ...accounts } }));
         },
@@ -95,14 +106,6 @@ async function run(flags: Flags): Promise<void> {
   );
   const providers = [...claudes, ...codexes];
   const hub = new BridgeHub({ providers });
-  const asks = new AskRunner({
-    dir,
-    bins: config.bins,
-    claudeHome: config.claudeHome,
-    codexHome: config.codexHome,
-    ask: config.ask,
-    onEvent: (deviceId, event) => hub.sendToDevice(deviceId, event),
-  });
   const auth = new Auth({
     devices: config.devices,
     save: async (devices) => {

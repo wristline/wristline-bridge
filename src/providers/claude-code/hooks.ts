@@ -29,7 +29,7 @@ export interface HookContext {
   waitMs: number;
   /** Aborted when Claude Code drops the hook request. */
   signal: AbortSignal;
-  /** True for a session id that is a Quick Ask run (src/ask.ts), whose hooks must not reach the watch. */
+  /** True for a session id that is a Quick Ask thread (src/ask.ts), whose hooks must not reach the watch: no decision, no alert. */
   isAsk?: (sessionId: string) => boolean;
 }
 
@@ -73,6 +73,7 @@ function decision(value: JsonObject): JsonObject {
  * leave it to the terminal. An answer in the terminal is noticed by the provider (registry status).
  */
 async function permissionRequest(input: JsonObject, ctx: HookContext): Promise<JsonObject | undefined> {
+  if (ctx.isAsk?.(str(input.session_id) ?? '')) return undefined;
   const sessionId = sessionOf(input);
   const tool = str(input.tool_name);
   if (!sessionId || !tool || !ctx.hub.pending.watchPresent()) return undefined;
@@ -111,6 +112,7 @@ async function permissionRequest(input: JsonObject, ctx: HookContext): Promise<J
 
 /** Answers AskUserQuestion before it runs; used only where PermissionRequest does not fire for it. */
 async function preToolUse(input: JsonObject, ctx: HookContext): Promise<JsonObject | undefined> {
+  if (ctx.isAsk?.(str(input.session_id) ?? '')) return undefined;
   const sessionId = sessionOf(input);
   if (!sessionId || str(input.tool_name) !== 'AskUserQuestion' || !ctx.hub.pending.watchPresent()) return undefined;
   const toolInput = toolInputOf(input);

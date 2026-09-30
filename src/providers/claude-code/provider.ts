@@ -14,6 +14,7 @@ import {
   isLive,
   mapStatus,
   pidAlive,
+  projectSlug,
   readEntry,
   readRegistry,
   sameProcess,
@@ -63,6 +64,8 @@ export interface ClaudeOptions {
   saveLogins?: (logins: LoginEntry[]) => Promise<void>;
   /** Account id → label chosen by the user (`config.labels`). */
   labels?: Record<string, string>;
+  /** True for a session id that is a Quick Ask thread (src/ask.ts): never listed. */
+  isAsk?: (nativeId: string) => boolean;
 }
 
 export class ClaudeCodeProvider implements SessionProvider {
@@ -74,6 +77,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly #exec: Exec;
   readonly #saveLogins: ((logins: LoginEntry[]) => Promise<void>) | undefined;
   readonly #labels: Record<string, string>;
+  readonly #isAsk: (nativeId: string) => boolean;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   /** Context reported by the statusLine, by session id; `at` is when the report arrived. */
@@ -110,6 +114,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     this.#logins = options.logins ?? [];
     this.#saveLogins = options.saveLogins;
     this.#labels = options.labels ?? {};
+    this.#isAsk = options.isAsk ?? (() => false);
   }
 
   async start(hub: Hub): Promise<void> {
@@ -329,7 +334,7 @@ export class ClaudeCodeProvider implements SessionProvider {
       .sort(([, a], [, b]) => b.mtimeMs - a.mtimeMs)
       .slice(0, HISTORY_MAX)
       .map(([id]) => id);
-    const ids = new Set([...live.keys(), ...history]);
+    const ids = new Set([...live.keys(), ...history].filter((id) => !this.#isAsk(id)));
 
     for (const id of this.#metas.keys()) if (!ids.has(id)) this.#metas.delete(id);
     for (const id of this.#statusContext.keys()) if (!ids.has(id)) this.#statusContext.delete(id);
@@ -426,7 +431,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   /** A live session writes its transcript only after the first message. */
   #expectedPath(nativeId: string): string | undefined {
     const cwd = this.#liveCwd.get(nativeId);
-    return cwd ? join(this.home, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${nativeId}.jsonl`) : undefined;
+    return cwd ? join(this.home, 'projects', projectSlug(cwd), `${nativeId}.jsonl`) : undefined;
   }
 }
 

@@ -1,31 +1,41 @@
 // Quick Ask: one headless, tool-less run of `claude -p` or `codex exec` per question, in an empty
-// scratch directory, without a session left behind. Verified against Claude Code 2.1.285 and
-// codex-cli 0.159.2 (the JSON shapes parsed here are the ones those printed; see docs/protocol.md).
-// Prompt and answer text are never logged.
+// scratch directory. Asks form threads: the first ask of a thread starts a CLI session (Claude
+// Code: `--session-id`; Codex: a persisted `codex exec`), follow-ups resume it (`--resume`,
+// `codex exec resume`), and the session files are deleted when the thread expires (24 h after its
+// last ask) or the watch deletes it. Threads are persisted in `<dir>/ask-threads.json` so a bridge
+// restart still excludes and expires them; asks themselves live in memory only. Verified against
+// Claude Code 2.1.285 and codex-cli 0.159.2 (the JSON shapes parsed here are the ones those
+// printed; see docs/protocol.md). Prompt and answer text are never logged.
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AskConfig, Bins } from './config.ts';
 import { TEXT_MAX, type Ask, type AskBody, type ProviderId, type ServerEvent } from './protocol.ts';
+import { projectSlug } from './providers/claude-code/home.ts';
 import { claudeModelName } from './providers/claude-code/parse.ts';
-import { clip, isObject, num, oneLine, parseJson, str } from './util.ts';
+import { scanRollouts } from './providers/codex/home.ts';
+import { clip, isNotFound, isObject, num, oneLine, parseJson, str } from './util.ts';
 
 export const ASK_TIMEOUT_MS = 90_000;
 /** Asks kept per device, newest first. */
 export const ASK_KEEP = 10;
-/** Asks older than this are dropped when one is added or listed. */
+/** Asks older than this are dropped when one is added or listed; a thread expires this long after its last ask. */
 export const ASK_MAX_AGE_MS = 24 * 60 * 60_000;
+const SWEEP_MS = 60_000;
 const KILL_GRACE_MS = 5000;
+const DELETE_TIMEOUT_MS = 30_000;
 const ERROR_MAX = 200;
+const THREADS_FILE = 'ask-threads.json';
 export const ASK_SYSTEM_PROMPT =
   "You are answering a quick question from a smartwatch: answer directly in the user's language, in at most ~80 words, no markdown headings or code fences unless essential.";
 
 export type AskSpawn = (bin: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcess;
 
 export interface AskRunnerOptions {
-  /** The bridge's config directory; the scratch cwd is `<dir>/ask-cwd`. */
+  /** The bridge's config directory; the scratch cwd is `<dir>/ask-cwd`, the thread registry `<dir>/ask-threads.json`. */
   dir: string;
   bins: Pick<Bins, 'claude' | 'codex'>;
   claudeHome: string;
@@ -52,9 +62,22 @@ interface Running {
 interface Entry {
   deviceId: string;
   ask: Ask;
-  /** The `--session-id` given to Claude Code, so its hooks for this run can be told apart. */
-  sessionId?: string;
   run?: Running;
+  /** The thread was deleted while this ask ran: its files go once the CLI has exited. */
+  purge?: Thread;
+}
+
+/** A conversation the CLI can continue; `id` is the first ask's id. */
+interface Thread {
+  id: string;
+  provider: ProviderId;
+  deviceId: string;
+  /** ISO 8601; the thread expires ASK_MAX_AGE_MS after it. */
+  lastAskAt: string;
+  /** Claude Code: the `--session-id` (the uuid of `id`); Codex: `thread.started.thread_id`, once seen. */
+  sessionId?: string;
+  /** The CLI has a conversation to resume (Claude Code: an ask answered; Codex: the thread id is known). */
+  started: boolean;
 }
 
 interface Outcome {
@@ -64,6 +87,8 @@ interface Outcome {
   error?: string;
 }
 
+export type StartResult = Ask | 'busy' | 'unavailable' | 'not_found' | 'bad_request';
+
 export class AskRunner {
   readonly #cwd: string;
   readonly #o: AskRunnerOptions;
@@ -72,6 +97,9 @@ export class AskRunner {
   readonly #timeoutMs: number;
   /** Per device, newest first. */
   readonly #byDevice = new Map<string, Entry[]>();
+  readonly #threads = new Map<string, Thread>();
+  readonly #threadsPath: string;
+  readonly #sweeper: NodeJS.Timeout;
 
   constructor(options: AskRunnerOptions) {
     this.#o = options;
@@ -80,6 +108,11 @@ export class AskRunner {
     this.#timeoutMs = options.timeoutMs ?? ASK_TIMEOUT_MS;
     this.#cwd = join(options.dir, 'ask-cwd');
     mkdirSync(this.#cwd, { recursive: true, mode: 0o700 });
+    this.#threadsPath = join(options.dir, THREADS_FILE);
+    for (const t of readThreads(this.#threadsPath)) this.#threads.set(t.id, t);
+    this.sweep();
+    this.#sweeper = setInterval(() => this.sweep(), SWEEP_MS);
+    this.#sweeper.unref();
   }
 
   /** For a watch that names no provider. */
@@ -87,23 +120,36 @@ export class AskRunner {
     return this.#o.ask.provider;
   }
 
-  /** Starts the CLI for this device; at most one ask runs per device. */
-  start(deviceId: string, body: AskBody): Ask | 'busy' | 'unavailable' {
+  /** Starts the CLI for this device; at most one ask runs per device. With `threadId`, continues that thread of this device. */
+  start(deviceId: string, body: AskBody): StartResult {
     const bin = body.provider === 'claude-code' ? this.#o.bins.claude : this.#o.bins.codex;
     if (!bin) return 'unavailable';
+    this.sweep();
+    let thread = body.threadId === undefined ? undefined : this.#threads.get(body.threadId);
+    if (body.threadId !== undefined && (!thread || thread.deviceId !== deviceId)) return 'not_found';
+    if (thread && thread.provider !== body.provider) return 'bad_request';
     const entries = this.#recent(deviceId);
     if (entries.some((e) => e.run)) return 'busy';
-    const ask: Ask = { id: `ask-${randomUUID()}`, provider: body.provider, question: body.text, status: 'running', createdAt: new Date(this.#now()).toISOString() };
+    const id = `ask-${randomUUID()}`;
+    const createdAt = new Date(this.#now()).toISOString();
+    if (!thread) {
+      thread = { id, provider: body.provider, deviceId, lastAskAt: createdAt, started: false };
+      if (body.provider === 'claude-code') thread.sessionId = id.slice('ask-'.length);
+      this.#threads.set(id, thread);
+    } else thread.lastAskAt = createdAt;
+    this.#saveThreads();
+    const ask: Ask = { id, provider: body.provider, threadId: thread.id, question: body.text, status: 'running', createdAt };
     const entry: Entry = { deviceId, ask };
-    const { args, env } = body.provider === 'claude-code' ? this.#claudeArgs(body, entry) : this.#codexArgs(body);
+    const { args, env } = body.provider === 'claude-code' ? this.#claudeArgs(body, thread) : this.#codexArgs(body, thread);
     entries.unshift(entry);
     this.#byDevice.set(deviceId, entries.slice(0, ASK_KEEP));
-    this.#launch(entry, bin, args, env, body);
+    this.#launch(entry, thread, bin, args, env, body);
     this.#emit(entry);
     return ask;
   }
 
   list(deviceId: string): Ask[] {
+    this.sweep();
     return this.#recent(deviceId).map((e) => e.ask);
   }
 
@@ -118,13 +164,32 @@ export class AskRunner {
     return true;
   }
 
-  /** Whether a Claude Code session id is one of this runner's asks (recent or running): its hooks are not a session's. */
+  /** True when the thread belongs to the device: it is forgotten and its CLI session files deleted (after a running ask was killed). */
+  deleteThread(deviceId: string, threadId: string): boolean {
+    const thread = this.#threads.get(threadId);
+    if (!thread || thread.deviceId !== deviceId) return false;
+    this.#forget(thread);
+    return true;
+  }
+
+  /** Whether a Claude Code session id is one of this runner's threads: its hooks are not a session's and it is not listed. */
   ownsClaudeSession(nativeId: string): boolean {
-    for (const entries of this.#byDevice.values()) if (entries.some((e) => e.sessionId === nativeId)) return true;
-    return false;
+    return this.#owns('claude-code', nativeId);
+  }
+
+  /** The same for a Codex thread id. */
+  ownsCodexThread(nativeId: string): boolean {
+    return this.#owns('codex', nativeId);
+  }
+
+  /** Forgets and purges threads whose last ask is older than ASK_MAX_AGE_MS. Runs every minute and before each start or list. */
+  sweep(): void {
+    const since = this.#now() - ASK_MAX_AGE_MS;
+    for (const thread of this.#threads.values()) if (Date.parse(thread.lastAskAt) < since) this.#forget(thread);
   }
 
   close(): void {
+    clearInterval(this.#sweeper);
     for (const entries of this.#byDevice.values()) {
       for (const e of entries) {
         if (!e.run) continue;
@@ -132,6 +197,39 @@ export class AskRunner {
         clearTimeout(e.run.killTimer);
         e.run.child.kill('SIGKILL');
       }
+    }
+  }
+
+  #owns(provider: ProviderId, nativeId: string): boolean {
+    for (const t of this.#threads.values()) if (t.provider === provider && t.sessionId === nativeId) return true;
+    return false;
+  }
+
+  #forget(thread: Thread): void {
+    this.#threads.delete(thread.id);
+    this.#saveThreads();
+    const running = this.#byDevice.get(thread.deviceId)?.find((e) => e.run && e.ask.threadId === thread.id);
+    if (running?.run) {
+      // The CLI still writes its session; delete it once it has exited.
+      running.purge = thread;
+      running.run.cancelled = true;
+      this.#kill(running.run);
+      return;
+    }
+    this.#purge(thread);
+  }
+
+  #purge(thread: Thread): void {
+    purgeThread(thread, this.#o, this.#cwd, this.#spawn, this.#env()).catch((err: unknown) => {
+      console.error(`wristline: ask thread ${thread.id} (${thread.provider}): could not delete its session: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  #saveThreads(): void {
+    try {
+      writeFileSync(this.#threadsPath, `${JSON.stringify({ threads: [...this.#threads.values()] }, null, 2)}\n`, { mode: 0o600 });
+    } catch (err) {
+      console.error(`wristline: could not save ${this.#threadsPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -149,18 +247,17 @@ export class AskRunner {
     return env;
   }
 
-  #claudeArgs(body: AskBody, entry: Entry): { args: string[]; env: NodeJS.ProcessEnv } {
-    entry.sessionId = randomUUID();
+  #claudeArgs(body: AskBody, thread: Thread): { args: string[]; env: NodeJS.ProcessEnv } {
+    const sessionId = thread.sessionId ?? '';
     const args = [
       '-p',
       ...['--output-format', 'json'],
       ...['--model', body.model || this.#o.ask.claudeModel],
       ...['--max-turns', '1'],
-      '--no-session-persistence',
       ...['--tools', ''],
       ...['--permission-prompts', 'none'],
       '--strict-mcp-config',
-      ...['--session-id', entry.sessionId],
+      ...(thread.started ? ['--resume', sessionId] : ['--session-id', sessionId]),
       ...['--append-system-prompt', ASK_SYSTEM_PROMPT],
       '--safe-mode',
       '--',
@@ -169,13 +266,18 @@ export class AskRunner {
     return { args, env: { ...this.#env(), CLAUDE_CONFIG_DIR: this.#o.claudeHome } };
   }
 
-  #codexArgs(body: AskBody): { args: string[]; env: NodeJS.ProcessEnv } {
+  /** `codex exec resume` takes no `-s`/`-C`: the sandbox goes in as a config override and the cwd is the process's. */
+  #codexArgs(body: AskBody, thread: Thread): { args: string[]; env: NodeJS.ProcessEnv } {
     const model = body.model || this.#o.ask.codexModel;
-    const args = ['exec', '--json', ...['-s', 'read-only'], '--skip-git-repo-check', '--ephemeral', ...['-C', this.#cwd], ...(model ? ['-m', model] : []), '--', `${ASK_SYSTEM_PROMPT}\n\n${body.text}`];
+    const prompt = `${ASK_SYSTEM_PROMPT}\n\n${body.text}`;
+    const args =
+      thread.started && thread.sessionId
+        ? ['exec', 'resume', thread.sessionId, '--json', ...['-c', 'sandbox_mode="read-only"'], '--skip-git-repo-check', ...(model ? ['-m', model] : []), '--', prompt]
+        : ['exec', '--json', ...['-s', 'read-only'], '--skip-git-repo-check', ...['-C', this.#cwd], ...(model ? ['-m', model] : []), '--', prompt];
     return { args, env: { ...this.#env(), CODEX_HOME: this.#o.codexHome } };
   }
 
-  #launch(entry: Entry, bin: string, args: string[], env: NodeJS.ProcessEnv, body: AskBody): void {
+  #launch(entry: Entry, thread: Thread, bin: string, args: string[], env: NodeJS.ProcessEnv, body: AskBody): void {
     const child = this.#spawn(bin, args, { cwd: this.#cwd, env });
     const run: Running = {
       child,
@@ -190,7 +292,20 @@ export class AskRunner {
       timedOut: false,
     };
     entry.run = run;
-    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => run.stdout.push(chunk));
+    let partial = '';
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
+      run.stdout.push(chunk);
+      // The Codex thread id is needed as soon as it is printed: the provider must skip the rollout from its next scan.
+      if (body.provider !== 'codex' || thread.sessionId) return;
+      const lines = (partial + chunk).split('\n');
+      partial = lines.pop() ?? '';
+      const id = lines.map(codexThreadId).find((x) => x !== undefined);
+      if (id && this.#threads.get(thread.id) === thread) {
+        thread.sessionId = id;
+        thread.started = true;
+        this.#saveThreads();
+      }
+    });
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => run.stderr.push(chunk));
     let finished = false;
     const finish = (outcome: Outcome): void => {
@@ -200,11 +315,16 @@ export class AskRunner {
       clearTimeout(run.killTimer);
       entry.run = undefined;
       const durationMs = outcome.durationMs ?? this.#now() - run.startedAt;
-      const { id, provider, question, createdAt } = entry.ask;
+      const { id, provider, threadId, question, createdAt } = entry.ask;
       entry.ask =
         outcome.answer === undefined
-          ? { id, provider, question, status: 'error', durationMs, error: outcome.error ?? 'bad_output', createdAt }
-          : { id, provider, question, status: 'done', answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
+          ? { id, provider, threadId, question, status: 'error', durationMs, error: outcome.error ?? 'bad_output', createdAt }
+          : { id, provider, threadId, question, status: 'done', answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
+      if (outcome.answer !== undefined && provider === 'claude-code' && !thread.started && this.#threads.get(threadId) === thread) {
+        thread.started = true;
+        this.#saveThreads();
+      }
+      if (entry.purge) this.#purge(entry.purge);
       this.#emit(entry);
     };
     child.once('error', (err: NodeJS.ErrnoException) => {
@@ -249,6 +369,82 @@ export class AskRunner {
       ...(error === undefined ? {} : { error }),
     });
   }
+}
+
+function readThreads(path: string): Thread[] {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    if (!isNotFound(err)) console.error(`wristline: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+  const raw = parseJson(text)?.threads;
+  const threads: Thread[] = [];
+  for (const t of Array.isArray(raw) ? raw : []) {
+    const id = isObject(t) ? str(t.id) : undefined;
+    const deviceId = isObject(t) ? str(t.deviceId) : undefined;
+    const lastAskAt = isObject(t) ? str(t.lastAskAt) : undefined;
+    if (!isObject(t) || !id || !deviceId || !lastAskAt || (t.provider !== 'claude-code' && t.provider !== 'codex')) continue;
+    const sessionId = str(t.sessionId);
+    threads.push({ id, provider: t.provider, deviceId, lastAskAt, ...(sessionId ? { sessionId } : {}), started: t.started === true });
+  }
+  return threads;
+}
+
+/** The `thread.started` line of `codex exec --json`, if this is one. */
+function codexThreadId(line: string): string | undefined {
+  if (!line.includes('thread.started')) return undefined;
+  const event = parseJson(line);
+  return event?.type === 'thread.started' ? str(event.thread_id) : undefined;
+}
+
+/**
+ * Deletes the CLI's files for a thread. Claude Code: the transcript and its sub-agent directory
+ * under the scratch cwd's project directory. Codex: `codex delete --force <id>` (removes the
+ * rollout and the session_index line); without the CLI, or when it fails, the same by hand.
+ */
+async function purgeThread(thread: Thread, o: AskRunnerOptions, cwd: string, spawn: AskSpawn, env: NodeJS.ProcessEnv): Promise<void> {
+  const id = thread.sessionId;
+  if (!id) return;
+  if (thread.provider === 'claude-code') {
+    const project = join(o.claudeHome, 'projects', projectSlug(cwd));
+    await rm(join(project, `${id}.jsonl`), { force: true });
+    await rm(join(project, id), { recursive: true, force: true });
+    return;
+  }
+  if (o.bins.codex && (await codexDelete(o.bins.codex, id, spawn, { ...env, CODEX_HOME: o.codexHome }, cwd))) return;
+  const rollouts = await scanRollouts(join(o.codexHome, 'sessions'));
+  const file = rollouts?.get(id);
+  for (const f of file ? [file, ...file.previous] : []) await rm(f.path, { force: true });
+  const index = join(o.codexHome, 'session_index.jsonl');
+  let lines: string[];
+  try {
+    lines = (await readFile(index, 'utf8')).split('\n');
+  } catch (err) {
+    if (isNotFound(err)) return;
+    throw err;
+  }
+  const kept = lines.filter((line) => parseJson(line)?.id !== id);
+  if (kept.length !== lines.length) await writeFile(index, kept.join('\n'));
+}
+
+/** Resolves true when `codex delete --force <id>` exited 0. */
+function codexDelete(bin: string, id: string, spawn: AskSpawn, env: NodeJS.ProcessEnv, cwd: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, ['delete', '--force', id], { cwd, env });
+    const timer = setTimeout(() => child.kill('SIGKILL'), DELETE_TIMEOUT_MS);
+    child.stdout?.resume();
+    child.stderr?.resume();
+    child.once('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
 }
 
 /** `claude -p --output-format json` prints one result object. */

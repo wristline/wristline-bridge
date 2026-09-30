@@ -87,15 +87,16 @@ const FAKE_CLI = fileURLToPath(new URL('./fake-cli.ts', import.meta.url));
 
 /**
  * An AskRunner whose `claude` and `codex` are test/fake-cli.ts (no real CLI); `fakeEnv` reaches it
- * (FAKE_MODE, FAKE_ARGV_FILE, FAKE_PID_FILE) and can be changed between asks.
+ * (FAKE_MODE, FAKE_ARGV_FILE, FAKE_PID_FILE) and can be changed between asks. Its agent homes are
+ * empty directories next to its config dir (`options.dir`, a fresh temp dir by default).
  */
 export function fakeAskRunner(onEvent: AskRunnerOptions['onEvent'], fakeEnv: Record<string, string>, options: Partial<AskRunnerOptions> = {}): AskRunner {
-  const dir = mkdtempSync(join(tmpdir(), 'wristline-ask-'));
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), 'wristline-ask-'));
   return new AskRunner({
     dir,
     bins: { claude: 'claude', codex: 'codex' },
-    claudeHome: '/home/u/.claude',
-    codexHome: '/home/u/.codex',
+    claudeHome: join(dir, 'claude'),
+    codexHome: join(dir, 'codex'),
     ask: { provider: 'claude-code', claudeModel: 'haiku', codexModel: 'gpt-6-astra' },
     onEvent,
     spawn: (bin, args, o) => spawn(process.execPath, [FAKE_CLI, bin, ...args], { cwd: o.cwd, env: { ...o.env, ...fakeEnv }, stdio: ['ignore', 'pipe', 'pipe'] }),

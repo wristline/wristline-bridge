@@ -18,6 +18,11 @@ export interface TranscriptFile {
   size: number;
 }
 
+/** The name of a cwd's directory under `projects/`. */
+export function projectSlug(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
 export interface RegistryEntry {
   pid: number;
   sessionId: string;

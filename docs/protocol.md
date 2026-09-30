@@ -93,8 +93,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   sent at once when an entry first appears and then at most once per minute per entry, with the
   merged state at the time of sending.
 
-- **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `question` (the watch's
-  text, trimmed), `status` (`running`, `done`, `error`), `createdAt`; when `done`, `answer` (at
+- **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `threadId` (the id of the
+  first ask of the conversation it belongs to; its own id for a first ask), `question` (the
+  watch's text, trimmed), `status` (`running`, `done`, `error`), `createdAt`; when `done`, `answer` (at
   most 4000 code units) and `model` when known (Claude Code: the model's name for people, e.g.
   `Haiku 4.5`; Codex: the bridge's configured `codexModel`, absent when unset); when `done` or
   `error`, `durationMs` (CLI start to exit); when `error`, `error`: `timeout`, `cancelled`,
@@ -121,9 +122,10 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
-| `POST /api/ask` `{provider, text, model?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
-| `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first | `401` | `asks.json` |
+| `POST /api/ask` `{provider, text, model?, threadId?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model` or `threadId`, a `threadId` of the other provider), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
+| `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first, each with its `threadId` | `401` | `asks.json` |
 | `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
+| `DELETE /api/asks/thread/:threadId` | `204`: the thread is forgotten and its CLI session deleted (a running ask of it is cancelled first) | `404` (not this device's thread) | |
 | `GET /api/ws` | WebSocket upgrade | `401`, `429` | |
 
 `:sid` is URL-encoded. A session that ended and left the list still serves its items (and
@@ -144,11 +146,23 @@ page>`. Bridges that predate `kinds` ignore it (here and in `subscribe`) and sen
 
 `POST /api/ask` runs the agent CLI once, headless and without tools, for a short answer (Claude
 Code: `claude -p --model haiku …`, Codex: `codex exec -s read-only …`; the exact commands are in
-the README). It is not a session: nothing appears in `GET /api/sessions`, no `session` event is
-sent, and the run leaves no session files (`--no-session-persistence`, `--ephemeral`). Claude
-Code's Stop and Notification hooks for the run are recognised by its session id and never become
-`alert` events. `provider` may be omitted by older clients; the bridge then uses its configured
+the README). `provider` may be omitted by older clients; the bridge then uses its configured
 default. `model` overrides the bridge's configured model for that ask.
+
+**Threads.** Every ask belongs to a thread, a conversation the CLI can continue. Without
+`threadId` the ask starts a new thread whose id is the ask's own id; with the `threadId` of one
+of this device's earlier asks it continues that conversation (Claude Code: `claude -p --resume`,
+Codex: `codex exec resume`), so the follow-up can refer to what was said before. The watch groups
+`GET /api/asks` by `threadId`. A thread expires 24 h after its last ask, or at once with `DELETE
+/api/asks/thread/:threadId`; either way the bridge deletes the CLI's files for it (the Claude Code
+transcript, or the Codex rollout via `codex delete`). A `threadId` the bridge does not know (expired,
+another device's, or from before the last bridge restart of an ask that never started) gets `404`;
+a thread of the other provider `400`. Thread ids survive a bridge restart; the asks themselves do not.
+
+Ask threads are not sessions: nothing appears in `GET /api/sessions`, no `session` event is sent,
+their items cannot be read, and Claude Code's hooks for them (PermissionRequest, Notification, Stop)
+are recognised by the session id and answer "no decision" without opening a request or raising an
+`alert`.
 
 One ask runs per device at a time: a second `POST` while one runs gets `409 busy` (there is no
 queue; cancel or wait). A run is killed after 90 s (`error: timeout`). Asks are kept in memory:

@@ -43,6 +43,8 @@ export interface CodexOptions extends AccountsOptions {
   now?: () => number;
   /** Connection to the app-server daemon; without it the provider is read-only. */
   rpc?: CodexRpc;
+  /** True for a thread id that is a Quick Ask thread (src/ask.ts): never listed, its requests never opened. */
+  isAsk?: (nativeId: string) => boolean;
 }
 
 /**
@@ -57,6 +59,7 @@ export class CodexProvider implements SessionProvider {
   readonly #historyDays: number;
   readonly #now: () => number;
   readonly #accounts: CodexAccounts;
+  readonly #isAsk: (nativeId: string) => boolean;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
   /** First lines of rollouts seen, by path; a rollout's first line never changes. */
@@ -92,6 +95,7 @@ export class CodexProvider implements SessionProvider {
     this.#indexTail = new JsonlTail(join(this.home, 'session_index.jsonl'), this.#index);
     this.#rpc = options.rpc;
     this.#accounts = new CodexAccounts(options);
+    this.#isAsk = options.isAsk ?? (() => false);
   }
 
   async start(hub: Hub): Promise<void> {
@@ -172,7 +176,7 @@ export class CodexProvider implements SessionProvider {
 
     const cutoff = now - this.#historyDays * DAY_MS;
     const recent = [...this.#files]
-      .filter(([, f]) => f.mtimeMs >= cutoff)
+      .filter(([id, f]) => f.mtimeMs >= cutoff && !this.#isAsk(id))
       .sort(([, a], [, b]) => b.mtimeMs - a.mtimeMs)
       .slice(0, HISTORY_MAX);
     const ids = new Set(recent.map(([id]) => id));
@@ -465,6 +469,7 @@ export class CodexProvider implements SessionProvider {
     const pending = this.#hub?.pending;
     if (!ask || !pending) return undefined;
     const root = this.#loaded.get(ask.threadId)?.parent ?? ask.threadId;
+    if (this.#isAsk(root)) return undefined;
     const abort = new AbortController();
     this.#asks.set(request.id, { threadId: ask.threadId, turnId: ask.turnId, itemId: ask.itemId, abort });
     return pending.open({ sessionId: sessionKey(this.id, root), ...ask.draft }, { signal: abort.signal }).then((answers) => {

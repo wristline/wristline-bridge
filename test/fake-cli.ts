@@ -2,13 +2,16 @@
 // Records its argv in $FAKE_ARGV_FILE and its pid in $FAKE_PID_FILE, then behaves per $FAKE_MODE:
 // `ok` prints the output recorded from the real CLIs (Claude Code 2.1.285, codex-cli 0.159.2),
 // `sleep` waits for a signal, `fail` reports a failed run, `garbage` prints something else.
+// `codex delete` only records its argv and exits 0.
 import { writeFileSync } from 'node:fs';
 
 const kind = process.argv[2];
 const args = process.argv.slice(3);
 if (process.env.FAKE_ARGV_FILE) writeFileSync(process.env.FAKE_ARGV_FILE, JSON.stringify(args));
 if (process.env.FAKE_PID_FILE) writeFileSync(process.env.FAKE_PID_FILE, String(process.pid));
-const sessionId = args[args.indexOf('--session-id') + 1] ?? 'd1ffcf59-1253-446e-81e1-7444697bafe3';
+const sessionFlag = args.includes('--session-id') ? '--session-id' : '--resume';
+const sessionId = args[args.indexOf(sessionFlag) + 1] ?? 'd1ffcf59-1253-446e-81e1-7444697bafe3';
+if (kind === 'codex' && args[0] === 'delete') process.exit(0);
 
 const claudeOk = {
   type: 'result',

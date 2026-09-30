@@ -125,33 +125,42 @@ input box before walking away.
 
 The watch's "Ask" button sends a spoken question to the bridge, which runs the agent CLI on your
 PC once, headless, and returns a short answer (about 80 words, in the language of the question).
-Nothing is added to the session list. `setup` records the `claude` binary in `config.json`
-(`bins.claude`, next to `codex`); without it the watch gets `ask_unavailable`.
+A follow-up asked from the answer screen continues the same conversation (a *thread*), so "and
+in French?" works. Nothing is added to the session list. `setup` records the `claude` binary in
+`config.json` (`bins.claude`, next to `codex`); without it the watch gets `ask_unavailable`.
 
 What runs, in an empty scratch directory (`~/.config/wristline/ask-cwd`, so no project
 `CLAUDE.md`/`AGENTS.md` applies) with the question passed as an argument (no shell):
 
 ```sh
-claude -p --output-format json --model haiku --max-turns 1 --no-session-persistence \
-  --tools "" --permission-prompts none --strict-mcp-config --session-id <uuid> \
+# first question of a thread
+claude -p --output-format json --model haiku --max-turns 1 --tools "" --permission-prompts none \
+  --strict-mcp-config --session-id <thread uuid> \
   --append-system-prompt "<answer briefly, in the user's language>" --safe-mode -- "<question>"
+# follow-up: the same with --resume <thread uuid> instead of --session-id
 
-codex exec --json -s read-only --skip-git-repo-check --ephemeral -C <scratch dir> \
-  [-m <codexModel>] -- "<instruction + question>"
+codex exec --json -s read-only --skip-git-repo-check -C <scratch dir> [-m <codexModel>] -- "<instruction + question>"
+codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' --skip-git-repo-check [-m <codexModel>] -- "<instruction + question>"
 ```
 
 - **No tools.** Claude Code runs with every tool disabled and permission prompts auto-denied;
-  Codex runs in its read-only sandbox (`codex exec` cannot ask for approval). `--safe-mode` also
-  leaves your hooks, MCP servers and CLAUDE.md out.
-- **No session.** Neither CLI writes session files for the run, so the bridge (and your
-  `claude --resume` picker) never lists it. The bridge chooses the Claude Code session id and
-  ignores any Stop/Notification hook that reports it.
+  Codex runs in its read-only sandbox (`codex exec` cannot ask for approval; `exec resume` takes
+  no `-s`, so the sandbox goes in as a config override). `--safe-mode` also leaves your hooks,
+  MCP servers and CLAUDE.md out.
+- **Temporary sessions.** Each thread is a CLI session of its own (a Claude Code transcript under
+  `~/.claude/projects/-…-wristline-ask-cwd/`, or a Codex rollout; the Codex thread id is taken
+  from `codex exec`'s `thread.started` line). The bridge never lists it, reads its items, opens a
+  request or raises an alert for it (its hooks are recognised by the session id), and deletes it
+  24 hours after the thread's last question or when the watch deletes the thread (Claude Code:
+  the transcript and its sub-agent directory; Codex: `codex delete --force <id>`, or the rollout
+  and `session_index.jsonl` line by hand when the CLI is missing). Threads are remembered in
+  `~/.config/wristline/ask-threads.json` so a bridge restart neither lists nor forgets them.
 - **Uses your plan.** Each question is one API turn on the account the CLI is logged into
   (the primary Claude Code home and `CODEX_HOME`). A Haiku answer cost about $0.03 of plan
   usage in our test; Codex sends about 15k input tokens (mostly cached).
 - **Limits.** One question at a time per watch (`busy` otherwise), 90 s timeout, answers cut
   at 4000 characters, the last 10 questions kept in memory for 24 hours (or until the bridge
-  restarts).
+  restarts; a thread from before the restart can still be continued while its session exists).
 
 `config.json` defaults, all optional:
 
