@@ -88,6 +88,8 @@ export class BridgeHub implements Hub {
   // Hub
 
   session(session: Session): void {
+    // The watch lists live sessions only: one that ends leaves its list (and cancels a throttled update).
+    if (this.#overlay(session).status === 'ended') return this.removed(session.id);
     const now = Date.now();
     const t = this.#throttles.get(session.id) ?? { last: Number.NEGATIVE_INFINITY };
     this.#throttles.set(session.id, t);
@@ -134,11 +136,11 @@ export class BridgeHub implements Hub {
 
   // Queries
 
-  /** needs_input first, then running, then most recent activity. A session two instances list (a copied home) counts once, from the first, as in `resolve`. */
+  /** Live sessions only (not ended): needs_input first, then running, then most recent activity. A session two instances list (a copied home) counts once, from the first, as in `resolve`. */
   sessions(): Session[] {
     const byId = new Map<string, Session>();
     for (const p of this.#providers) for (const s of p.listSessions()) if (!byId.has(s.id)) byId.set(s.id, this.#overlay(s));
-    return [...byId.values()].sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.lastActivity.localeCompare(a.lastActivity));
+    return [...byId.values()].filter((s) => s.status !== 'ended').sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || b.lastActivity.localeCompare(a.lastActivity));
   }
 
   providerHealth(): ProviderHealth[] {

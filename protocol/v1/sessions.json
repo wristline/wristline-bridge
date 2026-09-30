@@ -36,15 +36,6 @@
       },
       "model": "gpt-6-astra",
       "effort": "medium"
-    },
-    {
-      "id": "claude-code:6f1c2d3e-0000-4000-8000-000000000002",
-      "provider": "claude-code",
-      "title": "",
-      "cwd": "/home/dev/site",
-      "status": "ended",
-      "lastActivity": "2026-09-28T18:00:00.000Z",
-      "promptBlock": "not_live"
     }
   ]
 }

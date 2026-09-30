@@ -42,7 +42,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
 
 - **Session** — `id` is `<provider>:<nativeId>` (`claude-code` or `codex`). `title` may be empty
   (the watch shows a localised placeholder). `status` is `running`, `idle`, `needs_input` or
-  `ended`; a session with an open request is always `needs_input`. `promptBlock`, when present,
+  `ended`; a session with an open request is always `needs_input`. Only live sessions (not
+  `ended`) are listed and sent in `session` events: a session that ends is sent as
+  `session_removed`. `promptBlock`, when present,
   says why a prompt would be refused: `not_live`, `no_tmux`, `awaiting_input`, `busy`,
   `unsupported`; a session with an open request reports `awaiting_input` unless a lasting reason
   applies. `context` is `{used, window}` in tokens. A further code, `unsafe_prefix`, is only
@@ -94,7 +96,7 @@ All timestamps are ISO 8601 in UTC.
 | `POST /api/pair` `{code, deviceName}` | `200 {token, deviceId, bridge}` | `400`, `401 invalid_code`, `404` (no pairing window), `429` | `pair.json` |
 | `GET /api/health` | `200 {name, version, apiVersion, providers[]}`; each provider `{id, status: ok\|not_found, version?, detail?}` (`detail`: English diagnostic text, e.g. the Codex app-server connection) | `401` | `health.json` |
 | `DELETE /api/device` | `204` (revokes the calling device) | `401` | |
-| `GET /api/sessions` | `200 {sessions}` sorted needs_input, running, then most recent | `401` | `sessions.json` |
+| `GET /api/sessions` | `200 {sessions}`: live sessions only (not `ended`), sorted needs_input, running, then most recent | `401` | `sessions.json` |
 | `GET /api/sessions/:sid/items?before=&limit=40&kinds=` | `200 {items, hasMore}`: the `limit` (max 200) newest items with `seq < before`, only of `kinds` when given; `hasMore`: an older such item exists | `400` (also for an unknown kind), `404` | `items.json`, `items-filtered.json` |
 | `POST /api/sessions/:sid/prompt` `{text}` | `202 {}` | `400`, `404`, `409 {error: PromptBlock}`, `413` (text over 4000) | `error-409-prompt-blocked.json`, `error-409-unsafe-prefix.json` |
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
@@ -102,8 +104,13 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
 | `GET /api/ws` | WebSocket upgrade | `401`, `429` | |
 
-`:sid` is URL-encoded. The first valid answer to a request wins; later answers and answers to
-unknown ids get `409 already_resolved`.
+`:sid` is URL-encoded. A session that ended and left the list still serves its items (and
+`subscribe`) while the bridge tracks it: activity within `historyDays` (default 7) and among the
+50 most recent per agent home. An open detail screen keeps working; a prompt to it gets
+`409 not_live`. Only an unknown `:sid` gets `404`.
+
+The first valid answer to a request wins; later answers and answers to unknown ids get
+`409 already_resolved`.
 
 `kinds` is an optional comma-separated list of item kinds without spaces, e.g.
 `kinds=user,assistant,notice` to hide tool rows. Paging then counts matching items only: a page
@@ -117,9 +124,9 @@ Server events (JSON text frames):
 
 | `type` | Fields | When | Fixture |
 |---|---|---|---|
-| `snapshot` | `apiVersion, sessions, requests, usage` | right after connecting | `event-snapshot.json` |
-| `session` | `session` | a session was added or changed; at most one per session every 2 s | `event-session.json` |
-| `session_removed` | `sessionId` | a session left the list | `event-session-removed.json` |
+| `snapshot` | `apiVersion, sessions, requests, usage` | right after connecting; `sessions` as in `GET /api/sessions` (live only) | `event-snapshot.json` |
+| `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json` |
+| `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |

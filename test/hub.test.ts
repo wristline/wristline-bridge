@@ -47,6 +47,50 @@ test('two instances of one provider: resolve picks the one listing the session, 
   }
 });
 
+test('snapshot and GET /api/sessions list live sessions only; a session that ends is sent as session_removed and its items stay readable', async () => {
+  const p = new FakeProvider();
+  const running: Session = { ...session('run'), status: 'running' };
+  const waiting: Session = { ...session('wait'), status: 'needs_input', lastActivity: '2026-09-29T09:00:00.000Z' };
+  const idle = session('idle');
+  const ended: Session = { ...session('old'), status: 'ended', promptBlock: 'not_live', lastActivity: '2026-09-29T11:00:00.000Z' };
+  p.sessions = [ended, idle, running, waiting];
+  p.items.set('old', [{ seq: 1, kind: 'user', ts: '2026-09-29T09:00:00.000Z', text: 'still here' }]);
+  const bridge = await startBridge(p);
+  const get = (path: string): Promise<Response> => fetch(`${bridge.base}${path}`, { headers: { authorization: `Bearer ${bridge.token}` } });
+  try {
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    const snapshot = await ws.next();
+    const live = ['claude-code:wait', 'claude-code:run', 'claude-code:idle'];
+    assert.deepEqual(snapshot.type === 'snapshot' && snapshot.sessions.map((s) => s.id), live);
+    assert.deepEqual(((await (await get('/api/sessions')).json()) as { sessions: Session[] }).sessions.map((s) => s.id), live);
+
+    // A change to a live session is a session event; the end of one is session_removed.
+    const renamed = { ...idle, title: 'renamed' };
+    bridge.hub.session(renamed);
+    assert.deepEqual(await ws.next(), { type: 'session', session: renamed });
+    p.sessions = [ended, idle, { ...running, status: 'ended', promptBlock: 'not_live' }, waiting];
+    bridge.hub.session(p.sessions[2] as Session);
+    assert.deepEqual(await ws.next(), { type: 'session_removed', sessionId: running.id });
+    assert.deepEqual(((await (await get('/api/sessions')).json()) as { sessions: Session[] }).sessions.map((s) => s.id), ['claude-code:wait', 'claude-code:idle']);
+
+    // An update held back by the 2 s throttle must not follow the removal and bring the session back.
+    bridge.hub.session({ ...idle, title: 'held back' });
+    bridge.hub.session({ ...idle, status: 'ended' });
+    assert.deepEqual(await ws.next(), { type: 'session_removed', sessionId: idle.id });
+    await new Promise((r) => setTimeout(r, 2200));
+    assert.equal(ws.pending(), 0);
+
+    // An ended session the provider still lists keeps serving items (an open detail screen); unknown ids are 404.
+    const items = await get('/api/sessions/claude-code:old/items');
+    assert.equal(items.status, 200);
+    assert.deepEqual(((await items.json()) as { items: unknown[] }).items.length, 1);
+    assert.equal((await get('/api/sessions/claude-code:gone/items')).status, 404);
+    ws.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('usage is kept per provider and account; a labelled entry retires the unlabelled one for good; stale snapshots are ignored; changed numbers or accounts are broadcast', async () => {
   const bridge = await startBridge(new FakeProvider());
   try {

@@ -1,7 +1,7 @@
 // Generates protocol/v1/*.json from a fake provider through the real server and checks that the
 // committed fixtures match. Regenerate with `UPDATE_FIXTURES=1 npm test`.
-// The watch app's demo mode loads event-snapshot.json and items.json, so the snapshot carries a
-// session of every status and one request of each kind.
+// The watch app's demo mode loads event-snapshot.json and items.json, so the snapshot carries one
+// request of each kind. The ended session is not listed (live sessions only); it still answers a prompt with 409.
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
