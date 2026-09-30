@@ -130,8 +130,8 @@ export class BridgeHub implements Hub {
     if (changed) this.#broadcast({ type: 'usage', usage });
   }
 
-  alert(sessionId: string, alert: AlertKind, text?: string): void {
-    this.#broadcast(text === undefined ? { type: 'alert', sessionId, alert } : { type: 'alert', sessionId, alert, text });
+  alert(sessionId: string, alert: AlertKind, text?: string, title?: string): void {
+    this.#broadcast({ type: 'alert', sessionId, alert, ...(text === undefined ? {} : { text }), ...(title === undefined ? {} : { title }) });
   }
 
   // Queries

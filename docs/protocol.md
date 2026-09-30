@@ -131,7 +131,7 @@ Server events (JSON text frames):
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed | `event-usage.json` |
-| `alert` | `sessionId, alert, text?` | `needs_input` or `done` (text: short summary) | `event-alert.json` |
+| `alert` | `sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) | `event-alert.json` |
 
 Client events:
 
@@ -160,6 +160,11 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
 - `POST /local/pair` `{}` → `{code, expiresAt}`: opens a 5-minute, single-use pairing window
   (closed after 5 wrong codes). `{"token": true, "name": "..."}` → `{token, deviceId}` instead.
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
+- `GET /local/presence` → `{watch, since}`: `watch` is true while a watch is connected or
+  disconnected less than 90 s ago (the same rule that routes permission requests to the watch);
+  `since` is when that state began (ISO; the first connect of the run, or the last disconnect),
+  `null` before any watch connected. Other Stop hooks (e.g. a Slack notifier) use it to stay
+  quiet while the watch shows the alert.
 - `POST /local/statusline` — the Claude Code statusLine JSON; every `rate_limits` entry with a
   `used_percentage` becomes a usage window (`five_hour` → `5h`, `seven_day` → `7d`,
   `seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`; `resets_at` epoch seconds → ISO)
@@ -183,4 +188,10 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   [spikes.md](spikes.md), S2).
 - `POST /hooks/notification`, `POST /hooks/stop` — empty `200`; `permission_prompt` and
   `agent_needs_input` notifications raise `alert needs_input` when no request of that session is
-  open; Stop raises `alert done` with `last_assistant_message` (120 characters).
+  open. Stop raises `alert done` with up to 500 characters of `last_assistant_message`, unless the
+  trimmed answer is shorter than 20 characters or is "No response requested." (nothing is raised
+  then). Its `title` is the first 60 characters of the prompt when the turn was typed by the user
+  (found in `transcript_path`: the newest non-tool_result user line, or the `origin` line of the
+  same `promptId`, with `origin.kind` `human` and no `isMeta`; reminders, pasted content and
+  command wrappers stripped); otherwise (task notification, peer message, scheduled task, local
+  command, unreadable transcript) the session title, omitted when there is none.

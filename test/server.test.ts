@@ -40,6 +40,8 @@ test('prompt: 202 when accepted, 413 when too long, 400 without text', async () 
 test('the local listener requires the hook token and manages devices', async () => {
   assert.equal((await fetch(`${bridge.local}/local/devices`)).status, 401);
   assert.equal((await fetch(`${bridge.local}/local/devices`, auth(bridge.token))).status, 401);
+  assert.equal((await fetch(`${bridge.local}/local/presence`, auth(bridge.token))).status, 401);
+  assert.deepEqual(await (await fetch(`${bridge.local}/local/presence`, auth(bridge.hookToken))).json(), { watch: false, since: null });
   const pair = await fetch(`${bridge.local}/local/pair`, { method: 'POST', ...auth(bridge.hookToken) });
   const { code } = (await pair.json()) as { code: string };
   assert.match(code, /^\d{6}$/);
@@ -49,6 +51,7 @@ test('the local listener requires the hook token and manages devices', async () 
 
   const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, token).open();
   const closed = once(ws.ws, 'close');
+  assert.deepEqual(await (await fetch(`${bridge.local}/local/presence`, auth(bridge.hookToken))).json(), { watch: true, since: '2026-09-29T10:00:00.000Z' });
   const list = (await (await fetch(`${bridge.local}/local/devices`, auth(bridge.hookToken))).json()) as { devices: { id: string }[] };
   assert.ok(list.devices.some((d) => d.id === deviceId));
   assert.equal((await fetch(`${bridge.local}/local/devices/${deviceId}`, { method: 'DELETE', ...auth(bridge.hookToken) })).status, 204);

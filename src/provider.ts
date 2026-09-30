@@ -6,7 +6,7 @@ export interface Hub {
   session(session: Session): void;
   removed(sessionId: string): void;
   usage(usage: Usage): void;
-  alert(sessionId: string, alert: AlertKind, text?: string): void;
+  alert(sessionId: string, alert: AlertKind, text?: string, title?: string): void;
   readonly pending: PendingRegistry;
 }
 

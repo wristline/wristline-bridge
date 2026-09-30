@@ -1,5 +1,8 @@
 // Claude Code hook handlers served on the local listener, driven over real HTTP like Claude Code does.
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import type { PendingRequest, ServerEvent, Session } from '../src/protocol.ts';
 import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
@@ -264,7 +267,7 @@ test('pre-tool-use answers AskUserQuestion and ignores other tools', async () =>
   });
 });
 
-test('notification: needs_input alert only when no request is open; stop: done alert with the last message', async () => {
+test('notification: needs_input alert only when no request is open', async () => {
   const notify = { session_id: SID, hook_event_name: 'Notification', message: 'Claude needs your permission', notification_type: 'permission_prompt' };
   await emptyOk(await hook(bridge, 'notification', notify));
   assert.deepEqual(await nextOf(ws, 'alert'), { type: 'alert', sessionId: session.id, alert: 'needs_input', text: 'Claude needs your permission' });
@@ -275,10 +278,52 @@ test('notification: needs_input alert only when no request is open; stop: done a
   await emptyOk(await hook(bridge, 'notification', notify));
   await answer(bridge, request.id, { decision: ['allow'] });
   await open;
-
-  await emptyOk(await hook(bridge, 'stop', { session_id: SID, hook_event_name: 'Stop', last_assistant_message: `Done.\n\n${'y'.repeat(300)}` }));
+  await emptyOk(await hook(bridge, 'stop', { session_id: SID, hook_event_name: 'Stop', last_assistant_message: 'The build is green again, all tests pass.' }));
   const done = await nextOf(ws, 'alert');
   assert.equal(done.type === 'alert' && done.alert, 'done', 'the ignored notifications produced no alert');
-  assert.equal(done.type === 'alert' && done.text?.length, 120);
-  assert.ok(done.type === 'alert' && done.text?.startsWith('Done. yyy'));
+});
+
+test('stop: no alert for an empty, short or "No response requested." answer', async () => {
+  const stop = (last: unknown): Promise<Response> => hook(bridge, 'stop', { session_id: SID, hook_event_name: 'Stop', last_assistant_message: last });
+  for (const last of [undefined, '', '   \n\t ', 'a'.repeat(19), '가'.repeat(19), 'No response requested.', ' no response requested \n', 'NO RESPONSE REQUESTED.']) {
+    await emptyOk(await stop(last));
+  }
+  await emptyOk(await stop('가'.repeat(20)));
+  assert.deepEqual(await nextOf(ws, 'alert'), { type: 'alert', sessionId: session.id, alert: 'done', text: '가'.repeat(20), title: 't' });
+  await emptyOk(await stop('No response requested. Pushed the fix anyway.'));
+  assert.equal((await nextOf(ws, 'alert')).type === 'alert' && ws.pending(), 0);
+});
+
+test('stop: up to 500 characters of the answer, titled by the human prompt or else the session title', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wristline-hooks-'));
+  const write = (lines: unknown[]): string => {
+    const path = join(dir, `${Math.random()}.jsonl`);
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    return path;
+  };
+  const answer = `Done.\n\n${'y'.repeat(600)}`;
+  const stop = (transcript_path?: string): Promise<Response> =>
+    hook(bridge, 'stop', { session_id: SID, hook_event_name: 'Stop', last_assistant_message: answer, ...(transcript_path ? { transcript_path } : {}) });
+
+  await emptyOk(await stop());
+  let done = await nextOf(ws, 'alert');
+  assert.deepEqual(done, { type: 'alert', sessionId: session.id, alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…`, title: 't' });
+
+  const humanPrompt = `Please fix the build.\n<system-reminder>\nINTERNAL\n</system-reminder>\nAnd then ${'z'.repeat(80)}`;
+  await emptyOk(await stop(write([{ type: 'user', message: { role: 'user', content: humanPrompt }, promptId: 'p1', origin: { kind: 'human' } }, { type: 'assistant' }])));
+  done = await nextOf(ws, 'alert');
+  assert.equal(done.type === 'alert' && done.title, `Please fix the build. And then ${'z'.repeat(28)}…`);
+
+  const notification = { type: 'user', message: { role: 'user', content: '<task-notification>x</task-notification>' }, promptId: 'p2', origin: { kind: 'task-notification' } };
+  await emptyOk(await stop(write([{ type: 'user', message: { role: 'user', content: 'hi' }, promptId: 'p1', origin: { kind: 'human' } }, notification, { type: 'assistant' }])));
+  done = await nextOf(ws, 'alert');
+  assert.equal(done.type === 'alert' && done.title, 't', 'not a human turn: the session title');
+
+  await emptyOk(await stop(write([{ type: 'user', message: { role: 'user', content: [{ type: 'image' }] }, promptId: 'p1', origin: { kind: 'human' } }])));
+  done = await nextOf(ws, 'alert');
+  assert.equal(done.type === 'alert' && done.title, 't', 'an empty prompt falls back to the session title');
+
+  await emptyOk(await hook(bridge, 'stop', { session_id: 'unknown-session', hook_event_name: 'Stop', last_assistant_message: answer, transcript_path: join(dir, 'missing.jsonl') }));
+  done = await nextOf(ws, 'alert');
+  assert.deepEqual(done, { type: 'alert', sessionId: 'claude-code:unknown-session', alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…` }, 'no title without a session or prompt');
 });

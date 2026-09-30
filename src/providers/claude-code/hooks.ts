@@ -2,10 +2,12 @@
 // installs them and the statusLine relay script live in settings.ts. Verified against Claude Code 2.1.284.
 
 import { PERMISSION_QUESTION, type Option, type Question } from '../../protocol.ts';
+import type { BridgeHub } from '../../hub.ts';
 import { sessionKey, type Hub } from '../../provider.ts';
 import type { HookHandler } from '../../server.ts';
 import { clip, isObject, oneLine, str, type JsonObject } from '../../util.ts';
 import { toolSummary } from './parse.ts';
+import { humanPrompt } from './turn.ts';
 
 export const HOOK_NAMES = ['permission-request', 'pre-tool-use', 'notification', 'stop'] as const;
 export type HookName = (typeof HOOK_NAMES)[number];
@@ -13,11 +15,16 @@ export type HookName = (typeof HOOK_NAMES)[number];
 /** Longest tool description (e.g. an ExitPlanMode plan) shown on a permission request. */
 const PERMISSION_TEXT_MAX = 1500;
 const ALERT_TEXT_MAX = 120;
+/** The `done` alert carries more of the answer, and a title; answers shorter than DONE_MIN (or "No response requested.") raise none. */
+const DONE_TEXT_MAX = 500;
+const DONE_TITLE_MAX = 60;
+const DONE_MIN = 20;
+const NO_RESPONSE = /^no response requested\.?$/i;
 /** Notifications that mean "the session waits for you" when no request is open for it. */
 const NEEDS_INPUT = new Set(['permission_prompt', 'agent_needs_input']);
 
 export interface HookContext {
-  hub: Pick<Hub, 'pending' | 'alert'>;
+  hub: Pick<Hub, 'pending' | 'alert'> & Pick<BridgeHub, 'sessions'>;
   /** How long to wait for the watch before handing the decision back to the terminal. */
   waitMs: number;
   /** Aborted when Claude Code drops the hook request. */
@@ -25,7 +32,7 @@ export interface HookContext {
 }
 
 /** Handlers for the local listener's `/hooks/<name>` routes. */
-export function hookHandlers(hub: Hub, waitMs: number): Map<string, HookHandler> {
+export function hookHandlers(hub: HookContext['hub'], waitMs: number): Map<string, HookHandler> {
   return new Map(HOOK_NAMES.map((name) => [name, (input, signal) => handleHook(name, input, { hub, waitMs, signal })]));
 }
 
@@ -40,7 +47,7 @@ export async function handleHook(name: HookName, input: JsonObject, ctx: HookCon
       notification(input, ctx);
       return undefined;
     case 'stop':
-      stop(input, ctx);
+      await stop(input, ctx);
       return undefined;
   }
 }
@@ -184,9 +191,16 @@ function notification(input: JsonObject, ctx: HookContext): void {
   ctx.hub.alert(sessionId, 'needs_input', message ? clip(oneLine(message), ALERT_TEXT_MAX) : undefined);
 }
 
-function stop(input: JsonObject, ctx: HookContext): void {
+/**
+ * Same rule as the user's Slack Stop hook: nothing for an empty, short or "No response requested."
+ * answer; otherwise the answer's head, titled by the prompt of a human-typed turn, else the session title.
+ */
+async function stop(input: JsonObject, ctx: HookContext): Promise<void> {
   const sessionId = sessionOf(input);
   if (!sessionId) return;
-  const last = str(input.last_assistant_message);
-  ctx.hub.alert(sessionId, 'done', last ? clip(oneLine(last), ALERT_TEXT_MAX) : undefined);
+  const answer = (str(input.last_assistant_message) ?? '').trim();
+  if ([...answer].length < DONE_MIN || NO_RESPONSE.test(answer)) return;
+  const prompt = oneLine((await humanPrompt(str(input.transcript_path))) ?? '');
+  const title = prompt ? clip(prompt, DONE_TITLE_MAX) : ctx.hub.sessions().find((s) => s.id === sessionId)?.title;
+  ctx.hub.alert(sessionId, 'done', clip(answer, DONE_TEXT_MAX), title || undefined);
 }

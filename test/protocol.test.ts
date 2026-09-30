@@ -292,7 +292,7 @@ test('WebSocket events', async () => {
   fixture('event-session-removed', await ws.next());
   bridge.hub.usage({ ...usage, updatedAt: '2026-09-29T10:00:03.000Z', windows: [{ id: 'primary', usedPercent: 13, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 }] });
   fixture('event-usage', await ws.next());
-  bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.');
+  bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.', 'Fix the build script');
   fixture('event-alert', await ws.next());
 
   // The question is answered in the Codex terminal instead.

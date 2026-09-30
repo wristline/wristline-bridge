@@ -120,7 +120,7 @@ export type ServerEvent =
   | { type: 'request'; request: PendingRequest }
   | { type: 'resolved'; requestId: string; by: ResolvedBy }
   | { type: 'usage'; usage: Usage }
-  | { type: 'alert'; sessionId: string; alert: AlertKind; text?: string };
+  | { type: 'alert'; sessionId: string; alert: AlertKind; text?: string; title?: string };
 
 /** `kinds`, when present, limits the subscription's `item` events to those kinds. */
 export type ClientEvent = { type: 'subscribe'; sessionId: string | null; kinds?: ItemKind[] };

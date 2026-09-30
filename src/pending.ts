@@ -12,6 +12,11 @@ const WATCH_GRACE_MS = 90_000;
 const DEFER: PermissionOption = 'defer';
 
 export type RequestDraft = Omit<PendingRequest, 'id' | 'createdAt'>;
+/** `GET /local/presence` body. */
+export interface Presence {
+  watch: boolean;
+  since: string | null;
+}
 export type AnswerResult = 'ok' | 'already_resolved' | 'invalid';
 
 export interface OpenOptions {
@@ -40,6 +45,8 @@ export class PendingRegistry {
   readonly #newId: () => string;
   #watches = 0;
   #lastWatchSeen = Number.NEGATIVE_INFINITY;
+  /** When the current presence run began; undefined until the first watch connects. */
+  #presentSince: number | undefined;
 
   constructor(options: PendingOptions) {
     this.#onRequest = options.onRequest;
@@ -100,6 +107,7 @@ export class PendingRegistry {
   }
 
   watchConnected(): void {
+    if (!this.watchPresent()) this.#presentSince = this.#now();
     this.#watches++;
   }
 
@@ -111,6 +119,13 @@ export class PendingRegistry {
   /** True while a watch is connected or disconnected less than 90 s ago ("monitoring on" = away mode). */
   watchPresent(): boolean {
     return this.#watches > 0 || this.#now() - this.#lastWatchSeen <= WATCH_GRACE_MS;
+  }
+
+  /** `watchPresent()` plus when that state began: the first connect of this run, or the last disconnect (null before any watch). */
+  presence(): Presence {
+    const watch = this.watchPresent();
+    const since = watch ? this.#presentSince : this.#watches === 0 && this.#lastWatchSeen > Number.NEGATIVE_INFINITY ? this.#lastWatchSeen : undefined;
+    return { watch, since: since === undefined ? null : new Date(since).toISOString() };
   }
 }
 
