@@ -93,6 +93,13 @@ async function nextOf(socket: TestSocket, type: ServerEvent['type']): Promise<Se
   }
 }
 
+/** An alert event without its replay `id` and `at` (checked in alerts.test.ts). */
+function bare(event: ServerEvent): unknown {
+  if (event.type !== 'alert') return event;
+  const { id: _id, at: _at, ...rest } = event;
+  return rest;
+}
+
 async function nextRequest(socket: TestSocket = ws): Promise<PendingRequest> {
   const event = await nextOf(socket, 'request');
   assert.equal(event.type, 'request');
@@ -270,7 +277,7 @@ test('pre-tool-use answers AskUserQuestion and ignores other tools', async () =>
 test('notification: needs_input alert only when no request is open', async () => {
   const notify = { session_id: SID, hook_event_name: 'Notification', message: 'Claude needs your permission', notification_type: 'permission_prompt' };
   await emptyOk(await hook(bridge, 'notification', notify));
-  assert.deepEqual(await nextOf(ws, 'alert'), { type: 'alert', sessionId: session.id, alert: 'needs_input', text: 'Claude needs your permission' });
+  assert.deepEqual(bare(await nextOf(ws, 'alert')), { type: 'alert', sessionId: session.id, alert: 'needs_input', text: 'Claude needs your permission' });
 
   await emptyOk(await hook(bridge, 'notification', { ...notify, notification_type: 'idle_prompt' }));
   const open = hook(bridge, 'permission-request', bashInput);
@@ -289,7 +296,7 @@ test('stop: no alert for an empty, short or "No response requested." answer', as
     await emptyOk(await stop(last));
   }
   await emptyOk(await stop('가'.repeat(20)));
-  assert.deepEqual(await nextOf(ws, 'alert'), { type: 'alert', sessionId: session.id, alert: 'done', text: '가'.repeat(20), title: 't' });
+  assert.deepEqual(bare(await nextOf(ws, 'alert')), { type: 'alert', sessionId: session.id, alert: 'done', text: '가'.repeat(20), title: 't' });
   await emptyOk(await stop('No response requested. Pushed the fix anyway.'));
   assert.equal((await nextOf(ws, 'alert')).type === 'alert' && ws.pending(), 0);
 });
@@ -307,7 +314,7 @@ test('stop: up to 500 characters of the answer, titled by the human prompt or el
 
   await emptyOk(await stop());
   let done = await nextOf(ws, 'alert');
-  assert.deepEqual(done, { type: 'alert', sessionId: session.id, alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…`, title: 't' });
+  assert.deepEqual(bare(done), { type: 'alert', sessionId: session.id, alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…`, title: 't' });
 
   const humanPrompt = `Please fix the build.\n<system-reminder>\nINTERNAL\n</system-reminder>\nAnd then ${'z'.repeat(80)}`;
   await emptyOk(await stop(write([{ type: 'user', message: { role: 'user', content: humanPrompt }, promptId: 'p1', origin: { kind: 'human' } }, { type: 'assistant' }])));
@@ -325,5 +332,5 @@ test('stop: up to 500 characters of the answer, titled by the human prompt or el
 
   await emptyOk(await hook(bridge, 'stop', { session_id: 'unknown-session', hook_event_name: 'Stop', last_assistant_message: answer, transcript_path: join(dir, 'missing.jsonl') }));
   done = await nextOf(ws, 'alert');
-  assert.deepEqual(done, { type: 'alert', sessionId: 'claude-code:unknown-session', alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…` }, 'no title without a session or prompt');
+  assert.deepEqual(bare(done), { type: 'alert', sessionId: 'claude-code:unknown-session', alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…` }, 'no title without a session or prompt');
 });

@@ -96,6 +96,10 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   CLI (e.g. Claude Code's result `subtype` such as `error_max_turns`). Clients show unknown
   codes with a generic message.
 
+- **Alert** — a session finished or waits for input: `id` (uuid), `at` (ISO 8601), `sessionId`,
+  `alert` (`needs_input` or `done`), `text?`, `title?` (see the `alert` event). Sent as it happens
+  and replayed in the `snapshot` (see "Missed alerts").
+
 All timestamps are ISO 8601 in UTC.
 
 ## REST endpoints (public)
@@ -112,7 +116,7 @@ All timestamps are ISO 8601 in UTC.
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
 | `POST /api/ask` `{provider, text, model?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
-| `GET /api/asks` | `200 {asks}`: this device's 20 most recent asks, newest first | `401` | `asks.json` |
+| `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first | `401` | `asks.json` |
 | `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
 | `GET /api/ws` | WebSocket upgrade | `401`, `429` | |
 
@@ -141,9 +145,10 @@ Code's Stop and Notification hooks for the run are recognised by its session id 
 default. `model` overrides the bridge's configured model for that ask.
 
 One ask runs per device at a time: a second `POST` while one runs gets `409 busy` (there is no
-queue; cancel or wait). A run is killed after 90 s (`error: timeout`). Asks are kept in memory,
-20 per device, and are gone after a bridge restart. `ask` events go to the asking device only;
-after reconnecting, a watch refreshes `GET /api/asks` (the `snapshot` does not carry asks).
+queue; cancel or wait). A run is killed after 90 s (`error: timeout`). Asks are kept in memory:
+the newest 10 per device, none older than 24 h (older ones are dropped whenever an ask is added
+or listed), and none after a bridge restart. `ask` events go to the asking device only; after
+reconnecting, a watch refreshes `GET /api/asks` (the `snapshot` does not carry asks).
 
 ## WebSocket (`/api/ws`)
 
@@ -151,14 +156,14 @@ Server events (JSON text frames):
 
 | `type` | Fields | When | Fixture |
 |---|---|---|---|
-| `snapshot` | `apiVersion, sessions, requests, usage` | right after connecting; `sessions` as in `GET /api/sessions` (live only) | `event-snapshot.json` |
+| `snapshot` | `apiVersion, sessions, requests, usage, alerts` | right after connecting; `sessions` as in `GET /api/sessions` (live only); `alerts`: the last 10 alerts of the past 10 minutes, oldest first (see "Missed alerts") | `event-snapshot.json` |
 | `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json` |
 | `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed | `event-usage.json` |
-| `alert` | `sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) | `event-alert.json` |
+| `alert` | `id, at, sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json` |
 | `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
 Client events:
@@ -179,6 +184,16 @@ previous subscription and its filter.
 The server pings every 30 s and drops a connection that missed a pong. Revoking a device closes its
 connections with code `4001`. Reconnecting clients receive a fresh `snapshot` and must subscribe
 again.
+
+### Missed alerts
+
+A watch is often offline when a turn finishes. The bridge keeps the last 10 `alert`s (`done` and
+`needs_input`, every device's) in memory for 10 minutes and puts them in every `snapshot` as
+`alerts`, oldest first, exactly as they were sent (same `id`, `at`, `text`, `title`). A
+reconnecting watch posts the notifications for the ones it has not shown and remembers their
+`id`s: the same alert arrives once as an event and again in each later `snapshot` within those
+10 minutes, and `id` is what makes it one alert. Older bridges send a `snapshot` without
+`alerts` (treat it as empty). The buffer is gone after a bridge restart.
 
 ## Local API (not part of the watch protocol)
 

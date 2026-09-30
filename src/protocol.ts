@@ -112,6 +112,20 @@ export interface Usage {
 export type ResolvedBy = 'watch' | 'terminal' | 'timeout';
 export type AlertKind = 'needs_input' | 'done';
 
+/** A session finished or waits for input. Sent as an `alert` event and replayed in the `snapshot` (the last 10 of the past 10 minutes) for a watch that was offline. */
+export interface Alert {
+  /** uuid; a watch shows each id once (an event, then the snapshots that replay it). */
+  id: string;
+  /** ISO 8601 */
+  at: string;
+  sessionId: string;
+  alert: AlertKind;
+  /** `needs_input`: a short summary; `done`: up to 500 characters of the answer. */
+  text?: string;
+  /** `done`: the prompt that started the turn, else the session title. */
+  title?: string;
+}
+
 export type AskStatus = 'running' | 'done' | 'error';
 
 /** A Quick Ask: one headless, tool-less run of the agent CLI for a short answer. Kept in memory per device; never a session. */
@@ -135,14 +149,15 @@ export interface Ask {
 }
 
 export type ServerEvent =
-  | { type: 'snapshot'; apiVersion: typeof API_VERSION; sessions: Session[]; requests: PendingRequest[]; usage: Usage[] }
+  /** `alerts`: the buffered alerts, oldest first, so a reconnecting watch can post the ones it missed. */
+  | { type: 'snapshot'; apiVersion: typeof API_VERSION; sessions: Session[]; requests: PendingRequest[]; usage: Usage[]; alerts: Alert[] }
   | { type: 'session'; session: Session }
   | { type: 'session_removed'; sessionId: string }
   | { type: 'item'; sessionId: string; item: Item }
   | { type: 'request'; request: PendingRequest }
   | { type: 'resolved'; requestId: string; by: ResolvedBy }
   | { type: 'usage'; usage: Usage }
-  | { type: 'alert'; sessionId: string; alert: AlertKind; text?: string; title?: string }
+  | ({ type: 'alert' } & Alert)
   /** Sent to the asking device only; `text` is the answer. `running` once after the 202, then `done` or `error` once. */
   | { type: 'ask'; askId: string; provider: ProviderId; status: AskStatus; text?: string; model?: string; durationMs?: number; error?: string };
 

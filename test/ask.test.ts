@@ -14,9 +14,10 @@ const pidFile = join(root, 'pid');
 const fakeEnv: Record<string, string> = { FAKE_MODE: 'ok', FAKE_ARGV_FILE: argvFile, FAKE_PID_FILE: pidFile };
 let bridge: Bridge;
 let ws: TestSocket;
+let clock = Date.parse('2026-09-29T10:00:00Z');
 
 before(async () => {
-  bridge = await startBridge(new FakeProvider(), undefined, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { timeoutMs: 1500, now: () => Date.parse('2026-09-29T10:00:00Z') }));
+  bridge = await startBridge(new FakeProvider(), undefined, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { timeoutMs: 1500, now: () => clock }));
   ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
   assert.equal((await ws.next()).type, 'snapshot');
 });
@@ -173,24 +174,38 @@ test('output parsing: a failed run reports the CLI’s reason, unreadable output
   assert.deepEqual(parseCodex('not json\n{"type":"item.completed","item":{"type":"agent_message","text":"a"}}\n{"type":"turn.completed"}'), { answer: 'a' });
 });
 
-test('GET /api/asks keeps the newest 20 of this device, newest first', async () => {
+test('GET /api/asks keeps the newest 10 of this device from the last 24 h, newest first', async () => {
   const device = await bridge.auth.issue('busy watch');
   const socket = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, device.token).open();
   await socket.next();
   const ids: string[] = [];
-  for (let i = 0; i < 21; i++) {
-    ids.push(await accepted(await post({ provider: 'codex', text: `q${i}` }, device.token)));
+  const ask = async (text: string): Promise<void> => {
+    ids.push(await accepted(await post({ provider: 'codex', text }, device.token)));
     await askEvent(socket, 'running');
     await askEvent(socket, 'done');
-  }
-  socket.close();
+  };
+  for (let i = 0; i < 11; i++) await ask(`q${i}`);
   const list = await asks(device.token);
-  assert.equal(list.length, 20);
+  assert.equal(list.length, 10);
   assert.deepEqual(
     list.map((a) => a.id),
     ids.slice(1).reverse(),
   );
   assert.ok(!(await asks()).some((a) => a.question === 'q0'), 'lists are per device');
+
+  const start = clock;
+  clock = start + 23 * 60 * 60_000;
+  assert.equal((await asks(device.token)).length, 10, 'still there before a day has passed');
+  clock = start + 24 * 60 * 60_000 + 1;
+  assert.deepEqual(await asks(device.token), [], 'a day later they are gone');
+  await ask('q11');
+  assert.deepEqual(
+    (await asks(device.token)).map((a) => a.id),
+    [ids[11]],
+    'a new ask does not bring the old ones back',
+  );
+  socket.close();
+  clock = start;
 });
 
 test('Claude Code hooks of an ask’s session id never reach the watch', async () => {

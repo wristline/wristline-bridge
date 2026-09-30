@@ -1,5 +1,7 @@
 {
   "type": "alert",
+  "id": "a1e47c00-0000-4000-8000-000000000001",
+  "at": "2026-09-29T10:00:00.000Z",
   "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
   "alert": "done",
   "text": "Fixed the build script; all tests pass.",

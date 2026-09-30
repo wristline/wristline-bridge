@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 import { PendingRegistry, type PendingOptions } from './pending.ts';
 import {
   API_VERSION,
   CLOSE_REVOKED,
+  type Alert,
   type AlertKind,
   type Item,
   type PendingRequest,
@@ -17,6 +19,9 @@ import { parseJson } from './util.ts';
 
 const SESSION_THROTTLE_MS = 2000;
 const PING_MS = 30_000;
+/** Alerts replayed in the snapshot: at most this many, none older than ALERT_TTL_MS. */
+const ALERT_KEEP = 10;
+const ALERT_TTL_MS = 10 * 60_000;
 const STATUS_RANK: Record<Session['status'], number> = { needs_input: 0, running: 1, idle: 2, ended: 2 };
 
 interface Client {
@@ -55,6 +60,8 @@ export interface HubOptions {
   providers: SessionProvider[];
   /** Overrides for deterministic request ids and timestamps in tests. */
   pending?: Pick<PendingOptions, 'now' | 'newId'>;
+  /** The same for alert ids and timestamps. */
+  alerts?: Pick<PendingOptions, 'now' | 'newId'>;
 }
 
 /** Fans provider changes out to connected watches and tracks what each one subscribed to. */
@@ -68,9 +75,15 @@ export class BridgeHub implements Hub {
   readonly #watches = new Map<string, { stop: () => void; clients: Set<Client> }>();
   readonly #throttles = new Map<string, Throttle>();
   readonly #ping: NodeJS.Timeout;
+  /** Oldest first, at most ALERT_KEEP. */
+  readonly #alerts: Alert[] = [];
+  readonly #now: () => number;
+  readonly #newId: () => string;
 
   constructor(options: HubOptions) {
     this.#providers = options.providers;
+    this.#now = options.alerts?.now ?? Date.now;
+    this.#newId = options.alerts?.newId ?? randomUUID;
     this.pending = new PendingRegistry({
       ...options.pending,
       onRequest: (request) => {
@@ -130,8 +143,11 @@ export class BridgeHub implements Hub {
     if (changed) this.#broadcast({ type: 'usage', usage });
   }
 
-  alert(sessionId: string, alert: AlertKind, text?: string, title?: string): void {
-    this.#broadcast({ type: 'alert', sessionId, alert, ...(text === undefined ? {} : { text }), ...(title === undefined ? {} : { title }) });
+  alert(sessionId: string, kind: AlertKind, text?: string, title?: string): void {
+    const alert: Alert = { id: this.#newId(), at: new Date(this.#now()).toISOString(), sessionId, alert: kind, ...(text === undefined ? {} : { text }), ...(title === undefined ? {} : { title }) };
+    this.#alerts.push(alert);
+    if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();
+    this.#broadcast({ type: 'alert', ...alert });
   }
 
   /** To every connection of one device only (a Quick Ask answer is nobody else's business). */
@@ -157,8 +173,14 @@ export class BridgeHub implements Hub {
     return [...this.#usage.values()];
   }
 
+  /** The buffered alerts of the past ALERT_TTL_MS, oldest first: a reconnecting watch posts the ones it missed. */
+  alerts(): Alert[] {
+    const since = this.#now() - ALERT_TTL_MS;
+    return this.#alerts.filter((a) => Date.parse(a.at) >= since);
+  }
+
   snapshot(): ServerEvent {
-    return { type: 'snapshot', apiVersion: API_VERSION, sessions: this.sessions(), requests: this.pending.list(), usage: this.usageList() };
+    return { type: 'snapshot', apiVersion: API_VERSION, sessions: this.sessions(), requests: this.pending.list(), usage: this.usageList(), alerts: this.alerts() };
   }
 
   /** Finds the provider instance that lists the session. */

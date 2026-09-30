@@ -148,7 +148,8 @@ codex exec --json -s read-only --skip-git-repo-check --ephemeral -C <scratch dir
   (the primary Claude Code home and `CODEX_HOME`). A Haiku answer cost about $0.03 of plan
   usage in our test; Codex sends about 15k input tokens (mostly cached).
 - **Limits.** One question at a time per watch (`busy` otherwise), 90 s timeout, answers cut
-  at 4000 characters, the last 20 questions kept in memory until the bridge restarts.
+  at 4000 characters, the last 10 questions kept in memory for 24 hours (or until the bridge
+  restarts).
 
 `config.json` defaults, all optional:
 

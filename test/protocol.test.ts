@@ -1,7 +1,7 @@
 // Generates protocol/v1/*.json from a fake provider through the real server and checks that the
 // committed fixtures match. Regenerate with `UPDATE_FIXTURES=1 npm test`.
 // The watch app's demo mode loads event-snapshot.json and items.json, so the snapshot carries one
-// request of each kind. The ended session is not listed (live sessions only); it still answers a prompt with 409.
+// request of each kind and one replayed alert. The ended session is not listed (live sessions only); it still answers a prompt with 409.
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
@@ -241,6 +241,10 @@ test('requests: open and list', async () => {
   );
   fixture('event-request-question', await ws.next());
   assert.deepEqual(await ws.next(), { type: 'session', session: { ...codex, status: 'needs_input', promptBlock: 'awaiting_input' } });
+
+  // Raised before the snapshot below is taken, which replays it for a watch that was offline.
+  bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.', 'Fix the build script');
+  fixture('event-alert', await ws.next());
   ws.close();
 
   fixture('requests', await (await get('/api/requests')).json());
@@ -295,8 +299,6 @@ test('WebSocket events', async () => {
   fixture('event-session-removed', await ws.next());
   bridge.hub.usage({ ...usage, updatedAt: '2026-09-29T10:00:03.000Z', windows: [{ id: 'primary', usedPercent: 13, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 }] });
   fixture('event-usage', await ws.next());
-  bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.', 'Fix the build script');
-  fixture('event-alert', await ws.next());
 
   // The question is answered in the Codex terminal instead.
   terminal.abort();

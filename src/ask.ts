@@ -14,7 +14,9 @@ import { clip, isObject, num, oneLine, parseJson, str } from './util.ts';
 
 export const ASK_TIMEOUT_MS = 90_000;
 /** Asks kept per device, newest first. */
-export const ASK_KEEP = 20;
+export const ASK_KEEP = 10;
+/** Asks older than this are dropped when one is added or listed. */
+export const ASK_MAX_AGE_MS = 24 * 60 * 60_000;
 const KILL_GRACE_MS = 5000;
 const ERROR_MAX = 200;
 export const ASK_SYSTEM_PROMPT =
@@ -89,7 +91,7 @@ export class AskRunner {
   start(deviceId: string, body: AskBody): Ask | 'busy' | 'unavailable' {
     const bin = body.provider === 'claude-code' ? this.#o.bins.claude : this.#o.bins.codex;
     if (!bin) return 'unavailable';
-    const entries = this.#byDevice.get(deviceId) ?? [];
+    const entries = this.#recent(deviceId);
     if (entries.some((e) => e.run)) return 'busy';
     const ask: Ask = { id: `ask-${randomUUID()}`, provider: body.provider, question: body.text, status: 'running', createdAt: new Date(this.#now()).toISOString() };
     const entry: Entry = { deviceId, ask };
@@ -102,7 +104,7 @@ export class AskRunner {
   }
 
   list(deviceId: string): Ask[] {
-    return (this.#byDevice.get(deviceId) ?? []).map((e) => e.ask);
+    return this.#recent(deviceId).map((e) => e.ask);
   }
 
   /** True when the ask belongs to the device; a running one is killed and ends `cancelled`. */
@@ -131,6 +133,14 @@ export class AskRunner {
         e.run.child.kill('SIGKILL');
       }
     }
+  }
+
+  /** The device's asks with those older than ASK_MAX_AGE_MS dropped. */
+  #recent(deviceId: string): Entry[] {
+    const since = this.#now() - ASK_MAX_AGE_MS;
+    const entries = (this.#byDevice.get(deviceId) ?? []).filter((e) => Date.parse(e.ask.createdAt) >= since);
+    this.#byDevice.set(deviceId, entries);
+    return entries;
   }
 
   #env(): NodeJS.ProcessEnv {

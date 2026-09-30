@@ -123,7 +123,12 @@ export async function startBridge(
   asks?: (onEvent: AskRunnerOptions['onEvent']) => AskRunner,
 ): Promise<Bridge> {
   let n = 0;
-  const hub = new BridgeHub({ providers: Array.isArray(provider) ? provider : [provider], pending: { now, newId: () => `req-${++n}` } });
+  let a = 0;
+  const hub = new BridgeHub({
+    providers: Array.isArray(provider) ? provider : [provider],
+    pending: { now, newId: () => `req-${++n}` },
+    alerts: { now, newId: () => `a1e47c00-0000-4000-8000-${String(++a).padStart(12, '0')}` },
+  });
   const auth = new Auth({ devices: [], save, now });
   const hookToken = 'hook-token';
   const onEvent: AskRunnerOptions['onEvent'] = (deviceId, event) => hub.sendToDevice(deviceId, event);
