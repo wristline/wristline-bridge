@@ -101,20 +101,40 @@ test('a watch counts as present while connected and for 90 s after it leaves', (
   const clock = { now: 1_000_000 };
   const { reg } = registry(clock);
   assert.equal(reg.watchPresent(), false);
-  assert.deepEqual(reg.presence(), { watch: false, since: null });
   reg.watchConnected();
   reg.watchConnected();
   reg.watchDisconnected();
   clock.now += 3_600_000;
   assert.equal(reg.watchPresent(), true, 'one watch still connected');
+  reg.watchDisconnected();
+  clock.now += 90_000;
+  assert.equal(reg.watchPresent(), true, 'the grace period');
+  clock.now += 1;
+  assert.equal(reg.watchPresent(), false);
+});
+
+test('presence reports the live connection, with the grace end only while no watch is connected', () => {
+  const clock = { now: 1_000_000 };
+  const { reg } = registry(clock);
+  assert.deepEqual(reg.presence(), { watch: false, since: null });
+  reg.watchConnected();
+  reg.watchConnected();
+  reg.watchDisconnected();
+  clock.now += 3_600_000;
   assert.deepEqual(reg.presence(), { watch: true, since: '1970-01-01T00:16:40.000Z' }, 'since the first connect of the run');
   reg.watchDisconnected();
   clock.now += 90_000;
-  assert.equal(reg.watchPresent(), true);
-  assert.deepEqual(reg.presence(), { watch: true, since: '1970-01-01T00:16:40.000Z' }, 'the grace period continues the run');
+  assert.equal(reg.watchPresent(), true, 'permission requests still wait for the watch');
+  assert.deepEqual(
+    reg.presence(),
+    { watch: false, graceUntil: '1970-01-01T01:18:10.000Z', since: '1970-01-01T01:16:40.000Z' },
+    'not connected during the grace; since the last disconnect',
+  );
   clock.now += 1;
-  assert.equal(reg.watchPresent(), false);
-  assert.deepEqual(reg.presence(), { watch: false, since: '1970-01-01T01:16:40.000Z' }, 'absent since the last disconnect');
+  assert.deepEqual(reg.presence(), { watch: false, since: '1970-01-01T01:16:40.000Z' }, 'the grace ended');
   reg.watchConnected();
-  assert.deepEqual(reg.presence(), { watch: true, since: '1970-01-01T01:18:10.001Z' }, 'a new run');
+  reg.watchDisconnected();
+  clock.now += 30_000;
+  reg.watchConnected();
+  assert.deepEqual(reg.presence(), { watch: true, since: '1970-01-01T01:18:40.001Z' }, 'a reconnect during the grace starts a new run');
 });

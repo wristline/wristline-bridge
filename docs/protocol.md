@@ -246,11 +246,13 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
 - `POST /local/pair` `{}` → `{code, expiresAt}`: opens a 5-minute, single-use pairing window
   (closed after 5 wrong codes). `{"token": true, "name": "..."}` → `{token, deviceId}` instead.
 - `GET /local/devices` → `{devices: [{id, name, createdAt}]}`; `DELETE /local/devices/:id` → `204`.
-- `GET /local/presence` → `{watch, since}`: `watch` is true while a watch is connected or
-  disconnected less than 90 s ago (the same rule that routes permission requests to the watch);
-  `since` is when that state began (ISO; the first connect of the run, or the last disconnect),
-  `null` before any watch connected. Other Stop hooks (e.g. a Slack notifier) use it to stay
-  quiet while the watch shows the alert.
+- `GET /local/presence` → `{watch, graceUntil?, since}`: `watch` is true only while at least one
+  authenticated WebSocket is open right now, so an alert raised then reaches a watch. After the
+  last one closes, permission requests still go to the watch for 90 s (see below); during that
+  grace `watch` is false and `graceUntil` (ISO) says when it ends. `since` is when `watch` last
+  changed (ISO; the first connect of the run, or the last disconnect), `null` before any watch
+  connected. Other Stop hooks (e.g. a Slack notifier) stay quiet only while `watch` is true: an
+  alert raised in the grace reaches no watch.
 - `POST /local/statusline` — the Claude Code statusLine JSON; every `rate_limits` entry with a
   `used_percentage` becomes a usage window (`five_hour` → `5h`, `seven_day` → `7d`,
   `seven_day_<model>` → `7d_<model>`, `spend_limit` → `spend`; `resets_at` epoch seconds → ISO),

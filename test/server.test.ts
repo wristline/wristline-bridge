@@ -4,7 +4,7 @@ import { connect } from 'node:net';
 import { after, before, test } from 'node:test';
 import { WebSocket } from 'ws';
 import { CLOSE_REVOKED, type Item, type ItemKind, type ItemPage, type Session } from '../src/protocol.ts';
-import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
+import { FakeProvider, TestSocket, startBridge, waitFor, type Bridge } from './helpers.ts';
 
 const session: Session = {
   id: 'claude-code:s1',
@@ -57,6 +57,12 @@ test('the local listener requires the hook token and manages devices', async () 
   assert.equal((await fetch(`${bridge.local}/local/devices/${deviceId}`, { method: 'DELETE', ...auth(bridge.hookToken) })).status, 204);
   const [codeClosed] = (await closed) as [number];
   assert.equal(codeClosed, CLOSE_REVOKED);
+  await waitFor(() => !bridge.hub.pending.presence().watch || undefined);
+  assert.deepEqual(
+    await (await fetch(`${bridge.local}/local/presence`, auth(bridge.hookToken))).json(),
+    { watch: false, graceUntil: '2026-09-29T10:01:30.000Z', since: '2026-09-29T10:00:00.000Z' },
+    'gone at once; the permission grace runs on',
+  );
   assert.equal((await fetch(`${bridge.base}/api/sessions`, auth(token))).status, 401);
   assert.equal((await fetch(`${bridge.local}/local/devices/${deviceId}`, { method: 'DELETE', ...auth(bridge.hookToken) })).status, 404);
 });

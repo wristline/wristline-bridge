@@ -68,7 +68,9 @@ The unit runs the current `node` binary on this package's `dist/cli.js` and rest
 failure (up to 5 times in 2 minutes; after that, `systemctl --user reset-failed wristline-bridge`
 and start it again). Install the package globally first (`npm i -g wristline-bridge`): a copy in
 the npx cache can disappear, so `service install` refuses one unless you pass `--force`, and it
-warns when `node` comes from nvm, fnm or volta. Logs: `journalctl --user -u wristline-bridge -f`.
+warns when `node` comes from nvm, fnm or volta. Logs: `journalctl --user -u wristline-bridge -f`
+(watch connects and disconnects, and each alert and request sent with the number of connections
+it reached; ids only, never their text).
 
 ## Claude Code hooks
 

@@ -92,6 +92,8 @@ export interface HubOptions {
   alerts?: Pick<PendingOptions, 'now' | 'newId'>;
   /** Test override of USAGE_THROTTLE_MS. */
   usageThrottleMs?: number;
+  /** Info lines (connections, alert and request delivery; never their text). Defaults to console.log. */
+  log?: (line: string) => void;
 }
 
 /** Fans provider changes out to connected watches and tracks what each one subscribed to. */
@@ -113,9 +115,11 @@ export class BridgeHub implements Hub {
   readonly #lastStatus = new Map<string, Session['status']>();
   readonly #now: () => number;
   readonly #newId: () => string;
+  readonly #log: (line: string) => void;
 
   constructor(options: HubOptions) {
     this.#providers = options.providers;
+    this.#log = options.log ?? console.log;
     this.#now = options.alerts?.now ?? Date.now;
     this.#newId = options.alerts?.newId ?? randomUUID;
     this.#usageThrottleMs = options.usageThrottleMs ?? USAGE_THROTTLE_MS;
@@ -123,6 +127,7 @@ export class BridgeHub implements Hub {
       ...options.pending,
       onRequest: (request) => {
         this.#broadcast({ type: 'request', request });
+        this.#log(`wristline: request ${request.id} broadcast clients=${this.#reach().clients}`);
         this.#refreshSession(request);
       },
       onResolved: (request, by) => {
@@ -231,6 +236,8 @@ export class BridgeHub implements Hub {
     this.#alerts.push(alert);
     if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();
     this.#broadcast({ type: 'alert', ...alert });
+    const { clients, bg } = this.#reach();
+    this.#log(`wristline: alert ${kind} id=${alert.id} clients=${clients} bg=${bg}`);
   }
 
   /** To every foreground connection of one device only (a Quick Ask answer is nobody else's business). */
@@ -282,6 +289,7 @@ export class BridgeHub implements Hub {
     const client: Client = { ws, deviceId, sessionId: null, kinds: undefined, mode: 'foreground', alive: true };
     this.#clients.add(client);
     this.pending.watchConnected();
+    this.#log(`wristline: watch ${deviceId.slice(0, 6)} connected`);
     ws.on('pong', () => {
       client.alive = true;
     });
@@ -300,6 +308,7 @@ export class BridgeHub implements Hub {
       this.#unsubscribe(client);
       this.#clients.delete(client);
       this.pending.watchDisconnected();
+      this.#log(`wristline: watch ${deviceId.slice(0, 6)} disconnected`);
     });
     ws.on('error', () => ws.terminate());
     this.#send(client, this.snapshot());
@@ -394,6 +403,18 @@ export class BridgeHub implements Hub {
       default:
         return false;
     }
+  }
+
+  /** Open connections, and how many of them are in background mode: whom a request or alert broadcast reached. */
+  #reach(): { clients: number; bg: number } {
+    let clients = 0;
+    let bg = 0;
+    for (const c of this.#clients) {
+      if (c.ws.readyState !== WebSocket.OPEN) continue;
+      clients++;
+      if (c.mode === 'background') bg++;
+    }
+    return { clients, bg };
   }
 
   #send(client: Client, event: ServerEvent): void {

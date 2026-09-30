@@ -326,6 +326,44 @@ test('a usage change inside the throttle window is sent when the window ends, in
   }
 });
 
+test('connections, alerts and requests are logged with ids and client counts, never their text', async () => {
+  const clock = Date.parse('2026-09-29T10:00:00Z');
+  const lines: string[] = [];
+  let n = 0;
+  const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock, newId: () => `alert-${++n}` }, pending: { newId: () => 'req-1' }, log: (line) => lines.push(line) });
+  const auth = new Auth({ devices: [], save: async () => {}, now: () => clock });
+  const server = await startServer({ hub, auth, bridge: { name: 'devbox', version: '0.1.0', apiVersion: 1 }, hookToken: 'h', apiPort: 0, hookPort: 0, onStatusline: () => {}, asks: fakeAskRunner(() => {}, {}) });
+  try {
+    const { token, device } = await auth.issue('w');
+    const url = `ws://127.0.0.1:${server.apiPort}/api/ws`;
+    const fg = await new TestSocket(url, token).open();
+    const bg = await new TestSocket(url, token).open();
+    await fg.next();
+    await bg.next();
+    bg.send({ type: 'mode', mode: 'background' });
+    await new Promise((r) => setTimeout(r, 100));
+    hub.alert('claude-code:s1', 'done', 'the secret answer', 'secret title');
+    const answered = hub.pending.open({ sessionId: 'claude-code:s1', kind: 'question', title: 'secret question', questions: [] });
+    hub.pending.dismiss('req-1', 'terminal');
+    await answered;
+    fg.close();
+    bg.close();
+    await waitFor(() => (hub.pending.presence().watch ? undefined : true));
+    const short = device.id.slice(0, 6);
+    assert.deepEqual(lines, [
+      `wristline: watch ${short} connected`,
+      `wristline: watch ${short} connected`,
+      'wristline: alert done id=alert-1 clients=2 bg=1',
+      'wristline: request req-1 broadcast clients=2',
+      `wristline: watch ${short} disconnected`,
+      `wristline: watch ${short} disconnected`,
+    ]);
+  } finally {
+    hub.close();
+    await server.close();
+  }
+});
+
 test('statusLine reports go to the home holding the transcript, else to the instance listing the session, else to the only instance', async () => {
   const homeA = join(root, 'a');
   const homeB = join(root, 'b-real');

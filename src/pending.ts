@@ -14,7 +14,11 @@ const DEFER: PermissionOption = 'defer';
 export type RequestDraft = Omit<PendingRequest, 'id' | 'createdAt'>;
 /** `GET /local/presence` body. */
 export interface Presence {
+  /** At least one authenticated watch connection is open right now. */
   watch: boolean;
+  /** Only while no watch is connected but one left less than 90 s ago: when that grace ends (`watchPresent()` until then). */
+  graceUntil?: string;
+  /** When `watch` last changed: the first connect of the run, or the last disconnect; null before any watch. */
   since: string | null;
 }
 export type AnswerResult = 'ok' | 'already_resolved' | 'invalid';
@@ -45,8 +49,8 @@ export class PendingRegistry {
   readonly #newId: () => string;
   #watches = 0;
   #lastWatchSeen = Number.NEGATIVE_INFINITY;
-  /** When the current presence run began; undefined until the first watch connects. */
-  #presentSince: number | undefined;
+  /** When the current run of open connections began (meaningful while #watches > 0). */
+  #connectedSince = 0;
 
   constructor(options: PendingOptions) {
     this.#onRequest = options.onRequest;
@@ -107,7 +111,7 @@ export class PendingRegistry {
   }
 
   watchConnected(): void {
-    if (!this.watchPresent()) this.#presentSince = this.#now();
+    if (this.#watches === 0) this.#connectedSince = this.#now();
     this.#watches++;
   }
 
@@ -121,11 +125,16 @@ export class PendingRegistry {
     return this.#watches > 0 || this.#now() - this.#lastWatchSeen <= WATCH_GRACE_MS;
   }
 
-  /** `watchPresent()` plus when that state began: the first connect of this run, or the last disconnect (null before any watch). */
+  /**
+   * Whether a watch is connected right now (not `watchPresent()`: an alert raised during the grace
+   * reaches no watch), when that began, and the end of a running grace.
+   */
   presence(): Presence {
-    const watch = this.watchPresent();
-    const since = watch ? this.#presentSince : this.#watches === 0 && this.#lastWatchSeen > Number.NEGATIVE_INFINITY ? this.#lastWatchSeen : undefined;
-    return { watch, since: since === undefined ? null : new Date(since).toISOString() };
+    const iso = (ms: number): string => new Date(ms).toISOString();
+    if (this.#watches > 0) return { watch: true, since: iso(this.#connectedSince) };
+    if (this.#lastWatchSeen === Number.NEGATIVE_INFINITY) return { watch: false, since: null };
+    const graceEnd = this.#lastWatchSeen + WATCH_GRACE_MS;
+    return { watch: false, ...(this.#now() <= graceEnd ? { graceUntil: iso(graceEnd) } : {}), since: iso(this.#lastWatchSeen) };
   }
 }
 
