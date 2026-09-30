@@ -238,6 +238,21 @@ reconnecting watch posts the notifications for the ones it has not shown and rem
 10 minutes, and `id` is what makes it one alert. Older bridges send a `snapshot` without
 `alerts` (treat it as empty). The buffer is gone after a bridge restart.
 
+### Codex alerts
+
+Codex alerts come from the app-server daemon, for threads it has loaded and the bridge has
+rejoined. `turn/completed` with `status: "completed"` for a listed thread (not a Quick Ask or
+sub-agent thread) raises `alert done` by the same rule as Claude Code's Stop hook (see
+`POST /hooks/stop` below): `text` is up to 500 characters of the turn's last `agentMessage` (from
+the turn's `item/completed` notifications; `turn.items` of the notification may be empty), and
+nothing is raised when that answer, trimmed, is shorter than 20 characters or is "No response
+requested.". `title` is the first 60 characters of the turn's first `userMessage` (typed in the
+TUI or sent from the watch) on one line; without one, the session title, omitted when there is
+none. Interrupted and failed turns raise nothing. A thread whose status gains `waitingOnApproval` raises `alert
+needs_input` without `text` when, one second later, it still waits and no request of its session
+is open (normally the approval itself is on the watch as a request); a sub-agent's counts for its
+parent's session.
+
 ## Local API (not part of the watch protocol)
 
 Port 47771 requires `Authorization: Bearer <hookToken>` from `config.json` (WSL2 forwards loopback

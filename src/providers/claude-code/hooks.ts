@@ -3,7 +3,7 @@
 
 import { PERMISSION_QUESTION, type Option, type Question } from '../../protocol.ts';
 import type { BridgeHub } from '../../hub.ts';
-import { sessionKey, type Hub } from '../../provider.ts';
+import { doneText, doneTitle, sessionKey, type Hub } from '../../provider.ts';
 import type { HookHandler } from '../../server.ts';
 import { clip, isObject, oneLine, str, type JsonObject } from '../../util.ts';
 import { toolSummary } from './parse.ts';
@@ -15,11 +15,6 @@ export type HookName = (typeof HOOK_NAMES)[number];
 /** Longest tool description (e.g. an ExitPlanMode plan) shown on a permission request. */
 const PERMISSION_TEXT_MAX = 1500;
 const ALERT_TEXT_MAX = 120;
-/** The `done` alert carries more of the answer, and a title; answers shorter than DONE_MIN (or "No response requested.") raise none. */
-const DONE_TEXT_MAX = 500;
-const DONE_TITLE_MAX = 60;
-const DONE_MIN = 20;
-const NO_RESPONSE = /^no response requested\.?$/i;
 /** Notifications that mean "the session waits for you" when no request is open for it. */
 const NEEDS_INPUT = new Set(['permission_prompt', 'agent_needs_input']);
 
@@ -204,9 +199,8 @@ async function stop(input: JsonObject, ctx: HookContext): Promise<void> {
   if (ctx.isAsk?.(str(input.session_id) ?? '')) return;
   const sessionId = sessionOf(input);
   if (!sessionId) return;
-  const answer = (str(input.last_assistant_message) ?? '').trim();
-  if ([...answer].length < DONE_MIN || NO_RESPONSE.test(answer)) return;
-  const prompt = oneLine((await humanPrompt(str(input.transcript_path))) ?? '');
-  const title = prompt ? clip(prompt, DONE_TITLE_MAX) : ctx.hub.sessions().find((s) => s.id === sessionId)?.title;
-  ctx.hub.alert(sessionId, 'done', clip(answer, DONE_TEXT_MAX), title || undefined);
+  const text = doneText(str(input.last_assistant_message));
+  if (text === undefined) return;
+  const title = doneTitle(await humanPrompt(str(input.transcript_path)), ctx.hub.sessions().find((s) => s.id === sessionId)?.title);
+  ctx.hub.alert(sessionId, 'done', text, title);
 }

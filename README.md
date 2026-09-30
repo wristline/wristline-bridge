@@ -220,6 +220,36 @@ and approvals keep working because the daemon knows the thread by that id. The s
 until the fork is named, reuses the origin's title; the origin stays listed as its own thread.
 Without a `history_base` link a rollout is a thread of its own.
 
+### Codex notifications
+
+When a turn of a thread the daemon has loaded finishes, the bridge sends the watch the same `done`
+alert as for Claude Code: up to 500 characters of the turn's last answer, titled by your prompt
+(or the thread title when the turn had none). Short answers (under 20 characters), "No response
+requested.", interrupted turns, sub-agents and Quick Asks raise none. A thread waiting on an
+approval that is not on the watch as a request raises `needs_input` instead. The watch shows
+these only while it is connected; alerts of the last 10 minutes are replayed when it reconnects.
+Sessions of a TUI with its own embedded server (see Limits) raise no alerts.
+
+For when the watch is away, Codex's own `notify` program can post elsewhere (e.g. Slack). Codex
+0.159 runs the command in `$CODEX_HOME/config.toml` (`notify = ["/abs/path/script"]`) after every
+completed turn, without waiting for it, with one JSON argument:
+
+```json
+{"type": "agent-turn-complete", "thread-id": "…", "turn-id": "…", "cwd": "/work/api",
+ "client": "…", "input-messages": ["your prompt"], "last-assistant-message": "…"}
+```
+
+(`client` may be absent, `last-assistant-message` `null` and `input-messages` empty.) To avoid a second notification, such a script should stay quiet while
+`GET /local/presence` answers `"watch": true` (see the protocol document; it needs the local token
+from `~/.config/wristline/hook-header`), and skip Quick Ask threads (a `sessionId` in
+`~/.config/wristline/ask-threads.json`, or `cwd` = `~/.config/wristline/ask-cwd`) and sub-agent
+threads (`source.subagent` in the `session_meta` line that starts the thread's rollout).
+
+To turn them off: on the watch, switch off Wristline's **Task updates** notifications (`done`;
+`needs_input` uses **Requests**). For the `notify` script, remove the `notify` line from
+`config.toml`. A change reaches Codex sessions started afterwards; running sessions, and the
+daemon (`codex app-server daemon restart`), may keep the old setting until they restart.
+
 ## Accounts
 
 The bridge can follow several Claude Code and Codex accounts at once. Each account lives in its

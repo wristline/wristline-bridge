@@ -283,18 +283,20 @@ test('codexAsk: decisions follow availableDecisions; questions map to labels', (
   assert.equal(codexAsk('item/tool/call', { threadId: 't' }), undefined);
 });
 
-function recordingHub(): Hub & { requests: PendingRequest[]; resolved: string[]; usages: Usage[] } {
+function recordingHub(): Hub & { requests: PendingRequest[]; resolved: string[]; usages: Usage[]; alerts: unknown[][] } {
   const requests: PendingRequest[] = [];
   const resolved: string[] = [];
   const usages: Usage[] = [];
+  const alerts: unknown[][] = [];
   return {
     requests,
     resolved,
     usages,
+    alerts,
     session: () => {},
     removed: () => {},
     usage: (u) => usages.push(u),
-    alert: () => {},
+    alert: (sessionId, kind, text, title) => void alerts.push([sessionId, kind, text, title]),
     pending: new PendingRegistry({ onRequest: (r) => requests.push(r), onResolved: (r, by) => resolved.push(`${r.id}:${by}`) }),
   };
 }
@@ -613,4 +615,70 @@ test('codex provider: a thread forked from another keeps that history and, unnam
   ]);
   assert.deepEqual(((await provider.readItems(fork, undefined, 10))?.items ?? []).map((i) => i.text), ['first prompt', 'reply one', 'forked prompt', 'forked reply']);
   assert.deepEqual(((await provider.readItems(origin, undefined, 10))?.items ?? []).map((i) => i.text), ['first prompt', 'reply one', 'second prompt', 'reply two']);
+});
+
+test('codex provider: a completed turn raises done by the Stop hook rule; an approval nobody was asked about raises needs_input', async (t) => {
+  const home = join(root, 'codex-alerts');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const [named, other, sub, ask] = ['30', '31', '32', '33'].map((n) => `019a0000-0000-7000-8000-0000000000${n}`) as [string, string, string, string];
+  for (const id of [named, other, ask]) writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`), rollout(id, 0, 'low', [['first prompt', 'reply one']]).join(''));
+  const subLines = rollout(sub, 0, 'low', [['task', 'report']]);
+  subLines[0] = `${JSON.stringify({ timestamp: '2026-09-29T09:00:00.000Z', ordinal: 0, type: 'session_meta', payload: { id: sub, cwd: '/w', source: { subagent: { thread_spawn: { parent_thread_id: named, depth: 1 } } } } })}\n`;
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${sub}.jsonl`), subLines.join(''));
+  writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id: named, thread_name: 'Named thread' })}\n`);
+  const idle = { status: { type: 'idle' } };
+  const { rpc, log } = fakeRpc('alerts', { loaded: [named, other, sub, ask], threads: { [named]: idle, [other]: idle, [sub]: { ...idle, parentThreadId: named }, [ask]: idle } });
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, isAsk: (id) => id === ask });
+  const hub = recordingHub();
+  t.after(() => provider.stop());
+  const up = ready(rpc);
+  await provider.start(hub);
+  await up;
+  await waitFor(() => log().some((m) => m.method === 'thread/resume' && (m.params as { threadId: string }).threadId === named));
+  assert.deepEqual(provider.listSessions().map((s) => s.id).sort(), [`codex:${named}`, `codex:${other}`]);
+
+  const notify = (method: string, params: unknown): Promise<unknown> => rpc.request('fake/notify', { method, params });
+  const said = async (threadId: string, turnId: string, prompt: string | undefined, answers: string[], status = 'completed'): Promise<void> => {
+    if (prompt !== undefined) await notify('item/completed', { threadId, turnId, item: { type: 'userMessage', id: `${turnId}-u`, content: [{ type: 'text', text: prompt }] } });
+    for (const [i, text] of answers.entries()) await notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: `${turnId}-a${i}`, text } });
+    await notify('turn/completed', { threadId, turn: { id: turnId, items: [], status } });
+  };
+  const long = 'x'.repeat(600);
+
+  // The last answer of the turn, titled by its user message (one line, 60 characters at most).
+  await said(named, 't1', 'run the tests\nand tell me what failed', ['Running them now.', '  All 164 tests pass and the build is green.  ']);
+  // No user message: the thread's title; the answer is cut to 500 characters.
+  await said(named, 't2', undefined, [long]);
+  await said(other, 't3', 'a'.repeat(80), [long]);
+  // Nothing for a short answer, "No response requested.", a turn that did not complete, a sub-agent or a Quick Ask thread.
+  await said(named, 't4', 'hi', ['Done.']);
+  await said(named, 't5', 'hi', ['No response requested.']);
+  await said(named, 't6', 'hi', [long], 'interrupted');
+  await said(sub, 't7', 'task', [long]);
+  await said(ask, 't8', 'question', [long]);
+  assert.deepEqual(hub.alerts, [
+    [`codex:${named}`, 'done', 'All 164 tests pass and the build is green.', 'run the tests and tell me what failed'],
+    [`codex:${named}`, 'done', `${'x'.repeat(499)}…`, 'Named thread'],
+    [`codex:${other}`, 'done', `${'x'.repeat(499)}…`, `${'a'.repeat(59)}…`],
+  ]);
+
+  // Waiting on an approval: the request that follows the status is the notification; without one, needs_input.
+  hub.alerts.length = 0;
+  const waiting = { type: 'active', activeFlags: ['waitingOnApproval'] };
+  await notify('thread/status/changed', { threadId: named, status: waiting });
+  await rpc.request('fake/request', { method: 'item/commandExecution/requestApproval', params: { threadId: named, turnId: 't9', itemId: 'i9', command: 'ls' } });
+  await notify('thread/status/changed', { threadId: other, status: waiting });
+  // A sub-agent that waits shows on its parent, which already has a request open.
+  await notify('thread/status/changed', { threadId: sub, status: waiting });
+  await new Promise((r) => setTimeout(r, 1300));
+  assert.deepEqual(hub.alerts, [[`codex:${other}`, 'needs_input', undefined, undefined]]);
+  assert.equal(hub.pending.list().length, 1);
+
+  // Answered in the terminal within the delay: no alert.
+  await notify('thread/status/changed', { threadId: other, status: { type: 'active', activeFlags: [] } });
+  await notify('thread/status/changed', { threadId: other, status: waiting });
+  await notify('thread/status/changed', { threadId: other, status: { type: 'active', activeFlags: [] } });
+  await new Promise((r) => setTimeout(r, 1300));
+  assert.equal(hub.alerts.length, 1);
 });

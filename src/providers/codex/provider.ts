@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { JsonlTail, Transcript, TranscriptCache, type JsonlHead } from '../../jsonl.ts';
 import type { Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
-import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
+import { PromptBlocked, doneText, doneTitle, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isObject, str } from '../../util.ts';
 import { CodexAccounts, type AccountsOptions } from './account.ts';
 import { codexAsk } from './ask.ts';
@@ -19,12 +19,25 @@ import {
   parseCodexLine,
   usageOf,
 } from './parse.ts';
-import type { CodexRpc, RateLimitSnapshot, RequestId, ServerRequest } from './rpc.ts';
+import type { CodexRpc, ItemCompletedNotification, RateLimitSnapshot, RequestId, ServerRequest, ThreadStatus } from './rpc.ts';
 
 const REFRESH_MS = 2000;
 const DAY_MS = 24 * 3600_000;
 const IDLE_MS = 10 * 60_000;
 const HISTORY_MAX = 50;
+/** How long a thread may wait on an approval without the watch being asked before it raises `needs_input`: the daemon sends the request right after the status. */
+const NEEDS_INPUT_DELAY_MS = 1000;
+
+const awaitsApproval = (status: ThreadStatus | undefined): boolean => status?.type === 'active' && status.activeFlags.includes('waitingOnApproval');
+
+/** What a thread's current turn has said so far, from its `item/completed` notifications (the `turn.items` of `turn/completed` may be empty). */
+interface TurnText {
+  turnId: string;
+  /** The first user message: typed in the TUI or sent from the watch. */
+  prompt?: string;
+  /** The last agent message. */
+  answer?: string;
+}
 
 interface Meta {
   path: string;
@@ -74,6 +87,10 @@ export class CodexProvider implements SessionProvider {
   readonly #asks = new Map<RequestId, Ask>();
   /** What running items do (e.g. the files of a file change), for approvals that do not say. */
   readonly #itemText = new Map<string, string>();
+  /** Per loaded thread. */
+  readonly #turns = new Map<string, TurnText>();
+  /** Threads that began waiting on an approval, until NEEDS_INPUT_DELAY_MS tells whether the watch was asked. */
+  readonly #waiting = new Map<string, NodeJS.Timeout>();
   #sessions = new Map<string, Session>();
   #files = new Map<string, RolloutFile>();
   #recent: [string, RolloutFile][] = [];
@@ -121,6 +138,8 @@ export class CodexProvider implements SessionProvider {
 
   stop(): void {
     clearInterval(this.#timer);
+    for (const timer of this.#waiting.values()) clearTimeout(timer);
+    this.#waiting.clear();
     this.#rpc?.stop();
     this.#transcripts.clear();
   }
@@ -326,6 +345,9 @@ export class CodexProvider implements SessionProvider {
   #disconnected(): void {
     this.#loaded.clear();
     this.#itemText.clear();
+    this.#turns.clear();
+    for (const timer of this.#waiting.values()) clearTimeout(timer);
+    this.#waiting.clear();
     // Request ids belong to the lost connection; the agent can no longer take these answers.
     for (const ask of this.#asks.values()) ask.abort.abort();
     this.#asks.clear();
@@ -389,12 +411,15 @@ export class CodexProvider implements SessionProvider {
         this.#publish();
         return;
       }
-      case 'thread/status/changed':
+      case 'thread/status/changed': {
         if (!threadId || this.#loaded.isEphemeral(threadId)) return;
+        const waited = awaitsApproval(this.#loaded.get(threadId)?.status);
         this.#loaded.track(threadId, { status: params.status });
+        if (!waited && awaitsApproval(this.#loaded.get(threadId)?.status)) this.#approvalWait(threadId);
         if (this.#loaded.has(threadId) && this.#files.has(threadId)) void this.#loaded.join(threadId, this.#rpc);
         this.#publish();
         return;
+      }
       case 'thread/settings/updated': {
         const settings = isObject(params.threadSettings) ? params.threadSettings : undefined;
         if (!threadId || !settings || !this.#loaded.has(threadId)) return;
@@ -405,6 +430,7 @@ export class CodexProvider implements SessionProvider {
       case 'thread/closed':
         if (!threadId) return;
         this.#loaded.forget(threadId);
+        this.#turns.delete(threadId);
         this.#abortWhere((a) => a.threadId === threadId);
         this.#publish();
         return;
@@ -418,8 +444,10 @@ export class CodexProvider implements SessionProvider {
         return;
       }
       case 'turn/completed': {
-        const turnId = isObject(params.turn) ? str(params.turn.id) : undefined;
+        const turn = isObject(params.turn) ? params.turn : undefined;
+        const turnId = str(turn?.id);
         this.#abortWhere((a) => a.threadId === threadId && a.turnId === turnId);
+        if (threadId && turnId) this.#turnCompleted(threadId, turnId, turn?.status === 'completed');
         return;
       }
       case 'item/started': {
@@ -440,6 +468,7 @@ export class CodexProvider implements SessionProvider {
         if (!n) return;
         this.#itemText.delete(n.item.id);
         this.#abortWhere((a) => a.threadId === n.threadId && a.itemId === n.item.id);
+        this.#noteTurnText(n);
         const ts = new Date(this.#now()).toISOString();
         this.#inject(n.threadId, (sink) => applyItemCompleted(n, ts, sink));
         return;
@@ -448,6 +477,48 @@ export class CodexProvider implements SessionProvider {
         this.#limits(params.rateLimits);
         return;
     }
+  }
+
+  #noteTurnText({ item, threadId, turnId }: ItemCompletedNotification): void {
+    if ((item.type !== 'userMessage' && item.type !== 'agentMessage') || !this.#loaded.has(threadId)) return;
+    let turn = this.#turns.get(threadId);
+    if (turn?.turnId !== turnId) {
+      turn = { turnId };
+      this.#turns.set(threadId, turn);
+    }
+    if (item.type === 'agentMessage') turn.answer = item.text;
+    else turn.prompt ??= item.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+  }
+
+  /**
+   * A finished turn raises `done` by the rule of Claude Code's Stop hook: the turn's last answer,
+   * titled by its user message, else the thread's title. An interrupted or failed turn raises
+   * nothing, nor does a Quick Ask or sub-agent thread (neither is listed).
+   */
+  #turnCompleted(threadId: string, turnId: string, completed: boolean): void {
+    const turn = this.#turns.get(threadId);
+    this.#turns.delete(threadId);
+    const session = this.#sessions.get(threadId);
+    if (!completed || turn?.turnId !== turnId || !session || this.#loaded.get(threadId)?.parent || this.#isAsk(threadId)) return;
+    const text = doneText(turn.answer);
+    if (text !== undefined) this.#hub?.alert(session.id, 'done', text, doneTitle(turn.prompt, session.title));
+  }
+
+  /**
+   * A thread waiting on an approval normally shows on the watch as a request. When no request of
+   * its session is open NEEDS_INPUT_DELAY_MS later (e.g. a kind the watch cannot answer) and it
+   * still waits, it raises `needs_input` instead. A sub-agent's shows on its parent's session.
+   */
+  #approvalWait(threadId: string): void {
+    clearTimeout(this.#waiting.get(threadId));
+    const timer = setTimeout(() => {
+      this.#waiting.delete(threadId);
+      const loaded = this.#loaded.get(threadId);
+      const session = this.#sessions.get(loaded?.parent ?? threadId);
+      if (!session || !awaitsApproval(loaded?.status) || this.#hub?.pending.hasSession(session.id)) return;
+      this.#hub?.alert(session.id, 'needs_input');
+    }, NEEDS_INPUT_DELAY_MS);
+    this.#waiting.set(threadId, timer);
   }
 
   /** Live items reach a watched transcript at once; the rollout confirms them later. */
