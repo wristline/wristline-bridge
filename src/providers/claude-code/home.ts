@@ -103,6 +103,22 @@ export function sameProcess(entry: { pid: number; procStart: string | undefined 
   return fields[19] === entry.procStart;
 }
 
+/**
+ * False when the process is stopped (Ctrl-Z) or its process group is not the foreground group of
+ * its terminal: keys typed into the pane would then reach the shell. Fields follow the last `)`,
+ * since the command name in parentheses may itself contain spaces and parentheses.
+ */
+export function inForeground(pid: number): boolean {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return !HAS_PROCFS; // No procfs (macOS): fall back to the pane checks alone.
+  }
+  const [state, , pgrp, , , tpgid] = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  return state !== 'T' && state !== 't' && pgrp === tpgid;
+}
+
 /** Reads `<pid>.json` entries only; the neighbouring `*.key` files are secrets and never opened. */
 export async function readRegistry(dir: string): Promise<RegistryEntry[]> {
   let names: string[];

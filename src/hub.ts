@@ -66,15 +66,33 @@ function expired(window: UsageWindow, now: number): boolean {
 }
 
 /**
+ * Of two values of one window, the one to keep. Each Claude Code process reports the limits of its
+ * own last API response, and an idle one keeps repeating them, so arrival order says nothing: the
+ * later reset time is the newer window, and within one window usage only grows. Without both reset
+ * times the report wins.
+ */
+function newerWindow(stored: UsageWindow, reported: UsageWindow): UsageWindow {
+  if (stored.resetsAt === undefined || reported.resetsAt === undefined) return reported;
+  const [a, b] = [Date.parse(stored.resetsAt), Date.parse(reported.resetsAt)];
+  if (a !== b) return a > b ? stored : reported;
+  return stored.usedPercent > reported.usedPercent ? stored : reported;
+}
+
+/**
  * The report's windows, then the stored ones it did not mention. A statusLine report names only
  * the windows it happens to carry, so an omitted window keeps its last value until its reset time
- * passes; a window is only ever removed by that.
+ * passes; a window is only ever removed by that. Windows past their reset time are dropped first.
  */
 export function mergeUsage(previous: Usage | undefined, next: Usage, now: number): Usage {
+  const stored = new Map((previous?.windows ?? []).filter((w) => !expired(w, now)).map((w) => [w.id, w]));
   const byId = new Map<string, UsageWindow>();
-  for (const w of next.windows) byId.set(w.id, w);
-  for (const w of previous?.windows ?? []) if (!byId.has(w.id)) byId.set(w.id, w);
-  return { ...next, windows: [...byId.values()].filter((w) => !expired(w, now)) };
+  for (const w of next.windows) {
+    if (expired(w, now)) continue;
+    const old = stored.get(w.id);
+    byId.set(w.id, old ? newerWindow(old, w) : w);
+  }
+  for (const [id, w] of stored) if (!byId.has(id)) byId.set(id, w);
+  return { ...next, windows: [...byId.values()] };
 }
 
 /** A subscribe message's `kinds`: undefined (all) when absent or null, null when malformed. Unknown kinds just never match. */
@@ -189,7 +207,9 @@ export class BridgeHub implements Hub {
     }
     this.#usage.set(key, merged);
     // Unchanged numbers are not worth waking the watch radio for; GET /api/usage has the fresh timestamp.
-    const changed = !previous || JSON.stringify([previous.windows, previous.account]) !== JSON.stringify([merged.windows, merged.account]);
+    // Windows merely listed in another order (a report without one of them comes first) are unchanged too.
+    const numbers = (u: Usage): string => JSON.stringify([[...u.windows].sort((x, y) => (x.id < y.id ? -1 : 1)), u.account]);
+    const changed = !previous || numbers(previous) !== numbers(merged);
     if (changed) this.#publishUsage(key);
   }
 

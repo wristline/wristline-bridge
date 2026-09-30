@@ -100,6 +100,44 @@ test('claude-code: statusLine usage goes to the learned fingerprint\'s account, 
   assert.equal(provider.home, home);
 });
 
+test('claude-code: a session that switches accounts with /login loses its exact account until the new fingerprint is known', async () => {
+  let clock = Date.now();
+  const { home, login, entry } = accountHome('claude-relogin', () => clock);
+  const [switched, fresh] = ['dddddddd-1111-4000-8000-000000000001', 'dddddddd-1111-4000-8000-000000000002'];
+  login('acc-a', 'a@example.com');
+  const hub = recordingHub();
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7, now: () => clock });
+  await provider.start(hub);
+  provider.stop();
+  clock += 1000;
+  entry(process.pid, switched); // Born after login A was observed.
+  await provider.refresh();
+  const account = (id: string): Session['account'] => provider.listSessions().find((s) => s.id === `claude-code:${id}`)?.account;
+  const fA = { five_hour: { used_percentage: 10, resets_at: 1790701800 }, seven_day: { used_percentage: 5, resets_at: '2026-10-06T00:00:00Z' } };
+  const fB = { five_hour: { used_percentage: 40, resets_at: 1790705400 }, seven_day: { used_percentage: 30, resets_at: '2026-10-04T00:00:00Z' } };
+  await provider.statusline({ session_id: switched, rate_limits: fA });
+  await provider.refresh();
+  assert.deepEqual(account(switched), { id: 'acc-a', label: 'a@example.com' }, 'exact: learned from its own fingerprint');
+
+  // The same process logs into B: the home's login changes and its statusLine now carries B's limits.
+  clock += 1000;
+  login('acc-b', 'bob@example.com');
+  entry(process.pid, switched, clock - 1000); // Active again, same process.
+  await provider.statusline({ session_id: switched, rate_limits: fB });
+  assert.deepEqual(hub.usages.at(-1)?.account, { id: 'acc-b', label: 'bob@example.com', estimated: true });
+  await provider.refresh();
+  assert.deepEqual(account(switched), { id: 'acc-b', label: 'bob@example.com', estimated: true }, 'no longer A for certain');
+
+  // A process born after login B teaches B's fingerprint; the switched session is then B for certain.
+  clock += 1000;
+  entry(process.ppid, fresh);
+  await provider.refresh();
+  await provider.statusline({ session_id: fresh, rate_limits: fB });
+  await provider.statusline({ session_id: switched, rate_limits: fB });
+  await provider.refresh();
+  assert.deepEqual(account(switched), { id: 'acc-b', label: 'bob@example.com' });
+});
+
 test('claude-code: an unreadable .claude.json keeps the previous login and is logged once, not on every poll', async () => {
   const home = join(root, 'claude-unreadable');
   mkdirSync(join(home, 'sessions'), { recursive: true });

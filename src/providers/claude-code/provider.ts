@@ -11,6 +11,7 @@ import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, s
 import { ClaudeMetaScan, claudeModelName, parseClaudeLine, sessionTitle, statuslineContext, statuslineModel, statuslineUsage } from './parse.ts';
 import {
   descendsFrom,
+  inForeground,
   isLive,
   mapStatus,
   pidAlive,
@@ -83,6 +84,8 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly #askCwd: string | undefined;
   readonly #transcripts = new TranscriptCache();
   readonly #metas = new Map<string, Meta>();
+  /** Transcripts that could not be read (e.g. root-owned after `sudo claude`), each logged once. */
+  readonly #unreadable = new Set<string>();
   /** Context reported by the statusLine, by session id; `at` is when the report arrived. */
   readonly #statusContext = new Map<string, { used?: number; window?: number; at: number }>();
   /** Model and effort reported by the statusLine, by session id. */
@@ -185,19 +188,23 @@ export class ClaudeCodeProvider implements SessionProvider {
     await this.#exec(this.#tmux, ['send-keys', '-t', pane.id, 'Enter']);
   }
 
-  /** Guards against typing into the wrong pane (the session's process must run inside it) or into copy mode. */
+  /** Guards against typing into the wrong pane (the session's process must run inside it), into copy mode, into synchronized panes or past a stopped session. */
   async #checkPane(pane: Pane): Promise<void> {
     let probe: string;
     try {
-      probe = await this.#exec(this.#tmux, ['display-message', '-p', '-t', pane.id, '#{pane_pid} #{pane_in_mode}']);
+      probe = await this.#exec(this.#tmux, ['display-message', '-p', '-t', pane.id, '#{pane_pid} #{pane_in_mode} #{pane_synchronized}']);
     } catch {
       throw new PromptBlocked('no_tmux'); // No tmux, no server on the default socket, or the pane is gone.
     }
-    const [pid, inMode] = probe.trim().split(' ');
+    const [pid, inMode, synchronized] = probe.trim().split(' ');
     const panePid = Number(pid);
     if (!Number.isInteger(panePid) || !descendsFrom(pane.pid, panePid)) throw new PromptBlocked('no_tmux');
     // In copy mode (e.g. scrolled back) keys run copy-mode bindings and never reach the process.
     if (inMode === '1') throw new PromptBlocked('busy');
+    // With synchronize-panes on, tmux copies the keys to every pane of the window (shells included).
+    if (synchronized === '1') throw new PromptBlocked('busy');
+    // Stopped with Ctrl-Z, or put in the background: the pane's shell would read the keys and run them.
+    if (!inForeground(pane.pid)) throw new PromptBlocked('busy');
   }
 
   /** Receives the statusLine JSON relayed to the local listener. Never rejects. */
@@ -244,7 +251,11 @@ export class ClaudeCodeProvider implements SessionProvider {
         exact = true;
       }
     }
-    if (exact && sessionId !== undefined) this.#sessionAccounts.set(sessionId, id);
+    if (sessionId !== undefined) {
+      if (exact) this.#sessionAccounts.set(sessionId, id);
+      // A fingerprint no account is known for: the process may have switched accounts (`/login`), so its account is a guess again.
+      else if (fingerprint !== undefined) this.#sessionAccounts.delete(sessionId);
+    }
     return this.#account(id, !exact);
   }
 
@@ -351,7 +362,16 @@ export class ClaudeCodeProvider implements SessionProvider {
     const next = new Map<string, Session>();
     for (const id of ids) {
       const file = this.#files.get(id);
-      const meta = file ? await this.#scan(id, file) : undefined;
+      let meta: ClaudeMetaScan | undefined;
+      if (file) {
+        try {
+          meta = await this.#scan(id, file);
+        } catch (err) {
+          // One unreadable transcript must not stop the refresh (or the bridge, at start); the session is listed without it.
+          if (!this.#unreadable.has(file.path)) console.error(`wristline: claude-code: cannot read ${file.path}:`, err);
+          this.#unreadable.add(file.path);
+        }
+      }
       next.set(id, this.#build(id, live.get(id), newest.get(id), file, meta));
     }
 

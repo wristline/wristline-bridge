@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, test } from 'node:test';
+import { after, test, type TestContext } from 'node:test';
 import type { Item, Session } from '../src/protocol.ts';
 import { PromptBlocked } from '../src/provider.ts';
 import { projectSlug, tmuxPane } from '../src/providers/claude-code/home.ts';
@@ -265,6 +265,33 @@ test('claude-code: Quick Asks are left out before the 50-session cap; a session 
   }
 });
 
+test('claude-code: an unreadable transcript (e.g. root-owned after `sudo claude`) is logged once and its session listed without it; the others still load', { skip: process.getuid?.() === 0 && 'root reads any file' }, async () => {
+  const home = join(root, 'claude-unreadable-transcript');
+  const [readable, locked] = ['ffffffff-1111-4000-8000-000000000001', 'ffffffff-1111-4000-8000-000000000002'];
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  mkdirSync(join(home, 'projects', '-w'), { recursive: true });
+  const fixture = new URL('./fixtures/claude/transcript.jsonl', import.meta.url);
+  copyFileSync(fixture, join(home, 'projects', '-w', `${readable}.jsonl`));
+  copyFileSync(fixture, join(home, 'projects', '-w', `${locked}.jsonl`));
+  chmodSync(join(home, 'projects', '-w', `${locked}.jsonl`), 0o000);
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(' '));
+  try {
+    const provider = new ClaudeCodeProvider({ home, historyDays: 7 });
+    await provider.start(recordingHub());
+    provider.stop();
+    await provider.refresh();
+    const title = (id: string): string | undefined => provider.listSessions().find((s) => s.id === `claude-code:${id}`)?.title;
+    assert.equal(title(readable), 'CI 빌드 수정');
+    assert.equal(title(locked), '');
+    assert.equal(errors.length, 1, errors.join('\n'));
+    assert.match(errors[0] ?? '', /cannot read .*ffffffff-1111-4000-8000-000000000002\.jsonl.*EACCES/);
+  } finally {
+    console.error = original;
+  }
+});
+
 test('a missing agent home is reported as not_found', async () => {
   const provider = new CodexProvider({ home: join(root, 'nowhere'), historyDays: 7 });
   await provider.start(recordingHub());
@@ -287,17 +314,18 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
   mkdirSync(dir, { recursive: true });
   const sleeper = spawn('sleep', ['30']);
   t.after(() => sleeper.kill());
+  const claude = await ptyProcess(t);
   const now = Date.now();
   const [older, newer, waiting] = ['aaaaaaaa-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000002', 'aaaaaaaa-0000-4000-8000-000000000003'];
   const entry = (pid: number, sessionId: string, tmux: string, status: string, at: number): void =>
     writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId, cwd: '/w', tmux, status, updatedAt: at, statusUpdatedAt: at }));
   // Two live entries claim pane %5 (a stale one left behind); only the newer may type there.
   entry(process.pid, older, 'old:@1.%5', 'idle', now - 60_000);
-  entry(process.ppid, newer, 'work:@2.%5', 'idle', now);
+  entry(claude.pid, newer, 'work:@2.%5', 'idle', now);
   entry(sleeper.pid ?? 0, waiting, 'work:@3.%9', 'waiting', now);
 
   const calls: string[][] = [];
-  let panePid = process.ppid;
+  let panePid = claude.pid;
   const provider = new ClaudeCodeProvider({
     home,
     historyDays: 7,
@@ -318,7 +346,7 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
 
     await provider.sendPrompt(newer, 'fix the build\nthen run tests\u001b');
     assert.deepEqual(calls, [
-      ['/usr/bin/tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid} #{pane_in_mode}'],
+      ['/usr/bin/tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid} #{pane_in_mode} #{pane_synchronized}'],
       ['/usr/bin/tmux', 'send-keys', '-t', '%5', '-l', '--', 'fix the build then run tests '],
       ['/usr/bin/tmux', 'send-keys', '-t', '%5', 'Enter'],
     ]);
@@ -334,7 +362,7 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
     panePid = 1;
     await assert.rejects(provider.sendPrompt(newer, 'hi'), (e: unknown) => e instanceof PromptBlocked && e.code === 'no_tmux');
     assert.equal(calls.length, 1);
-    panePid = process.ppid;
+    panePid = claude.pid;
 
     // An open request blocks prompts; the terminal answering the dialog (status leaves "waiting") resolves it.
     const answer = hub.pending.open({ sessionId: `claude-code:${waiting}`, kind: 'permission', title: 'Bash', questions: [] });
@@ -357,6 +385,39 @@ test('claude-code: prompts go to the newest live owner of a tmux pane; answered 
   }
 });
 
+/**
+ * A process in the foreground of its own terminal, as Claude Code runs in a tmux pane (`script`
+ * gives it a pseudo-terminal). `sh -c` runs `command` with `$0` set to `exe`, and the pid it
+ * prints first is returned. Killed when the test ends.
+ */
+async function ptyProcess(t: TestContext, command = 'echo $$; exec "$0" 30', exe = 'sleep'): Promise<{ pid: number; child: ChildProcess }> {
+  const child = spawn('script', ['-qfec', `sh -c '${command}' '${exe}'`, '/dev/null'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = '';
+  const pid = await new Promise<number>((resolve, reject) => {
+    child.once('error', reject);
+    child.stdout.on('data', (data: Buffer) => {
+      out += data.toString();
+      const printed = /(\d+)\r?\n/.exec(out)?.[1];
+      if (printed) resolve(Number(printed));
+    });
+  });
+  t.after(() => {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+    child.kill('SIGKILL');
+  });
+  return { pid, child };
+}
+
+/** The state letter of /proc/<pid>/stat (`T` when stopped). */
+function procState(pid: number): string | undefined {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+}
+
 /** A live registry entry for `pid` in pane %5 and a provider whose tmux is faked (`probe` is what display-message answers). The refresh timer is stopped so the snapshot only changes on `refresh()`. */
 async function tmuxProvider(name: string, sid: string, pid: number, status = 'idle') {
   const home = join(root, name);
@@ -366,14 +427,14 @@ async function tmuxProvider(name: string, sid: string, pid: number, status = 'id
     writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: sid, cwd: '/w', tmux: 'work:@2.%5', status, updatedAt: Date.now(), ...patch }));
   entry();
   const calls: string[][] = [];
-  const probe = { pid, inMode: 0 };
+  const probe = { pid, inMode: 0, synchronized: 0 };
   const provider = new ClaudeCodeProvider({
     home,
     historyDays: 7,
     tmux: 'tmux',
     exec: async (file, args) => {
       calls.push([file, ...args]);
-      return args[0] === 'display-message' ? `${probe.pid} ${probe.inMode}\n` : '';
+      return args[0] === 'display-message' ? `${probe.pid} ${probe.inMode} ${probe.synchronized}\n` : '';
     },
   });
   await provider.start(recordingHub());
@@ -383,15 +444,14 @@ async function tmuxProvider(name: string, sid: string, pid: number, status = 'id
 }
 
 test('claude-code: a session whose process exited since the last refresh gets no keystrokes', async (t) => {
-  const sleeper = spawn('sleep', ['30']);
-  t.after(() => sleeper.kill());
+  const sleeper = await ptyProcess(t);
   const sid = 'cccccccc-0000-4000-8000-000000000001';
-  const { provider, typed, probe } = await tmuxProvider('claude-dead', sid, sleeper.pid ?? 0);
+  const { provider, typed, probe } = await tmuxProvider('claude-dead', sid, sleeper.pid);
   probe.pid = process.pid; // The pane's shell is this process; the session runs inside it.
   await provider.sendPrompt(sid, 'hi');
   assert.equal(typed().length, 2);
-  sleeper.kill('SIGKILL');
-  await once(sleeper, 'exit');
+  process.kill(sleeper.pid, 'SIGKILL');
+  await once(sleeper.child, 'exit');
   // The registry still names the session and no refresh ran, but the pane now shows the shell.
   await assert.rejects(provider.sendPrompt(sid, 'rm -rf build'), (e: unknown) => e instanceof PromptBlocked && e.code === 'not_live');
   assert.equal(typed().length, 2);
@@ -427,20 +487,65 @@ test('claude-code: a dialog that opened since the last refresh blocks the prompt
   assert.deepEqual(typed(), []);
 });
 
-test('claude-code: a pane in copy mode refuses prompts as busy', async () => {
+test('claude-code: a pane in copy mode refuses prompts as busy', async (t) => {
   const sid = 'cccccccc-0000-4000-8000-000000000003';
-  const { provider, calls, typed, probe } = await tmuxProvider('claude-copy-mode', sid, process.pid);
+  const { provider, calls, typed, probe } = await tmuxProvider('claude-copy-mode', sid, (await ptyProcess(t)).pid);
   probe.inMode = 1;
   await assert.rejects(provider.sendPrompt(sid, 'continue'), (e: unknown) => e instanceof PromptBlocked && e.code === 'busy');
-  assert.deepEqual(calls, [['tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid} #{pane_in_mode}']]);
+  assert.deepEqual(calls, [['tmux', 'display-message', '-p', '-t', '%5', '#{pane_pid} #{pane_in_mode} #{pane_synchronized}']]);
   probe.inMode = 0;
   await provider.sendPrompt(sid, 'continue');
   assert.equal(typed().length, 2);
 });
 
-test('claude-code: a trailing ";" is padded so tmux does not strip it as a command separator', async () => {
+test('claude-code: a pane whose window has synchronize-panes on refuses prompts as busy (tmux would type them into every pane)', async (t) => {
+  const sid = 'cccccccc-0000-4000-8000-000000000005';
+  const { provider, typed, probe } = await tmuxProvider('claude-synchronized', sid, (await ptyProcess(t)).pid);
+  probe.synchronized = 1;
+  await assert.rejects(provider.sendPrompt(sid, 'continue'), (e: unknown) => e instanceof PromptBlocked && e.code === 'busy');
+  assert.deepEqual(typed(), []);
+  probe.synchronized = 0;
+  await provider.sendPrompt(sid, 'continue');
+  assert.equal(typed().length, 2);
+});
+
+test('claude-code: a session stopped with Ctrl-Z or sent to the background refuses prompts as busy (its shell would run them)', async (t) => {
+  const busy = (e: unknown): boolean => e instanceof PromptBlocked && e.code === 'busy';
+  const claude = await ptyProcess(t);
+  const sid = 'cccccccc-0000-4000-8000-000000000006';
+  const { provider, typed } = await tmuxProvider('claude-stopped', sid, claude.pid);
+  await provider.sendPrompt(sid, 'hi');
+  assert.equal(typed().length, 2);
+  process.kill(claude.pid, 'SIGSTOP');
+  await waitFor(() => (procState(claude.pid) === 'T' ? true : undefined));
+  await assert.rejects(provider.sendPrompt(sid, 'rm -rf build'), busy);
+  assert.equal(typed().length, 2);
+  process.kill(claude.pid, 'SIGCONT');
+  await waitFor(() => (procState(claude.pid) !== 'T' ? true : undefined));
+  await provider.sendPrompt(sid, 'hi');
+  assert.equal(typed().length, 4);
+
+  // Running (e.g. resumed with `bg`) but not the terminal's foreground job: the shell reads the keys.
+  const background = await ptyProcess(t, 'set -m; "$0" 30 & echo $!; wait');
+  const other = 'cccccccc-0000-4000-8000-000000000007';
+  const bg = await tmuxProvider('claude-background', other, background.pid);
+  assert.notEqual(procState(background.pid), 'T');
+  await assert.rejects(bg.provider.sendPrompt(other, 'rm -rf build'), busy);
+  assert.deepEqual(bg.typed(), []);
+
+  // The command name in /proc/<pid>/stat is parenthesised and may itself hold ") T ": fields are read after the last ")".
+  const exe = join(root, 'x) T 1 2 (');
+  symlinkSync('/usr/bin/sleep', exe);
+  const odd = await ptyProcess(t, undefined, exe);
+  const third = 'cccccccc-0000-4000-8000-000000000008';
+  const named = await tmuxProvider('claude-odd-name', third, odd.pid);
+  await named.provider.sendPrompt(third, 'hi');
+  assert.equal(named.typed().length, 2);
+});
+
+test('claude-code: a trailing ";" is padded so tmux does not strip it as a command separator', async (t) => {
   const sid = 'cccccccc-0000-4000-8000-000000000004';
-  const { provider, typed } = await tmuxProvider('claude-semicolon', sid, process.pid);
+  const { provider, typed } = await tmuxProvider('claude-semicolon', sid, (await ptyProcess(t)).pid);
   for (const text of ['a;', 'b\\;', ';', 'semi;colon']) await provider.sendPrompt(sid, text);
   assert.deepEqual(typed().filter((c) => c[4] === '-l').map((c) => c.at(-1)), ['a; ', 'b\\; ', '; ', 'semi;colon']);
 });

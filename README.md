@@ -115,7 +115,9 @@ Prompts are typed into the session's terminal with `tmux send-keys`, so this wor
 Claude Code sessions **running inside tmux** (on the same tmux server as the bridge's user). The
 bridge checks that the session really runs in that pane before typing. A session waiting on a
 dialog refuses prompts (`awaiting_input`) until it is answered; a busy session queues them. A pane
-left in tmux copy mode (scrolled back) refuses them too (`busy`) until you leave copy mode.
+left in tmux copy mode (scrolled back) refuses them too (`busy`) until you leave copy mode. So do a
+session stopped with Ctrl-Z or sent to the background (its shell would run the text as a command)
+and a window with `synchronize-panes` on (the text would reach every pane).
 
 Prompts starting with `!` are refused (`unsafe_prefix`), because Claude Code would run them as a
 shell command; `/` commands are allowed. Known limitation: the prompt is typed after whatever is

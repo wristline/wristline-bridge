@@ -299,6 +299,58 @@ test('windows reported before the account was known are folded into the first la
   }
 });
 
+test('usage from processes that alternate (an idle one repeats the limits of its last API call): the later reset time wins, then the higher number, and nothing churns', async () => {
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const bridge = await startBridge(new FakeProvider(), () => clock);
+  try {
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    assert.equal((await ws.next()).type, 'snapshot');
+    const report = (windows: Usage['windows']): Usage => ({ provider: 'claude-code', updatedAt: new Date(clock).toISOString(), windows, account: { id: 'acc-a', label: 'me' } });
+    const fiveHour = { id: '5h', label: '5h', usedPercent: 40, resetsAt: '2026-09-29T12:00:00.000Z', minutes: 300 };
+    const sevenDay = { id: '7d', label: '7d', usedPercent: 12, resetsAt: '2026-10-03T00:00:00.000Z', minutes: 10080 };
+    // Merged windows by id: a report listing fewer windows puts the ones it names first.
+    const stored = (): Record<string, Usage['windows'][number]> => Object.fromEntries((bridge.hub.usageList()[0]?.windows ?? []).map((w) => [w.id, w]));
+    // The working session, an idle one whose last call was earlier in the same windows, and one idle since before the last 5h reset.
+    const busy = (): Usage => report([fiveHour, sevenDay]);
+    const idle = (): Usage => report([{ ...fiveHour, usedPercent: 25 }, { ...sevenDay, usedPercent: 10 }]);
+    const older = (): Usage => report([{ ...fiveHour, usedPercent: 90, resetsAt: '2026-09-29T07:00:00.000Z' }, { ...sevenDay, usedPercent: 9 }]);
+
+    bridge.hub.usage(busy());
+    assert.equal((await ws.next()).type, 'usage');
+    for (const next of [idle, busy, older, idle, busy, older]) {
+      clock += 60_000; // Past the throttle each time: a change would be sent at once.
+      bridge.hub.usage(next());
+      assert.deepEqual(stored(), { '5h': fiveHour, '7d': sevenDay });
+    }
+    // A window with an earlier (not yet passed) reset time is an older one too.
+    bridge.hub.usage(report([{ ...sevenDay, usedPercent: 99, resetsAt: '2026-09-30T00:00:00.000Z' }]));
+    assert.deepEqual(stored(), { '5h': fiveHour, '7d': sevenDay });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ws.pending(), 0, 'the numbers never changed, so nothing was sent');
+
+    // More usage in the same window shows at once.
+    clock += 60_000;
+    bridge.hub.usage(report([{ ...fiveHour, usedPercent: 41 }, sevenDay]));
+    const grown = await ws.next();
+    assert.deepEqual(grown.type === 'usage' && grown.usage.windows, [{ ...fiveHour, usedPercent: 41 }, sevenDay]);
+
+    // After the 5h reset the new window wins although its number is lower; the idle session's old window is past its reset and dropped.
+    clock = Date.parse('2026-09-29T12:05:00Z');
+    const newFiveHour = { ...fiveHour, usedPercent: 3, resetsAt: '2026-09-29T17:00:00.000Z' };
+    bridge.hub.usage(report([newFiveHour, sevenDay]));
+    const reset = await ws.next();
+    assert.deepEqual(reset.type === 'usage' && reset.usage.windows, [newFiveHour, sevenDay]);
+    clock += 60_000;
+    bridge.hub.usage(idle());
+    assert.deepEqual(stored(), { '5h': newFiveHour, '7d': sevenDay });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ws.pending(), 0);
+    ws.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('a usage change inside the throttle window is sent when the window ends, in its then-current state', async () => {
   const clock = Date.parse('2026-09-29T10:00:00Z');
   const hub = new BridgeHub({ providers: [new FakeProvider()], alerts: { now: () => clock }, usageThrottleMs: 200, log: quiet });

@@ -86,12 +86,15 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   entry's (a stale snapshot). Once a provider reports a labelled entry, the bridge drops that
   provider's unlabelled one (a watch sees it go on its next `snapshot`) and ignores later unlabelled
   reports of that provider.
-  The bridge merges the windows of an entry: each window `id` keeps the latest value reported for
-  it, and a window is removed only when its `resetsAt` has passed (or the entry is dropped), never
-  because one report omitted it (a Claude Code statusLine report carries only the limits it happens
-  to name). `GET /api/usage` and the `snapshot` always return this merged state; `usage` events are
-  sent at once when an entry first appears and then at most once per minute per entry, with the
-  merged state at the time of sending; an event with empty `windows` means the entry's last
+  The bridge merges the windows of an entry: each window `id` keeps the value with the later
+  `resetsAt`, the higher `usedPercent` for the same `resetsAt` (every Claude Code process repeats
+  the limits of its own last API call, so an idle one reports old numbers), and the latest value
+  when a `resetsAt` is missing. A window is removed only when its `resetsAt` has passed (or the
+  entry is dropped), never because one report omitted it (a Claude Code statusLine report carries
+  only the limits it happens to name). `GET /api/usage` and the `snapshot` always return this
+  merged state; `usage` events are sent at once when an entry first appears and then at most once
+  per minute per entry, with the merged state at the time of sending (windows merely listed in
+  another order are no change); an event with empty `windows` means the entry's last
   window has reset (the entry is then absent from `GET /api/usage`). The windows a provider
   reported before it named its account belong to the first labelled entry. The bridge sends no
   event on the passing of a `resetsAt` alone: a watch showing a window past its `resetsAt` shows
