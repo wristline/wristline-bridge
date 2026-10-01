@@ -1,0 +1,12 @@
+{
+  "type": "usage",
+  "usage": {
+    "provider": "codex",
+    "updatedAt": "2026-09-29T10:01:00.000Z",
+    "windows": [],
+    "account": {
+      "id": "c0a1b2c3-0000-4000-8000-000000000001",
+      "label": "dev@example.com"
+    }
+  }
+}

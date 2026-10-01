@@ -140,6 +140,8 @@ export class BridgeHub implements Hub {
   readonly #usage = new Map<string, Usage>();
   /** Providers that have reported a labelled usage entry; their unlabelled reports are stale from then on (see protocol.md). */
   readonly #labelled = new Set<ProviderId>();
+  /** The account id each home (provider instance) is logged into now, undefined when logged out; only homes that reported one. */
+  readonly #logins = new Map<SessionProvider, string | undefined>();
   readonly #clients = new Set<Client>();
   readonly #watches = new Map<string, { stop: () => void; clients: Set<Client> }>();
   readonly #throttles = new Map<string, Throttle>();
@@ -229,7 +231,41 @@ export class BridgeHub implements Hub {
     // Windows merely listed in another order (a report without one of them comes first) are unchanged too.
     const numbers = (u: Usage): string => JSON.stringify([[...u.windows].sort((x, y) => (x.id < y.id ? -1 : 1)), u.account]);
     const changed = !previous || numbers(previous) !== numbers(merged);
-    if (changed) this.#publishUsage(key);
+    // An account no home is logged into now is kept (it shows again at once if one logs back in) but never sent.
+    if (changed && this.#visible(merged)) this.#publishUsage(key);
+  }
+
+  login(provider: SessionProvider, accountId: string | undefined): void {
+    if (this.#logins.has(provider) && this.#logins.get(provider) === accountId) return;
+    const before = new Map([...this.#usage].map(([key, u]) => [key, this.#visible(u)]));
+    this.#logins.set(provider, accountId);
+    for (const [key, u] of this.#usage) {
+      if (this.#visible(u) === before.get(key)) continue;
+      // Sent at once, past the throttle: a removal must not wait, nor an entry coming back; a change held back for one now hidden is void.
+      const t = this.#usageThrottles.get(key);
+      if (t) {
+        clearTimeout(t.timer);
+        t.timer = undefined;
+        t.pending = false;
+      }
+      this.#sendUsage(key);
+    }
+  }
+
+  /**
+   * Whether the watch may see the entry: always without an account, else only while its account is
+   * the current login of a home of its provider. Until a home of that provider has reported its
+   * login there is nothing to go by, and every entry passes.
+   */
+  #visible(usage: Usage): boolean {
+    if (!usage.account) return true;
+    let reported = false;
+    for (const [p, id] of this.#logins) {
+      if (p.id !== usage.provider) continue;
+      if (id === usage.account.id) return true;
+      reported = true;
+    }
+    return !reported;
   }
 
   /** At most one `usage` event per entry and USAGE_THROTTLE_MS; a change inside the window is sent at its end, in its then-current state. */
@@ -254,11 +290,12 @@ export class BridgeHub implements Hub {
     }, t.last + this.#usageThrottleMs - now);
   }
 
-  /** An entry whose last window has reset is sent with no windows, so the watch clears its stale numbers. */
+  /** An entry whose last window has reset, or whose account is no longer logged in, is sent with no windows: the watch drops it. */
   #sendUsage(key: string): void {
     const stored = this.#usage.get(key);
     if (!stored) return;
-    this.#broadcast({ type: 'usage', usage: this.#current(key) ?? { ...stored, windows: [] } });
+    const shown = this.#visible(stored) ? this.#current(key) : undefined;
+    this.#broadcast({ type: 'usage', usage: shown ?? { ...stored, windows: [] } });
   }
 
   /** The entry as the watch should see it now: without windows whose reset time has passed; undefined when none is left. */
@@ -298,9 +335,9 @@ export class BridgeHub implements Hub {
     return this.#providers.map((p) => p.health());
   }
 
-  /** The merged entries, without windows whose reset time has passed. */
+  /** The merged entries of accounts logged in now (and those without an account), without windows whose reset time has passed. */
   usageList(): Usage[] {
-    return [...this.#usage.keys()].flatMap((key) => this.#current(key) ?? []);
+    return [...this.#usage].flatMap(([key, u]) => (this.#visible(u) ? (this.#current(key) ?? []) : []));
   }
 
   /** The buffered alerts of the past ALERT_TTL_MS, oldest first: a reconnecting watch posts the ones it missed. */

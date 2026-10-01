@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { Auth } from '../src/auth.ts';
 import { BridgeHub, usageKey } from '../src/hub.ts';
-import type { Account, Session, Usage } from '../src/protocol.ts';
+import type { Account, Session, Usage, UsageList } from '../src/protocol.ts';
 import { statuslineRouter, type StatuslineTarget } from '../src/providers/claude-code/statusline.ts';
 import { startServer } from '../src/server.ts';
 import { FakeProvider, TestSocket, fakeAskRunner, quiet, startBridge, waitFor } from './helpers.ts';
@@ -458,6 +458,77 @@ test('a usage change inside the throttle window is sent when the window ends, in
     assert.deepEqual(event.type === 'usage' && event.usage.windows, [{ id: 'primary', usedPercent: 3 }], 'one event with the latest numbers');
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(ws.pending(), 0, 'nothing more without a change');
+    ws.close();
+  } finally {
+    hub.close();
+    await server.close();
+  }
+});
+
+test('usage goes out only for the accounts logged in now: the others stay out of the snapshot and GET /api/usage; a login change removes them at once, throttle or not, and brings back the new login\'s entry; entries without an account pass', async () => {
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const [homeA, homeB, codexHome] = [new FakeProvider(), new FakeProvider(), new FakeProvider('codex')];
+  const hub = new BridgeHub({ providers: [homeA, homeB, codexHome], alerts: { now: () => clock }, usageThrottleMs: 200, log: quiet });
+  const auth = new Auth({ devices: [], save: async () => {}, now: () => clock });
+  const server = await startServer({ hub, auth, bridge: { name: 'devbox', version: '0.1.0', apiVersion: 1 }, hookToken: 'h', apiPort: 0, hookPort: 0, onStatusline: () => {}, asks: fakeAskRunner(() => {}, {}) });
+  try {
+    const { token } = await auth.issue('w');
+    const url = `ws://127.0.0.1:${server.apiPort}/api/ws`;
+    // Two Claude Code homes with a login each; acc-c is an earlier login of home A whose old process still reports its limits. The Codex home uses an API key.
+    hub.login(homeA, 'acc-a');
+    hub.login(homeB, 'acc-b');
+    hub.login(codexHome, undefined);
+    const ws = await new TestSocket(url, token).open();
+    await ws.next();
+    const report = (provider: Usage['provider'], account: string | undefined, used: number): Usage => ({
+      provider,
+      updatedAt: new Date(clock).toISOString(),
+      windows: [{ id: '5h', usedPercent: used, resetsAt: '2026-09-29T12:00:00.000Z' }],
+      ...(account ? { account: { id: account, label: account } } : {}),
+    });
+    const [a, b, c, codex] = [report('claude-code', 'acc-a', 10), report('claude-code', 'acc-b', 20), report('claude-code', 'acc-c', 30), report('codex', undefined, 5)];
+    hub.usage(a);
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: a });
+    hub.usage(c);
+    hub.usage(b);
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: b }, 'nothing for acc-c');
+    hub.usage(codex);
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: codex }, 'no account: sent although no Codex account is logged in');
+
+    const keys = (list: Usage[]): string[] => list.map(usageKey);
+    const current = ['claude-code:acc-a', 'claude-code:acc-b', 'codex:'];
+    assert.deepEqual(keys(hub.usageList()), current);
+    const rest = await fetch(`http://127.0.0.1:${server.apiPort}/api/usage`, { headers: { authorization: `Bearer ${token}` } });
+    assert.deepEqual(keys(((await rest.json()) as UsageList).usage), current);
+    const later = await new TestSocket(url, token).open();
+    const snapshot = await later.next();
+    assert.deepEqual(snapshot.type === 'snapshot' && keys(snapshot.usage), current);
+    later.close();
+
+    // A change held back by the throttle, then home A logs into acc-c: acc-a is removed at once (no windows) and acc-c's kept entry comes back at once.
+    hub.usage(report('claude-code', 'acc-a', 11));
+    hub.login(homeA, 'acc-c');
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...a, windows: [] } });
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: c });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(ws.pending(), 0, 'the change held back for acc-a does not follow its removal');
+    assert.deepEqual(keys(hub.usageList()), ['claude-code:acc-c', 'claude-code:acc-b', 'codex:']);
+
+    // An account no home is logged into keeps its numbers without sending them; a home that logs back in shows them at once.
+    hub.usage(report('claude-code', 'acc-a', 12));
+    hub.login(homeA, 'acc-c'); // unchanged
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(ws.pending(), 0);
+    hub.login(homeA, undefined); // logged out
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...c, windows: [] } });
+    hub.login(homeA, 'acc-a');
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: report('claude-code', 'acc-a', 12) });
+
+    // An entry whose last window has reset is removed the same way once a report shows it.
+    clock = Date.parse('2026-09-29T12:00:01Z');
+    hub.usage(report('claude-code', 'acc-b', 20));
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...report('claude-code', 'acc-b', 20), windows: [] } });
+    assert.deepEqual(hub.usageList(), [], 'every window has reset');
     ws.close();
   } finally {
     hub.close();

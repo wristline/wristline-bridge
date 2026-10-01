@@ -51,6 +51,7 @@ export class CodexAccounts {
   #accounts: Record<string, string>;
   /** mtime and size of `auth.json` as last read; it is re-read only when these change. */
   #authStat: string | undefined;
+  #current: string | undefined;
 
   constructor(options: AccountsOptions) {
     this.#labels = options.labels ?? {};
@@ -69,8 +70,13 @@ export class CodexAccounts {
     this.#save?.(this.#accounts).catch((err: unknown) => console.error('wristline: codex: saving accounts failed:', err));
   }
 
-  /** Learns the home's login from `auth.json` when the file changed. Never rejects. */
-  async poll(home: string): Promise<void> {
+  /** The account id of the home's login as `auth.json` last named it; undefined when logged out or using an API key. */
+  get current(): string | undefined {
+    return this.#current;
+  }
+
+  /** Learns the home's login from `auth.json` when the file changed; true when it was read (and `current` is up to date). Never rejects. */
+  async poll(home: string): Promise<boolean> {
     const path = join(home, 'auth.json');
     let key = 'missing';
     try {
@@ -79,13 +85,16 @@ export class CodexAccounts {
     } catch (err) {
       if (!isNotFound(err)) key = 'unreadable';
     }
-    if (key === this.#authStat) return;
+    if (key === this.#authStat) return false;
     this.#authStat = key; // Set first: an unreadable file is reported once, not every 2 s.
     try {
       const login = await readCodexLogin(home);
+      this.#current = login?.id;
       if (login) this.learn(login.id, login.label);
+      return true;
     } catch (err) {
       console.error(`wristline: codex: reading the login of ${home} failed:`, err instanceof Error ? err.message : err);
+      return false;
     }
   }
 

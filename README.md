@@ -294,7 +294,9 @@ the bridge keeps a timeline of which account each home was logged into (`claudeL
 activity; a session whose status line the bridge has seen since its process started is attributed
 for certain. Anything else is marked `estimated` (shown with `~` on the watch), in particular after
 you switch accounts inside one home with `/login`: that works, but stays an estimate and shares one
-usage entry per login. For exact, concurrent use, give each account its own home.
+usage entry per login. For exact, concurrent use, give each account its own home. The watch shows
+plan usage only for the account each home is logged into now; an earlier login's numbers are kept
+and come back when a home logs into that account again.
 
 ## Reach it from the watch: Tailscale Funnel
 

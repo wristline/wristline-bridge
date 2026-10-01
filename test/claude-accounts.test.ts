@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { LoginEntry } from '../src/config.ts';
+import { BridgeHub } from '../src/hub.ts';
 import type { Session, Usage } from '../src/protocol.ts';
 import { ClaudeCodeProvider } from '../src/providers/claude-code/provider.ts';
-import { recordingHub } from './helpers.ts';
+import { quiet, recordingHub } from './helpers.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-claude-accounts-'));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -100,6 +101,34 @@ test('claude-code: statusLine usage goes to the learned fingerprint\'s account, 
   assert.equal(provider.home, home);
 });
 
+test('claude-code: only the usage of the home\'s current login reaches the watch; a login change or logout takes the previous account\'s off', async () => {
+  let clock = Date.now();
+  const { home, login } = accountHome('claude-current', () => clock);
+  const id = 'cccccccc-2222-4000-8000-000000000001';
+  login('acc-a', 'a@example.com');
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7, now: () => clock });
+  const hub = new BridgeHub({ providers: [provider], alerts: { now: () => clock }, log: quiet });
+  try {
+    await provider.start(hub);
+    provider.stop();
+    const limits = (used: number): unknown => ({ five_hour: { used_percentage: used, resets_at: Math.floor(clock / 1000) + 3600 } });
+    const shown = (): unknown[] => hub.usageList().map((u) => [u.account?.id, u.windows.map((w) => w.usedPercent)]);
+    await provider.statusline({ session_id: id, rate_limits: limits(10) });
+    assert.deepEqual(shown(), [['acc-a', [10]]]);
+    clock += 1000;
+    login('acc-b', 'bob@example.com');
+    await provider.refresh();
+    assert.deepEqual(shown(), [], 'A is logged out; B has not reported yet');
+    await provider.statusline({ session_id: id, rate_limits: limits(40) });
+    assert.deepEqual(shown(), [['acc-b', [40]]]);
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ numStartups: 1 })); // `claude auth logout`
+    await provider.refresh();
+    assert.deepEqual(shown(), []);
+  } finally {
+    hub.close();
+  }
+});
+
 test('claude-code: a session that switches accounts with /login loses its exact account until the new fingerprint is known', async () => {
   let clock = Date.now();
   const { home, login, entry } = accountHome('claude-relogin', () => clock);
@@ -147,12 +176,14 @@ test('claude-code: an unreadable .claude.json keeps the previous login and is lo
   console.error = (...args: unknown[]) => void errors.push(args.map(String).join(' '));
   try {
     const provider = new ClaudeCodeProvider({ home, historyDays: 7, logins: [{ at: '2026-01-01T00:00:00.000Z', id: 'acc-a', label: 'a@example.com' }] });
-    await provider.start(recordingHub());
+    const hub = recordingHub();
+    await provider.start(hub);
     provider.stop();
     await provider.refresh();
     await provider.statusline({ session_id: 'x' });
     await provider.refresh();
     assert.equal(errors.filter((e) => e.includes(`login poll of ${home} failed`)).length, 1, errors.join('\n'));
+    assert.deepEqual(hub.logins, [], 'a failed read is not reported as a logout');
     // A session labelled by the timeline still gets the previous login.
     writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 'aaaaaaaa-0000-4000-8000-0000000000aa', cwd: '/w', status: 'idle', startedAt: Date.now(), updatedAt: Date.now() }));
     await provider.refresh();

@@ -296,6 +296,7 @@ function recordingHub(): Hub & { requests: PendingRequest[]; resolved: string[];
     session: () => {},
     removed: () => {},
     usage: (u) => usages.push(u),
+    login: () => {},
     alert: (sessionId, kind, text, title) => void alerts.push([sessionId, kind, text, title]),
     pending: new PendingRegistry({ onRequest: (r) => requests.push(r), onResolved: (r, by) => resolved.push(`${r.id}:${by}`) }),
   };

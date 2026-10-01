@@ -16,6 +16,11 @@ response and event live in [`protocol/v1/`](../protocol/v1) and ship in the npm 
   (`UPDATE_FIXTURES=1 npm test`) in the same commit. The app mirrors the types in `Protocol.kt`
   ("mirrors wristline-bridge protocol v1") and decodes every fixture in its tests.
 - There is no JSON Schema; the fixtures plus decode tests cover the same ground.
+- **A `usage` event with empty `windows` removes the entry** with that `provider` and `account.id`
+  ([`event-usage-removed.json`](../protocol/v1/event-usage-removed.json)). Earlier v1 bridges sent
+  one only when an entry's last window had reset; bridges since also send one when the entry's
+  account is no longer logged in (see Usage). A client drops the entry rather than keeping it with
+  no windows.
 
 ## Transport and authentication
 
@@ -100,11 +105,21 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   Code statusLine report carries only the limits it happens to name). `GET /api/usage` and the
   `snapshot` always return this merged state; `usage` events are sent at once when an entry first
   appears and then at most once per minute per entry, with the merged state at the time of sending
-  (windows merely listed in another order are no change); an event with empty `windows` means the
-  entry's last window has reset (the entry is then absent from `GET /api/usage`). The windows a
-  provider reported before it named its account belong to the first labelled entry. The bridge sends
-  no event on the passing of a `resetsAt` alone: a watch showing a window past its `resetsAt` shows
-  stale numbers until the next report or `snapshot`.
+  (windows merely listed in another order are no change). An event with empty `windows` removes the
+  entry: it is sent when a report shows that the entry's last window has reset, and when its account
+  is no longer logged in (below); the entry is then absent from `GET /api/usage` and later
+  snapshots. The windows a provider reported before it named its account belong to the first
+  labelled entry. The bridge sends no event on the passing of a `resetsAt` alone: a watch showing a
+  window past its `resetsAt` shows stale numbers until the next report or `snapshot`.
+  Only accounts logged in now are sent. An entry with an `account` is in `GET /api/usage`, the
+  `snapshot` and `usage` events only while that account is the current login of one of its
+  provider's homes (Claude Code: `oauthAccount` of the home's `.claude.json`; Codex: the ChatGPT
+  login in the home's `auth.json`), so several homes can show several accounts; an entry without
+  `account` is always sent. The numbers of other accounts (a Claude Code process still running under
+  an earlier login, Codex rollouts of threads of another account) are kept but not sent. When a
+  home's login changes or it logs out, the bridge sends at once, outside the once-a-minute limit, an
+  event with empty `windows` for each entry no longer current, then the kept entry of the account
+  now logged in, if it has one; a change held back for a removed entry is not sent.
 
 - **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `threadId` (the id of the
   first ask of the conversation it belongs to; its own id for a first ask), `question` (the
@@ -195,7 +210,7 @@ Server events (JSON text frames):
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
-| `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first | `event-usage.json` |
+| `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first. Empty `windows`: remove the entry (its last window reset, or its account is no longer logged in; a login change is sent at once) | `event-usage.json`, `event-usage-removed.json` |
 | `alert` | `id, at, sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json` |
 | `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
@@ -231,9 +246,9 @@ While the watch app is not on screen it only needs what should wake the wearer. 
 - `session_removed` for a session whose last `session` event was `needs_input` (it ended or left
   the list without a `session` event: the client would otherwise keep showing it as waiting).
 
-Nothing else: no `usage`, no `item` (the subscription stays and resumes in the foreground), no
-other `session` churn or `session_removed`, no `ask`. `{"type": "mode", "mode": "foreground"}`
-restores the full stream. A new connection starts in the foreground and always gets its
+Nothing else: no `usage` (removals included: `GET /api/usage` has the current entries), no
+`item` (the subscription stays and resumes in the foreground), no other `session` churn or
+`session_removed`, no `ask`. `{"type": "mode", "mode": "foreground"}` restores the full stream. A new connection starts in the foreground and always gets its
 `snapshot`; after reconnecting, a client re-sends its `mode` (after its `subscribe`). A `mode`
 with an unknown value is ignored.
 

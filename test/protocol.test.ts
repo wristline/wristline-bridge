@@ -305,8 +305,14 @@ test('WebSocket events', async () => {
   // A minute later (usage events are throttled to one per minute per entry) the primary window moved; the secondary one is kept from the earlier report.
   clock += 60_000;
   bridge.hub.usage({ ...usage, updatedAt: '2026-09-29T10:01:00.000Z', windows: [{ id: 'primary', usedPercent: 13, resetsAt: '2026-09-29T13:00:00.000Z', minutes: 300 }] });
-  fixture('event-usage', await ws.next());
+  const changed = await ws.next();
+  fixture('event-usage', changed);
   clock -= 60_000;
+  // The Codex home logs into another account: the entry is removed at once (empty windows), throttle or not; logging back in brings it back.
+  bridge.hub.login(codexProvider, 'c0a1b2c3-0000-4000-8000-000000000002');
+  fixture('event-usage-removed', await ws.next());
+  bridge.hub.login(codexProvider, usage.account?.id);
+  assert.deepEqual(await ws.next(), changed);
 
   // The question is answered in the Codex terminal instead.
   terminal.abort();

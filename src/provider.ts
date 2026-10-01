@@ -13,6 +13,8 @@ export interface Hub {
   session(session: Session): void;
   removed(sessionId: string): void;
   usage(usage: Usage): void;
+  /** The account the provider's home is logged into now (undefined: logged out), after each read of its login: usage is sent for current logins only. */
+  login(provider: SessionProvider, accountId: string | undefined): void;
   alert(sessionId: string, alert: AlertKind, text?: string, title?: string): void;
   readonly pending: PendingRegistry;
 }

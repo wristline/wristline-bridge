@@ -205,7 +205,8 @@ export class CodexProvider implements SessionProvider {
     this.#found = files !== undefined;
     this.#files = files ?? new Map();
     await this.#indexTail.sync();
-    await this.#accounts.poll(this.home);
+    // Rollouts of other accounts still name their threads' accounts; the hub sends only the current login's usage.
+    if (await this.#accounts.poll(this.home)) this.#hub?.login(this, this.#accounts.current);
     const now = this.#now();
 
     const cutoff = now - this.#historyDays * DAY_MS;

@@ -286,6 +286,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (key === this.#loginStat) return;
     this.#loginStat = key; // Set first: a broken or unreadable file is reported once, not every 2 s.
     const account = await readClaudeAccount(this.home);
+    this.#hub?.login(this, account?.id);
     if (!account) return;
     const logins = appendLogin(this.#logins, account, this.#now());
     if (logins === this.#logins) return;

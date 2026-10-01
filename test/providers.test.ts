@@ -5,12 +5,13 @@ import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test, type TestContext } from 'node:test';
+import { BridgeHub } from '../src/hub.ts';
 import type { Item, Session } from '../src/protocol.ts';
 import { PromptBlocked } from '../src/provider.ts';
 import { projectSlug, tmuxPane } from '../src/providers/claude-code/home.ts';
 import { ClaudeCodeProvider } from '../src/providers/claude-code/provider.ts';
 import { CodexProvider } from '../src/providers/codex/provider.ts';
-import { recordingHub, waitFor } from './helpers.ts';
+import { quiet, recordingHub, waitFor } from './helpers.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-providers-'));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -153,10 +154,40 @@ test('codex: rollouts with index titles, sub-agents hidden, threads and usage la
     assert.equal(JSON.stringify([sessions, hub.usages, saved]).includes('SECRET'), false, 'no token value leaves auth.json');
     await provider.refresh();
     assert.equal(hub.usages.length, 3, 'unchanged snapshots are not re-published');
+    assert.deepEqual(hub.logins, [CODEX_B], 'the home\'s login, reported when auth.json was read');
     const page = await provider.readItems(id, undefined, 40);
     assert.equal(page?.items.length, 6);
   } finally {
     provider.stop();
+  }
+});
+
+test('codex: only the usage of the home\'s current login reaches the watch; the rollouts of other accounts still name their threads\' accounts', async () => {
+  const home = join(root, 'codex-current');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const [mine, theirs] = ['019a0000-0000-7000-8000-0000000000d1', '019a0000-0000-7000-8000-0000000000d2'];
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${mine}.jsonl`), codexRollout(mine, CODEX_B, 55));
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${theirs}.jsonl`), codexRollout(theirs, CODEX_A, 20));
+  const auth = join(home, 'auth.json');
+  writeFileSync(auth, codexAuth(CODEX_B, 'b@example.com'));
+  const provider = new CodexProvider({ home, historyDays: 7 });
+  const hub = new BridgeHub({ providers: [provider], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: quiet });
+  try {
+    await provider.start(hub);
+    const shown = (): unknown[] => hub.usageList().map((u) => [u.account?.id, u.windows.map((w) => w.usedPercent)]);
+    assert.deepEqual(shown(), [[CODEX_B, [55]]]);
+    assert.equal(provider.listSessions().find((s) => s.id === `codex:${theirs}`)?.account?.id, CODEX_A, 'the thread keeps its account');
+    // `codex login` into A: A's numbers show, B's go.
+    writeFileSync(auth, codexAuth(CODEX_A, 'alice@example.com'));
+    await provider.refresh();
+    assert.deepEqual(shown(), [[CODEX_A, [20]]]);
+    rmSync(auth); // `codex logout`
+    await provider.refresh();
+    assert.deepEqual(shown(), []);
+  } finally {
+    provider.stop();
+    hub.close();
   }
 });
 
