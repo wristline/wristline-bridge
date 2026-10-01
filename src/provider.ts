@@ -13,6 +13,13 @@ export interface Hub {
   session(session: Session): void;
   removed(sessionId: string): void;
   usage(usage: Usage): void;
+  /**
+   * The live numbers of the provider's own source (a connected Codex daemon) for one account: they
+   * replace that entry rather than merge into it, and `usage` reports of it are ignored while the
+   * provider holds it. The hold ends with live numbers of another account, or `undefined` (the
+   * source is gone or its login is being re-read).
+   */
+  liveUsage(provider: SessionProvider, usage: Usage | undefined): void;
   /** The account the provider's home is logged into now (undefined: logged out or not known), after each read of its login (the first one also when it fails): usage is sent for current logins only. */
   login(provider: SessionProvider, accountId: string | undefined): void;
   alert(sessionId: string, alert: AlertKind, text?: string, title?: string): void;

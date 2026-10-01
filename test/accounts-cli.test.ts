@@ -75,6 +75,13 @@ test('accounts add registers a home once (absolute), labels its login and refuse
   assert.deepEqual((await readStored(dir)).claudeLogins, { [primary]: timeline }, 'the removed home\'s emails leave config.json');
   await assert.rejects(accountsRemove(dir, { provider: 'claude-code', home: school }), /not registered/);
   await assert.rejects(accountsRemove(dir, { provider: 'claude-code', home: primary }), /primary/);
+
+  // A Codex home's login timeline goes with it too.
+  const codexPrimary = [{ at, id: 'acc-p' }];
+  await updateStored(dir, { codexLogins: { [codex]: [{ at, id: 'acc-c' }], [join(root, 'codex-primary')]: codexPrimary } });
+  await accountsRemove(dir, { provider: 'codex', home: codex });
+  assert.deepEqual((await readStored(dir)).extraCodexHomes, []);
+  assert.deepEqual((await readStored(dir)).codexLogins, { [join(root, 'codex-primary')]: codexPrimary });
 });
 
 test('detectHomes: the env homes first, then ~/.claude* and ~/.codex* directories that hold agent data', async () => {

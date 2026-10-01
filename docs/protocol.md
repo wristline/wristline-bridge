@@ -111,6 +111,15 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   snapshots. The windows a provider reported before it named its account belong to the first
   labelled entry. The bridge sends no event on the passing of a `resetsAt` alone: a watch showing a
   window past its `resetsAt` shows stale numbers until the next report or `snapshot`.
+  Codex numbers come from a home's app-server daemon while it is connected: they are the daemon's
+  account's and replace that entry as they are, without merging (a window of an older report with
+  a later `resetsAt` does not survive), and while the daemon stays connected no rollout of any home
+  changes the entry. Otherwise they come from the newest rollout `token_count` snapshot written
+  under that account: a snapshot counts for the account the home was logged into when it was
+  written, not for the thread's creator (a thread goes on after its home switched accounts). The
+  bridge keeps a timeline of each Codex home's logins (`codexLogins` in `config.json`: account ids
+  and when each was first seen). A snapshot from before the first login the bridge saw in the home,
+  or from while the daemon served another account than `auth.json` named, counts for no account.
   Only accounts logged in now are sent. An entry with an `account` is in `GET /api/usage`, the
   `snapshot` and `usage` events only while that account is the current login of one of its
   provider's homes (Claude Code: `oauthAccount` of the home's `.claude.json`; Codex: the ChatGPT
@@ -123,8 +132,8 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   makes the bridge read it again). Every entry of a provider passes only until the login of one of
   its homes has been read, which at start comes before its first usage. The numbers of other
   accounts (a Claude Code process that started before the home's current login was seen, which
-  counts for the login it started under, see `POST /local/statusline`; Codex rollouts of threads
-  of another account) are kept but not sent. When a home's login changes or it logs out, the
+  counts for the login it started under, see `POST /local/statusline`; Codex snapshots written
+  while a home was logged into another account) are kept but not sent. When a home's login changes or it logs out, the
   bridge sends at once, outside the once-a-minute limit, an event with empty `windows` for each
   entry no longer current, then the kept entry of each account now shown, if it has one; a change
   held back for a removed entry is not sent.

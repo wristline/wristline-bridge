@@ -199,8 +199,9 @@ For threads the daemon has loaded — a `codex` TUI in daemon mode, or other cli
   offers. There is no "answer on PC" and no timeout: Codex waits until someone answers.
 - **Prompts** from the watch start a turn (`turn/start`) and show in the TUI like typed ones.
   Refused with `busy` while a turn runs and `awaiting_input` while an approval is open.
-- **Plan usage** (`primary`/`secondary` windows) comes from the daemon; without it, from the
-  newest rollout.
+- **Plan usage** (`primary`/`secondary` windows) comes from the daemon while it is connected, as
+  it reports it for its account (nothing from rollouts is mixed in); without it, from the newest
+  rollout snapshot written while that account was the home's login (see Accounts).
 
 Limits:
 
@@ -278,7 +279,8 @@ backup kept next to your home is never enrolled unasked. Each Claude Code home h
 `settings.json`, `CLAUDE.md`, memory and plugins; copy what you need, but never `projects/`,
 `sessions/`, `.claude.json` or `.credentials.json`: they hold the first home's transcripts, live
 sessions and login, and a copy would list every session twice. A symlink to a registered home
-counts as the same home. `remove` also forgets the home's login timeline (`claudeLogins`);
+counts as the same home. `remove` also forgets the home's login timeline (`claudeLogins`,
+`codexLogins`);
 `labels` and `codexAccounts` are keyed by account id, shared between homes, and stay.
 
 `hooks install` goes through every registered Claude Code home and gives each its own relay
@@ -287,8 +289,13 @@ so every home's status line reaches the bridge. A `settings.json` copied from an
 recognised: its relay entry is replaced rather than saved as your original status line command
 (set that again with `/statusline` in the new home if you want one).
 
-Sessions and plan usage then carry `account` (id and label). For Codex the attribution is exact
-(rollouts record the creating account, the daemon reports whose limits it sends). For Claude Code
+Sessions and plan usage then carry `account` (id and label). For Codex a thread belongs to the
+account that created it (its rollout records it), and the daemon reports whose limits it sends.
+A thread can go on after the home switched accounts, so a rollout's rate-limit snapshots count for
+the account the home was logged into when each was written: the bridge keeps a timeline of each
+Codex home's logins (`codexLogins` in `config.json`; account ids and when each was first seen).
+Snapshots from before the first login it saw there, or from while the daemon still served another
+account than `auth.json` named, count for no account. For Claude Code
 the bridge keeps a timeline of which account each home was logged into (`claudeLogins` in
 `config.json`; ids and emails only) and attributes a session to the login in effect at its last
 activity; a session whose status line the bridge has seen since its process started is attributed

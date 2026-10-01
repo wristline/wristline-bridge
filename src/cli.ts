@@ -99,10 +99,14 @@ async function run(flags: Flags): Promise<void> {
         rpc: new CodexRpc({ codexHome: home, clientVersion: version, ...(config.bins.codex ? { bin: config.bins.codex } : {}) }),
         accounts: config.codexAccounts,
         labels: config.labels,
+        logins: config.codexLogins[home] ?? [],
         isAsk: (id) => asks.ownsCodexThread(id),
         askCwd: asks.cwd,
         saveAccounts: async (accounts) => {
           await updateStored(dir, (stored) => ({ codexAccounts: { ...stored.codexAccounts, ...accounts } }));
+        },
+        saveLogins: async (logins) => {
+          await updateStored(dir, (stored) => ({ codexLogins: { ...stored.codexLogins, [home]: logins } }));
         },
       }),
   );

@@ -4,11 +4,14 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { CodexLoginEntry } from '../../config.ts';
 import type { Account } from '../../protocol.ts';
 import { isNotFound, isObject, own, parseJson, printable, str } from '../../util.ts';
 import type { CodexRpc } from './rpc.ts';
 
 const AUTH_CLAIM = 'https://api.openai.com/auth';
+/** Logins remembered per home; older ones are forgotten (as Claude Code's). */
+const LOGINS_MAX = 20;
 
 /** The home's ChatGPT login, or undefined when logged out (no `auth.json`) or using an API key. Rejects when `auth.json` cannot be read or is not JSON. */
 export async function readCodexLogin(home: string): Promise<Account | undefined> {
@@ -54,13 +57,19 @@ export interface AccountsOptions {
   saveAccounts?: (accounts: Record<string, string>) => Promise<void>;
   /** Account id → label chosen by the user (`config.labels`). */
   labels?: Record<string, string>;
+  /** Logins observed in this home so far (`config.codexLogins[home]`), oldest first. */
+  logins?: CodexLoginEntry[];
+  /** Called with the whole list whenever a login is added. */
+  saveLogins?: (logins: CodexLoginEntry[]) => Promise<void>;
 }
 
 /** Labels for the account ids rollouts and the daemon name, learned from the home's login and kept in the config. */
 export class CodexAccounts {
   readonly #labels: Record<string, string>;
   readonly #save: ((accounts: Record<string, string>) => Promise<void>) | undefined;
+  readonly #saveLogins: ((logins: CodexLoginEntry[]) => Promise<void>) | undefined;
   #accounts: Record<string, string>;
+  #logins: CodexLoginEntry[];
   /** mtime, ctime and size of `auth.json` as last read; it is re-read only when these change. */
   #authStat: string | undefined;
   #current: string | undefined | null = null;
@@ -71,6 +80,8 @@ export class CodexAccounts {
     this.#labels = options.labels ?? {};
     this.#accounts = options.accounts ?? {};
     this.#save = options.saveAccounts;
+    this.#logins = options.logins ?? [];
+    this.#saveLogins = options.saveLogins;
   }
 
   account(id: string): Account {
@@ -82,6 +93,25 @@ export class CodexAccounts {
     if (own(this.#accounts, id) === email) return;
     this.#accounts = { ...this.#accounts, [id]: email };
     this.#save?.(this.#accounts).catch((err: unknown) => console.error('wristline: codex: saving accounts failed:', err));
+  }
+
+  /**
+   * Records `id` as the home's login from `now` on when it differs from the newest one observed
+   * (`''`: not known for certain from then on).
+   */
+  noteLogin(id: string, now: number): void {
+    if ((this.#logins.at(-1)?.id ?? '') === id) return;
+    this.#logins = [...this.#logins, { at: new Date(now).toISOString(), id }].slice(-LOGINS_MAX);
+    this.#saveLogins?.(this.#logins).catch((err: unknown) => console.error('wristline: codex: saving logins failed:', err));
+  }
+
+  /**
+   * The account the home was logged into at `atMs`: the newest login observed at or before it.
+   * Undefined before the first one observed (an earlier login may have been another account) and
+   * while it was not known for certain.
+   */
+  loginAt(atMs: number): string | undefined {
+    return this.#logins.findLast((entry) => Date.parse(entry.at) <= atMs)?.id || undefined;
   }
 
   /**

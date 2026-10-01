@@ -57,7 +57,7 @@ export class FakeProvider implements SessionProvider {
   }
 }
 
-/** A hub that records what a provider publishes; `logins` holds the account ids of its login reports, `null` for logged out. */
+/** A hub that records what a provider publishes (`usages`: live numbers too); `logins` holds the account ids of its login reports, `null` for logged out. */
 export function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; logins: (string | null)[]; removedIds: string[]; resolved: string[] } {
   const sessions: Session[] = [];
   const usages: Usage[] = [];
@@ -73,6 +73,7 @@ export function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; lo
     session: (s) => sessions.push(s),
     removed: (id) => removedIds.push(id),
     usage: (u) => usages.push(u),
+    liveUsage: (_provider, u) => void (u && usages.push(u)),
     login: (_provider, id) => logins.push(id ?? null),
     alert: () => {},
     pending: new PendingRegistry({ onRequest: () => {}, onResolved: (r, by: ResolvedBy) => resolved.push(`${r.id}:${by}`) }),

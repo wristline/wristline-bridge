@@ -140,6 +140,8 @@ export class BridgeHub implements Hub {
   readonly #usage = new Map<string, Usage>();
   /** Providers that have reported a labelled usage entry; their unlabelled reports are stale from then on (see protocol.md). */
   readonly #labelled = new Set<ProviderId>();
+  /** The entry each provider's live source holds (see `liveUsage`). */
+  readonly #live = new Map<SessionProvider, string>();
   /** The account id each home (provider instance) is logged into now, undefined when logged out; only homes that reported one. */
   readonly #logins = new Map<SessionProvider, string | undefined>();
   readonly #clients = new Set<Client>();
@@ -209,18 +211,34 @@ export class BridgeHub implements Hub {
   }
 
   usage(usage: Usage): void {
+    // A connected daemon's numbers are its account's: a rollout (of any home) neither replaces nor merges into them.
+    if ([...this.#live.values()].includes(usageKey(usage))) return;
+    this.#report(usage, false);
+  }
+
+  liveUsage(provider: SessionProvider, usage: Usage | undefined): void {
+    if (!usage) {
+      this.#live.delete(provider);
+      return;
+    }
+    this.#live.set(provider, usageKey(usage));
+    this.#report(usage, true);
+  }
+
+  /** Stores a report, merged into the entry's windows unless `live` (then they are replaced), and publishes it when its numbers changed. */
+  #report(usage: Usage, live: boolean): void {
     if (!usage.account && this.#labelled.has(usage.provider)) return;
     const key = usageKey(usage);
     const previous = this.#usage.get(key);
     // Another home's older snapshot of this account (a rollout) must not replace its live numbers.
-    if (previous && usage.updatedAt < previous.updatedAt) return;
+    if (!live && previous && usage.updatedAt < previous.updatedAt) return;
     const now = this.#now();
-    let merged = mergeUsage(previous, usage, now);
+    let merged = mergeUsage(live ? undefined : previous, usage, now);
     // Once the provider names an account, its unlabelled entry is stale; a watch drops it with the next snapshot.
-    // The windows it reported before the account was known are this account's: they are folded in, not dropped.
+    // The windows it reported before the account was known are this account's: they are folded in, not dropped (live numbers stand alone).
     if (usage.account) {
       const unlabelledKey = usageKey({ provider: usage.provider });
-      merged = mergeUsage(this.#usage.get(unlabelledKey), merged, now);
+      if (!live) merged = mergeUsage(this.#usage.get(unlabelledKey), merged, now);
       this.#labelled.add(usage.provider);
       this.#usage.delete(unlabelledKey);
       clearTimeout(this.#usageThrottles.get(unlabelledKey)?.timer);

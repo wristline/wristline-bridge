@@ -85,6 +85,7 @@ export async function accountsRemove(dir: string, target: AccountTarget): Promis
   const patch: StoredConfig = { [key]: kept };
   // The home's login timeline (account ids and emails) goes with it; `labels` and `codexAccounts` are keyed by account id and shared.
   if (claude && stored.claudeLogins) patch.claudeLogins = Object.fromEntries(Object.entries(stored.claudeLogins).filter(([h]) => canonical(h) !== canonical(home)));
+  if (!claude && stored.codexLogins) patch.codexLogins = Object.fromEntries(Object.entries(stored.codexLogins).filter(([h]) => canonical(h) !== canonical(home)));
   await updateStored(dir, patch);
   console.log(`Removed ${home}. Restart the bridge to stop watching it.`);
   if (claude) console.log(`Its hooks stay until you run \`wristline-bridge hooks uninstall --settings ${join(home, 'settings.json')}\`.`);

@@ -299,6 +299,34 @@ test('windows reported before the account was known are folded into the first la
   }
 });
 
+test('live usage (a connected daemon) replaces its entry, a stale window with a later reset time too; other reports of it are ignored until the hold ends, then merge again', () => {
+  const [home1, home2] = [new FakeProvider('codex'), new FakeProvider('codex')];
+  const hub = new BridgeHub({ providers: [home1, home2], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: quiet });
+  try {
+    const a = { id: 'acc-a', label: 'A' };
+    const b = { id: 'acc-b', label: 'B' };
+    const report = (updatedAt: string, usedPercent: number, resetsAt: string, account = a): Usage => ({ provider: 'codex', updatedAt, account, windows: [{ id: 'primary', usedPercent, resetsAt }] });
+    const shown = (): unknown[] => hub.usageList().map((u) => [u.account?.id, u.windows.map((w) => [w.id, w.usedPercent, w.resetsAt])]);
+    const ofA = (): unknown => shown().find((e) => Array.isArray(e) && e[0] === 'acc-a');
+    const [OCT5, OCT6] = ['2026-10-05T08:00:00.000Z', '2026-10-06T09:46:19.000Z'];
+    hub.usage({ ...report('2026-09-29T09:00:00.000Z', 4, OCT6), windows: [{ id: 'primary', usedPercent: 4, resetsAt: OCT6 }, { id: 'secondary', usedPercent: 40 }] });
+    hub.liveUsage(home1, report('2026-09-29T09:59:00.000Z', 0, OCT5));
+    assert.deepEqual(shown(), [['acc-a', [['primary', 0, OCT5]]]], 'replaced, not merged: no later reset time or omitted window survives');
+    hub.usage(report('2026-09-29T09:59:30.000Z', 9, OCT6));
+    assert.deepEqual(shown(), [['acc-a', [['primary', 0, OCT5]]]], 'a newer rollout of the held account is ignored');
+    hub.liveUsage(home2, report('2026-09-29T09:59:40.000Z', 1, OCT5));
+    hub.liveUsage(home1, report('2026-09-29T09:59:50.000Z', 2, OCT5, b)); // home1's daemon now serves B: home2 still holds A
+    hub.usage(report('2026-09-29T09:59:55.000Z', 9, OCT6));
+    hub.liveUsage(home2, undefined);
+    hub.usage(report('2026-09-29T09:59:35.000Z', 9, OCT6));
+    assert.deepEqual(ofA(), ['acc-a', [['primary', 1, OCT5]]], 'released: a report older than the live numbers is still stale');
+    hub.usage(report('2026-09-29T10:00:00.000Z', 3, OCT5));
+    assert.deepEqual(ofA(), ['acc-a', [['primary', 3, OCT5]]], 'released: newer reports merge again');
+  } finally {
+    hub.close();
+  }
+});
+
 test('usage from processes that alternate (an idle one repeats the limits of its last API call): the later reset time wins, then the higher number, and nothing churns', async () => {
   let clock = Date.parse('2026-09-29T10:00:00Z');
   const bridge = await startBridge(new FakeProvider(), () => clock);

@@ -144,6 +144,28 @@ test('readCodexLogin: only the account id and email leave auth.json; API-key, mi
   await assert.rejects(readCodexLogin(home), /not valid JSON/);
 });
 
+test('codex login timeline: a login is noted when first seen and saved, a repeat is not; loginAt is the login in effect, none before the first one seen or while unknown', () => {
+  const saved: unknown[] = [];
+  const accounts = new CodexAccounts({ saveLogins: async (logins) => void saved.push(logins) });
+  const t = (hm: string): number => Date.parse(`2026-09-29T${hm}:00.000Z`);
+  accounts.noteLogin('', t('08:00')); // Nothing known yet: an unknown start is no entry.
+  accounts.noteLogin('A', t('09:00'));
+  accounts.noteLogin('A', t('09:10'));
+  accounts.noteLogin('', t('09:20')); // E.g. the daemon still serves A after auth.json switched to B.
+  accounts.noteLogin('B', t('09:30'));
+  assert.deepEqual(saved, [
+    [{ at: '2026-09-29T09:00:00.000Z', id: 'A' }],
+    [{ at: '2026-09-29T09:00:00.000Z', id: 'A' }, { at: '2026-09-29T09:20:00.000Z', id: '' }],
+    [{ at: '2026-09-29T09:00:00.000Z', id: 'A' }, { at: '2026-09-29T09:20:00.000Z', id: '' }, { at: '2026-09-29T09:30:00.000Z', id: 'B' }],
+  ]);
+  assert.deepEqual(['08:59', '09:00', '09:19', '09:25', '09:30', '23:00'].map((hm) => accounts.loginAt(t(hm))), [undefined, 'A', 'A', undefined, 'B', 'B']);
+  // A timeline saved by an earlier run goes on from its newest login.
+  const restarted = new CodexAccounts({ logins: [{ at: '2026-09-29T09:30:00.000Z', id: 'B' }], saveLogins: async (logins) => void saved.push(logins) });
+  restarted.noteLogin('B', t('10:00'));
+  assert.equal(saved.length, 3);
+  assert.equal(restarted.loginAt(t('09:29')), undefined);
+});
+
 test('account labels: an id named like an Object.prototype member gets a string label, never the prototype function', () => {
   const accounts = new CodexAccounts({ labels: { 'acc-a': 'me' }, accounts: { toString: 't@example.com' } });
   assert.deepEqual(accounts.account('acc-a'), { id: 'acc-a', label: 'me' });

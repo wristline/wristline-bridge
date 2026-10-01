@@ -205,7 +205,7 @@ export class CodexProvider implements SessionProvider {
     this.#found = files !== undefined;
     this.#files = files ?? new Map();
     await this.#indexTail.sync();
-    // Rollouts of other accounts still name their threads' accounts; the hub sends only the current login's usage.
+    // Before the scan: a snapshot written from now on counts for the login read here.
     if (await this.#accounts.poll(this.home)) this.#reportLogin();
     const now = this.#now();
 
@@ -223,15 +223,17 @@ export class CodexProvider implements SessionProvider {
     const paths = new Set([...this.#files.values()].flatMap((f) => [f, ...f.previous].map((x) => x.path)));
     for (const path of this.#starts.keys()) if (!paths.has(path)) this.#starts.delete(path);
 
-    // The newest rate-limit snapshot per account (the thread's creator; `''` for rollouts naming none).
+    // The newest rate-limit snapshot per account: the home's login when the snapshot was written, not
+    // the thread's creator (a thread goes on under whatever login the home has later). A snapshot from
+    // before the first login the bridge saw here, or while the login was not certain, counts for nobody.
     const latest = new Map<string, NonNullable<CodexMetaScan['rateLimits']>>();
     this.#version = undefined;
     for (const [id, file] of recent) {
       const meta = await this.#scan(id, file);
       if (meta.subagent) continue;
       this.#version ??= meta.version;
-      const key = meta.accountId ?? '';
-      if (meta.rateLimits && (latest.get(key)?.at ?? '') < meta.rateLimits.at) latest.set(key, meta.rateLimits);
+      const key = meta.rateLimits && this.#accounts.loginAt(Date.parse(meta.rateLimits.at));
+      if (key && meta.rateLimits && (latest.get(key)?.at ?? '') < meta.rateLimits.at) latest.set(key, meta.rateLimits);
     }
     this.#recent = recent;
     this.#publish();
@@ -240,7 +242,7 @@ export class CodexProvider implements SessionProvider {
     const daemonKey = this.#daemonLimits ? (this.#daemonAccount ?? '') : undefined;
     for (const [key, limits] of latest) {
       if (key === daemonKey || limits.at <= (this.#usage.get(key)?.updatedAt ?? '')) continue;
-      const usage = usageOf(limits.snapshot, limits.at, key ? this.#accounts.account(key) : undefined);
+      const usage = usageOf(limits.snapshot, limits.at, this.#accounts.account(key));
       this.#usage.set(key, usage);
       this.#hub?.usage(usage);
     }
@@ -254,7 +256,13 @@ export class CodexProvider implements SessionProvider {
    */
   #reportLogin(): void {
     const file = this.#accounts.current;
-    this.#hub?.login(this, file === null ? (this.#daemonAccount ?? undefined) : file);
+    const login = file === null ? (this.#daemonAccount ?? undefined) : file;
+    this.#hub?.login(this, login);
+    // The timeline rollout snapshots are attributed by. While the daemon serves another account than
+    // `auth.json` names (it has not taken up a new login yet), its turns record that account's numbers:
+    // whose login a snapshot was written under is not known then.
+    const daemon = this.#daemonAccount;
+    if (login !== undefined) this.#accounts.noteLogin(daemon === undefined || daemon === login ? login : '', this.#now());
   }
 
   /** A thread created by a TUI has no rollout until its first turn, so rejoining waits for it. */
@@ -382,6 +390,7 @@ export class CodexProvider implements SessionProvider {
     this.#asks.clear();
     this.#daemonLimits = undefined;
     this.#daemonAccount = undefined;
+    this.#hub?.liveUsage(this, undefined);
     this.#reportLogin();
     this.#publish();
   }
@@ -397,6 +406,7 @@ export class CodexProvider implements SessionProvider {
     const gen = ++this.#syncGen;
     this.#daemonAccount = undefined;
     this.#daemonLimits = undefined;
+    this.#hub?.liveUsage(this, undefined);
     this.#syncing++;
     try {
       const daemon = await this.#accounts.daemon(this.#rpc);
@@ -423,7 +433,8 @@ export class CodexProvider implements SessionProvider {
     // The label is resolved now, not at sync time, so an email learned since (auth.json, account/read) shows.
     const usage = usageOf(this.#daemonLimits, new Date(this.#now()).toISOString(), id ? this.#accounts.account(id) : undefined);
     this.#usage.set(id ?? '', usage);
-    this.#hub?.usage(usage);
+    // Replaces whatever a rollout said of this account (e.g. an older window with a later reset time).
+    this.#hub?.liveUsage(this, usage);
   }
 
   #notification(method: string, params: unknown): void {

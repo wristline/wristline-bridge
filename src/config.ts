@@ -33,6 +33,12 @@ export interface LoginEntry {
   label: string;
 }
 
+/** A login the bridge saw in a Codex home (no email: `codexAccounts` has those); `at` is when the bridge first observed it. An empty `id` marks a time the home's login was not known for certain. */
+export interface CodexLoginEntry {
+  at: string;
+  id: string;
+}
+
 export interface Config {
   apiPort: number;
   hookPort: number;
@@ -46,6 +52,8 @@ export interface Config {
   codexHomes: string[];
   /** Claude home → logins observed there, oldest first. */
   claudeLogins: Record<string, LoginEntry[]>;
+  /** Codex home → logins observed there, oldest first. */
+  codexLogins: Record<string, CodexLoginEntry[]>;
   /** Codex `chatgpt_account_id` → email. */
   codexAccounts: Record<string, string>;
   /** Account id → short label chosen by the user. */
@@ -97,6 +105,7 @@ export function resolveConfig(stored: StoredConfig, flags: Flags = {}, env: Env 
     claudeHomes: homes(claudeHome, stored.extraClaudeHomes),
     codexHomes: homes(codexHome, stored.extraCodexHomes),
     claudeLogins: stored.claudeLogins ?? {},
+    codexLogins: stored.codexLogins ?? {},
     codexAccounts: stored.codexAccounts ?? {},
     labels: stored.labels ?? {},
     bins: stored.bins ?? {},
@@ -115,7 +124,7 @@ export function canonical(path: string): string {
   }
 }
 
-/** The primary first, then the extras that name a different directory, each as a resolved path (`claudeLogins` is keyed by it). */
+/** The primary first, then the extras that name a different directory, each as a resolved path (`claudeLogins` and `codexLogins` are keyed by it). */
 function homes(primary: string, extra: string[] | undefined): string[] {
   const out: string[] = [];
   for (const home of [primary, ...(extra ?? [])]) {
@@ -189,6 +198,7 @@ function pickStored(raw: JsonObject): StoredConfig {
   if (Array.isArray(raw.extraClaudeHomes)) set('extraClaudeHomes', raw.extraClaudeHomes.filter(isString));
   if (Array.isArray(raw.extraCodexHomes)) set('extraCodexHomes', raw.extraCodexHomes.filter(isString));
   if (isObject(raw.claudeLogins)) set('claudeLogins', pickRecord(raw.claudeLogins, (v) => (Array.isArray(v) ? v.filter(isLoginEntry) : undefined)));
+  if (isObject(raw.codexLogins)) set('codexLogins', pickRecord(raw.codexLogins, (v) => (Array.isArray(v) ? v.filter(isCodexLoginEntry) : undefined)));
   if (isObject(raw.codexAccounts)) set('codexAccounts', pickRecord(raw.codexAccounts, str));
   if (isObject(raw.labels)) set('labels', pickRecord(raw.labels, str));
   if (isObject(raw.bins)) {
@@ -228,6 +238,10 @@ function isString(value: unknown): value is string {
 
 function isLoginEntry(value: unknown): value is LoginEntry {
   return isObject(value) && typeof value.at === 'string' && typeof value.id === 'string' && typeof value.label === 'string';
+}
+
+function isCodexLoginEntry(value: unknown): value is CodexLoginEntry {
+  return isObject(value) && typeof value.at === 'string' && typeof value.id === 'string';
 }
 
 /** Keeps the keys whose value `pick` accepts. */
