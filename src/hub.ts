@@ -328,8 +328,16 @@ export class BridgeHub implements Hub {
     return windows.length === 0 ? undefined : windows.length === stored.windows.length ? stored : { ...stored, windows };
   }
 
-  alert(sessionId: string, kind: AlertKind, text?: string, title?: string): void {
-    const alert: Alert = { id: this.#newId(), at: new Date(this.#now()).toISOString(), sessionId, alert: kind, ...(text === undefined ? {} : { text }), ...(title === undefined ? {} : { title }) };
+  alert(sessionId: string, kind: AlertKind, text?: string, title?: string, resetsAt?: string): void {
+    const alert: Alert = {
+      id: this.#newId(),
+      at: new Date(this.#now()).toISOString(),
+      sessionId,
+      alert: kind,
+      ...(text === undefined ? {} : { text }),
+      ...(title === undefined ? {} : { title }),
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    };
     this.#alerts.push(alert);
     if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();
     this.#broadcast({ type: 'alert', ...alert });

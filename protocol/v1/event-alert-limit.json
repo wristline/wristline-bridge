@@ -1,0 +1,10 @@
+{
+  "type": "alert",
+  "id": "a1e47c00-0000-4000-8000-000000000002",
+  "at": "2026-09-29T10:00:00.000Z",
+  "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+  "alert": "limit",
+  "text": "You've hit your session limit · resets 7:40pm (Asia/Seoul)",
+  "title": "Fix failing CI build",
+  "resetsAt": "2026-09-29T10:40:00.000Z"
+}

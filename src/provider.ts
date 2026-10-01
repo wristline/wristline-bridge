@@ -23,7 +23,7 @@ export interface Hub {
   liveUsage(provider: SessionProvider, usage: Usage | undefined): void;
   /** The account the provider's home is logged into now (undefined: logged out or not known), after each read of its login (the first one also when it fails): usage is sent for current logins only. */
   login(provider: SessionProvider, accountId: string | undefined): void;
-  alert(sessionId: string, alert: AlertKind, text?: string, title?: string): void;
+  alert(sessionId: string, alert: AlertKind, text?: string, title?: string, resetsAt?: string): void;
   readonly pending: PendingRegistry;
 }
 
@@ -61,6 +61,44 @@ export function sessionKey(provider: ProviderId, nativeId: string): string {
 export function doneText(answer: string | undefined): string | undefined {
   const text = (answer ?? '').trim();
   return [...text].length < DONE_MIN || NO_RESPONSE.test(text) ? undefined : clip(text, DONE_TEXT_MAX);
+}
+
+/** A usage limit the agent hit, from its transcript: the record's time, the agent's message and, when known, when the limit resets (ISO 8601). */
+export interface LimitHit {
+  at: string;
+  text: string;
+  resetsAt?: string;
+}
+
+/** A repeat of a session's last limit (same reset time, else same text) raises no alert within this time of its alert. */
+const LIMIT_REPEAT_MS = 3600_000;
+
+/**
+ * Raises `alert limit` once per limit hit of a session: only for a record written since `since`
+ * (the provider's start: older hits are history), and not for a repeat of the session's last limit
+ * within LIMIT_REPEAT_MS of its alert (e.g. a prompt retried against it).
+ */
+export class LimitAlerts {
+  readonly #since: number;
+  readonly #last = new Map<string, { at: string; key: string; alertedAt: number }>();
+
+  constructor(since: number) {
+    this.#since = since;
+  }
+
+  check(hub: Hub | undefined, session: Session, hit: LimitHit | undefined): void {
+    const at = hit ? Date.parse(hit.at) : NaN;
+    if (!hit || !(at >= this.#since)) return;
+    const last = this.#last.get(session.id);
+    if (last?.at === hit.at) return;
+    const key = hit.resetsAt ?? hit.text;
+    if (last?.key === key && at - last.alertedAt < LIMIT_REPEAT_MS) {
+      last.at = hit.at;
+      return;
+    }
+    this.#last.set(session.id, { at: hit.at, key, alertedAt: at });
+    hub?.alert(session.id, 'limit', clip(hit.text, DONE_TEXT_MAX), session.title || undefined, hit.resetsAt);
+  }
 }
 
 /** The title of a turn's `done` alert: the prompt that started it when the user typed one, else the session title; undefined when neither has text. */

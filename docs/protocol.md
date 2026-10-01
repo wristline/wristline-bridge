@@ -7,6 +7,7 @@ response and event live in [`protocol/v1/`](../protocol/v1) and ship in the npm 
 ## Compatibility rules
 
 - **Adding a field is compatible.** Clients ignore unknown keys (`Json { ignoreUnknownKeys = true }`).
+- **Unknown `alert` kinds are skipped** (`limit` was added within v1; earlier watches ignore it).
 - **Unknown WebSocket event `type`s are skipped.** Clients decode each message as a JSON object and
   branch on `type` themselves (no class-discriminator polymorphism, which throws on unknown types).
 - **Removing a field or changing its meaning bumps `apiVersion`** and adds `protocol/v2/`. The bridge
@@ -72,7 +73,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   `seq` starts at 1 and orders items within a session; an updated item (e.g. a tool that finished)
   is sent again with the same `seq`. `text` is at most 4000 UTF-16 code units, `detail` (tool
   output) at most 600; longer text is cut with `…`. `pending` marks a tool still running, `error`
-  a failed one. `plan: true` marks an `assistant` item that is a plan the agent proposed in plan
+  a failed one; on an `assistant` item `error` marks an error the agent wrote into the conversation
+  (a failed API call or turn, e.g. a usage limit; see "Limit alerts"), shown wherever assistant
+  items are, and `resetsAt` (ISO 8601), when known, is when that usage limit resets. `plan: true` marks an `assistant` item that is a plan the agent proposed in plan
   mode, shown wherever assistant items are (Claude Code: the plan of an `ExitPlanMode` call, which
   is followed by its `tool` row; Codex: a plan item, which earlier bridges sent as a `notice`).
 - **PendingRequest** — something the agent waits on. `kind` is `permission` or `question`. A
@@ -162,7 +165,7 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   codes with a generic message.
 
 - **Alert** — a session finished or waits for input: `id` (uuid), `at` (ISO 8601), `sessionId`,
-  `alert` (`needs_input` or `done`), `text?`, `title?` (see the `alert` event). Sent as it happens
+  `alert` (`needs_input`, `done` or `limit`), `text?`, `title?`, `resetsAt?` (see the `alert` event). Sent as it happens
   and replayed in the `snapshot` (see "Missed alerts").
 
 All timestamps are ISO 8601 in UTC.
@@ -237,11 +240,11 @@ Server events (JSON text frames):
 | `snapshot` | `apiVersion, sessions, requests, usage, alerts` | right after connecting; `sessions` as in `GET /api/sessions` (live only); `alerts`: the last 10 alerts of the past 10 minutes, oldest first (see "Missed alerts") | `event-snapshot.json` |
 | `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json` |
 | `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
-| `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json` |
+| `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json`, `event-item-limit.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first. Empty `windows`: remove the entry (its last window reset, or its account is no longer logged in; a login change is sent at once) | `event-usage.json`, `event-usage-removed.json` |
-| `alert` | `id, at, sessionId, alert, text?, title?` | `needs_input` (text: short summary) or `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json` |
+| `alert` | `id, at, sessionId, alert, text?, title?, resetsAt?` | `needs_input` (text: short summary), `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) or `limit` (text: up to 500 characters of the agent's limit message; title: the session title; `resetsAt`: when the limit resets, when known; see "Limit alerts"); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json`, `event-alert-limit.json` |
 | `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
 Client events:
@@ -284,8 +287,8 @@ with an unknown value is ignored.
 
 ### Missed alerts
 
-A watch is often offline when a turn finishes. The bridge keeps the last 10 `alert`s (`done` and
-`needs_input`, every device's) in memory for 10 minutes and puts them in every `snapshot` as
+A watch is often offline when a turn finishes. The bridge keeps the last 10 `alert`s (`done`,
+`needs_input` and `limit`, every device's) in memory for 10 minutes and puts them in every `snapshot` as
 `alerts`, oldest first, exactly as they were sent (same `id`, `at`, `text`, `title`). A
 reconnecting watch posts the notifications for the ones it has not shown and remembers their
 `id`s: the same alert arrives once as an event and again in each later `snapshot` within those
@@ -306,6 +309,28 @@ none. Interrupted and failed turns raise nothing. A thread whose status gains `w
 needs_input` without `text` when, one second later, it still waits and no request of its session
 is open (normally the approval itself is on the watch as a request); a sub-agent's counts for its
 parent's session.
+
+### Limit alerts
+
+A usage limit the agent hits is written into its transcript, which the bridge reads for every
+listed session (Quick Asks and sub-agents excluded):
+
+- Claude Code writes a synthetic assistant message: `isApiErrorMessage: true`, `error:
+  "rate_limit"`, `apiErrorStatus: 429`, `message.model: "<synthetic>"`, the text Claude Code shows
+  (e.g. "You've hit your session limit · resets 1:10am (Asia/Seoul)"), and, for a plan limit,
+  `quotaLimits: {status: "rejected", resetsAt: <epoch seconds>, rateLimitType: "five_hour", …}`.
+  Every `isApiErrorMessage` record is an `error` assistant item; only `rate_limit` is a limit.
+- Codex writes `task_complete` with `error: {message, codex_error_info}`; every such turn is an
+  `error` assistant item (keyed by its `turn_id`), and `codex_error_info: "usage_limit_exceeded"`
+  is a limit (e.g. "You've hit your usage limit. … try again at Sep 25th, 2026 1:21 PM." or "Your
+  workspace is out of credits. …"). The error has no reset time; the rate-limit snapshot written
+  just before it gives one: the latest `resets_at` of its windows at 100%, none when no window is
+  full.
+
+`resetsAt` (ISO 8601) goes on the item and on the alert. A limit record written since the bridge
+started raises `alert limit` for its session once: a repeat of the session's last limit (same reset
+time, else the same text) within an hour of its alert, e.g. a prompt retried against it, raises
+none. The session's status is not changed.
 
 ## Local API (not part of the watch protocol)
 

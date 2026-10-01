@@ -293,9 +293,27 @@ test('WebSocket events', async () => {
   const planItem = await ws.next();
   fixture('event-item-plan', planItem);
   assert.deepEqual(await talk.next(), planItem);
+  // A usage limit the agent hit: an error assistant item, with the reset time when known; the subscription without tool rows gets it too.
+  const limit: Item = {
+    seq: 8,
+    kind: 'assistant',
+    ts: '2026-09-29T10:00:09.000Z',
+    text: "You've hit your session limit · resets 7:40pm (Asia/Seoul)",
+    error: true,
+    resetsAt: '2026-09-29T10:40:00.000Z',
+  };
+  provider.emit('6f1c2d3e-0000-4000-8000-000000000001', limit);
+  const limitItem = await ws.next();
+  fixture('event-item-limit', limitItem);
+  assert.deepEqual(await talk.next(), limitItem);
   talk.close();
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(other.pending(), 0, 'items only reach subscribers of that session');
+  // Its alert reaches every client, the one in background mode too.
+  bridge.hub.alert(running.id, 'limit', limit.text, running.title, limit.resetsAt);
+  const limitAlert = await ws.next();
+  fixture('event-alert-limit', limitAlert);
+  assert.deepEqual(await other.next(), limitAlert);
 
   // The watch allows the command: the request resolves and the session goes back to running.
   assert.equal((await post('/api/requests/req-1', { answers: { decision: ['allow'] } })).status, 200);

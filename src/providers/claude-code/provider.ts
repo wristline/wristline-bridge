@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import type { LoginEntry } from '../../config.ts';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
 import type { Account, Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
-import { PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
+import { LimitAlerts, PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isNotFound, isObject, own, str } from '../../util.ts';
 import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, statuslineFingerprint } from './account.ts';
 import { ClaudeMetaScan, claudeModelName, parseClaudeLine, sessionTitle, statuslineContext, statuslineModel, statuslineUsage } from './parse.ts';
@@ -76,6 +76,7 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly home: string;
   readonly #historyDays: number;
   readonly #now: () => number;
+  readonly #limitAlerts: LimitAlerts;
   readonly #tmux: string;
   readonly #exec: Exec;
   readonly #saveLogins: ((logins: LoginEntry[]) => Promise<void>) | undefined;
@@ -117,6 +118,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     this.home = options.home;
     this.#historyDays = options.historyDays;
     this.#now = options.now ?? Date.now;
+    this.#limitAlerts = new LimitAlerts(this.#now());
     this.#tmux = options.tmux ?? 'tmux';
     this.#exec = options.exec ?? defaultExec;
     this.#logins = options.logins ?? [];
@@ -395,7 +397,9 @@ export class ClaudeCodeProvider implements SessionProvider {
           this.#unreadable.add(file.path);
         }
       }
-      next.set(id, this.#build(id, live.get(id), newest.get(id), file, meta));
+      const session = this.#build(id, live.get(id), newest.get(id), file, meta);
+      next.set(id, session);
+      this.#limitAlerts.check(this.#hub, session, meta?.limit);
     }
 
     const previous = this.#sessions;

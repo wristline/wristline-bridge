@@ -3,7 +3,8 @@
 // uses camelCase; everything is normalized to the app-server shapes in rpc.ts first, so the same
 // code will serve `item/completed` notifications. Verified against codex-cli 0.159.0.
 
-import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
+import type { ItemDraft, ItemSink, LineHandler, LineParser } from '../../jsonl.ts';
+import type { LimitHit } from '../../provider.ts';
 import { DETAIL_MAX, TEXT_MAX, type Account, type Usage, type UsageWindow } from '../../protocol.ts';
 import { clip, clipTail, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 import type {
@@ -165,7 +166,54 @@ export function applyItemCompleted(n: ItemCompletedNotification, fallbackTs: str
   if (draft) sink.add(n.item.id, draft);
 }
 
-/** Applies one rollout line to the session's items. */
+/**
+ * A turn's error (`task_complete.error`: `{message, codex_error_info}`). `codex_error_info` is e.g.
+ * `usage_limit_exceeded` ("You've hit your usage limit. … try again at Sep 25th, 2026 1:21 PM.",
+ * "Your workspace is out of credits. …"), `server_overloaded`, `unauthorized`. A usage limit
+ * carries no reset time of its own; `limits` (the rollout's last rate-limit snapshot, written just
+ * before) gives it: the latest reset of the windows at 100%, none when no window is full (e.g.
+ * workspace credits ran out).
+ */
+export function turnError(error: unknown, limits: RateLimitSnapshot | undefined): { text: string; limit: boolean; resetsAt?: string } | undefined {
+  if (!isObject(error)) return undefined;
+  const text = str(error.message)?.trim();
+  if (!text) return undefined;
+  if (error.codex_error_info !== 'usage_limit_exceeded') return { text, limit: false };
+  const full = [limits?.primary, limits?.secondary].flatMap((w) => (w && w.usedPercent >= 100 && w.resetsAt !== null ? [w.resetsAt] : []));
+  const resetsAt = full.length > 0 ? toIso(Math.max(...full)) : undefined;
+  return { text, limit: true, ...(resetsAt && { resetsAt }) };
+}
+
+/**
+ * A parser for one rollout's lines: items from `item_completed`, and an error `assistant` item for
+ * a turn that failed (`task_complete` with `error`, keyed `<turn_id>:error`). It keeps the last
+ * rate-limit snapshot for a usage limit's reset time (see turnError).
+ */
+export function codexLineParser(): LineParser {
+  let limits: RateLimitSnapshot | undefined;
+  return (line, sink) => {
+    if (line.includes('"type":"token_count"')) {
+      const payload = parseJson(line)?.payload;
+      if (isObject(payload) && payload.type === 'token_count') limits = normalizeRateLimits(payload.rate_limits) ?? limits;
+      return;
+    }
+    if (line.includes('"type":"task_complete"')) {
+      const rec = parseJson(line);
+      const payload = rec?.payload;
+      if (!isObject(payload) || payload.type !== 'task_complete') return;
+      const error = turnError(payload.error, limits);
+      const ts = str(rec?.timestamp);
+      if (!error || !ts) return;
+      const draft: ItemDraft = { kind: 'assistant', ts, text: clip(error.text, TEXT_MAX), error: true };
+      if (error.resetsAt) draft.resetsAt = error.resetsAt;
+      sink.add(`${str(payload.turn_id) ?? ts}:error`, draft);
+      return;
+    }
+    parseCodexLine(line, sink);
+  };
+}
+
+/** Applies one rollout line's `item_completed` to the session's items. */
 export function parseCodexLine(line: string, sink: ItemSink): void {
   if (!line.includes('"item_completed"')) return;
   const rec = parseJson(line);
@@ -255,6 +303,8 @@ export class CodexMetaScan implements LineHandler {
   /** Model and reasoning effort of the last turn (`turn_context`); effort is null there when unset. */
   model: string | undefined;
   effort: string | undefined;
+  /** The last usage limit a turn of the thread hit (`task_complete.error`, see turnError). */
+  limit: LimitHit | undefined;
 
   line(line: string): void {
     if (line.includes('"type":"token_count"')) {
@@ -267,10 +317,14 @@ export class CodexMetaScan implements LineHandler {
       const at = str(rec?.timestamp);
       if (snapshot && at) this.rateLimits = { at, snapshot };
     } else if (/"type":"(task_started|task_complete|turn_aborted)"/.test(line)) {
-      const payload = parseJson(line)?.payload;
+      const rec = parseJson(line);
+      const payload = rec?.payload;
       const type = isObject(payload) ? payload.type : undefined;
       if (type === 'task_started') this.turnOpen = true;
       else if (type === 'task_complete' || type === 'turn_aborted') this.turnOpen = false;
+      const error = type === 'task_complete' && isObject(payload) ? turnError(payload.error, this.rateLimits?.snapshot) : undefined;
+      const at = str(rec?.timestamp);
+      if (error?.limit && at) this.limit = { at, text: error.text, ...(error.resetsAt && { resetsAt: error.resetsAt }) };
     } else if (line.includes('"type":"turn_context"')) {
       const rec = parseJson(line);
       if (rec?.type !== 'turn_context' || !isObject(rec.payload)) return;
@@ -298,7 +352,7 @@ export class CodexMetaScan implements LineHandler {
   reset(): void {
     this.id = this.cwd = this.version = this.accountId = this.firstPrompt = undefined;
     this.subagent = this.turnOpen = false;
-    this.context = this.rateLimits = undefined;
+    this.context = this.rateLimits = this.limit = undefined;
     this.model = this.effort = undefined;
   }
 }

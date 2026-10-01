@@ -58,18 +58,27 @@ export class FakeProvider implements SessionProvider {
 }
 
 /** A hub that records what a provider publishes (`usages`: live numbers too); `logins` holds the account ids of its login reports, `null` for logged out. */
-export function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; logins: (string | null)[]; removedIds: string[]; resolved: string[] } {
+export function recordingHub(): Hub & {
+  sessions: Session[];
+  usages: Usage[];
+  logins: (string | null)[];
+  removedIds: string[];
+  resolved: string[];
+  alerts: { sessionId: string; alert: string; text?: string; title?: string; resetsAt?: string }[];
+} {
   const sessions: Session[] = [];
   const usages: Usage[] = [];
   const logins: (string | null)[] = [];
   const removedIds: string[] = [];
   const resolved: string[] = [];
+  const alerts: { sessionId: string; alert: string; text?: string; title?: string; resetsAt?: string }[] = [];
   return {
     sessions,
     usages,
     logins,
     removedIds,
     resolved,
+    alerts,
     session: (s) => sessions.push(s),
     removed: (id) => removedIds.push(id),
     usage: (u) => {
@@ -78,7 +87,7 @@ export function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; lo
     },
     liveUsage: (_provider, u) => void (u && usages.push(u)),
     login: (_provider, id) => logins.push(id ?? null),
-    alert: () => {},
+    alert: (sessionId, alert, text, title, resetsAt) => void alerts.push({ sessionId, alert, ...(text !== undefined && { text }), ...(title !== undefined && { title }), ...(resetsAt !== undefined && { resetsAt }) }),
     pending: new PendingRegistry({ onRequest: () => {}, onResolved: (r, by: ResolvedBy) => resolved.push(`${r.id}:${by}`) }),
   };
 }

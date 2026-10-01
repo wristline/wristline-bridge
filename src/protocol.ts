@@ -59,6 +59,8 @@ export interface Item {
   error?: boolean;
   /** On an `assistant` item: a plan the agent proposed in plan mode (Claude Code: ExitPlanMode's plan; Codex: a plan item). */
   plan?: boolean;
+  /** On an `error` assistant item that is a usage limit the agent hit: when the limit resets (ISO 8601), when known. */
+  resetsAt?: string;
 }
 
 export interface Option {
@@ -112,9 +114,9 @@ export interface Usage {
 }
 
 export type ResolvedBy = 'watch' | 'terminal' | 'timeout';
-export type AlertKind = 'needs_input' | 'done';
+export type AlertKind = 'needs_input' | 'done' | 'limit';
 
-/** A session finished or waits for input. Sent as an `alert` event and replayed in the `snapshot` (the last 10 of the past 10 minutes) for a watch that was offline. */
+/** A session finished, waits for input, or hit a usage limit. Sent as an `alert` event and replayed in the `snapshot` (the last 10 of the past 10 minutes) for a watch that was offline. */
 export interface Alert {
   /** uuid; a watch shows each id once (an event, then the snapshots that replay it). */
   id: string;
@@ -122,10 +124,12 @@ export interface Alert {
   at: string;
   sessionId: string;
   alert: AlertKind;
-  /** `needs_input`: a short summary; `done`: up to 500 characters of the answer. */
+  /** `needs_input`: a short summary; `done`: up to 500 characters of the answer; `limit`: up to 500 characters of the agent's limit message. */
   text?: string;
-  /** `done`: the prompt that started the turn, else the session title. */
+  /** `done`: the prompt that started the turn, else the session title; `limit`: the session title. */
   title?: string;
+  /** `limit`: when the limit resets (ISO 8601), when known. */
+  resetsAt?: string;
 }
 
 export type AskStatus = 'running' | 'done' | 'error';

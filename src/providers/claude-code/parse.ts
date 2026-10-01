@@ -1,7 +1,8 @@
 // Pure parsing of Claude Code transcripts (~/.claude/projects/<slug>/<sessionId>.jsonl) and
-// statusLine input. Verified against Claude Code 2.1.284 (ExitPlanMode: 2.1.286).
+// statusLine input. Verified against Claude Code 2.1.284 (ExitPlanMode, API error records: 2.1.286).
 
 import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
+import type { LimitHit } from '../../provider.ts';
 import { DETAIL_MAX, TEXT_MAX, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
 import { clip, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 
@@ -75,7 +76,19 @@ export function parseClaudeLine(line: string, sink: ItemSink): void {
   if (!ts || !isObject(message)) return;
   const uuid = str(rec.uuid) ?? ts;
   if (rec.type === 'user') applyUser(uuid, message, ts, sink);
-  else if (rec.type === 'assistant') applyAssistant(uuid, message, ts, sink);
+  else if (rec.type === 'assistant') applyAssistant(uuid, message, ts, sink, apiError(rec));
+}
+
+/**
+ * A synthetic assistant message Claude Code writes for a failed API call (`isApiErrorMessage`,
+ * model `<synthetic>`): an error, and for a usage limit (`error: "rate_limit"`, 429) the reset time
+ * of `quotaLimits.resetsAt` (epoch seconds) when the record has one. E.g. "You've hit your session
+ * limit · resets 1:10am (Asia/Seoul)" with `quotaLimits: {status: "rejected", resetsAt, rateLimitType: "five_hour"}`.
+ */
+function apiError(rec: JsonObject): Pick<ItemDraft, 'error' | 'resetsAt'> | undefined {
+  if (rec.isApiErrorMessage !== true) return undefined;
+  const resetsAt = rec.error === 'rate_limit' && isObject(rec.quotaLimits) ? toIso(rec.quotaLimits.resetsAt) : undefined;
+  return { error: true, ...(resetsAt && { resetsAt }) };
 }
 
 function applyUser(uuid: string, message: JsonObject, ts: string, sink: ItemSink): void {
@@ -113,14 +126,14 @@ function resultPatch(block: JsonObject): Partial<ItemDraft> {
   return patch;
 }
 
-function applyAssistant(uuid: string, message: JsonObject, ts: string, sink: ItemSink): void {
+function applyAssistant(uuid: string, message: JsonObject, ts: string, sink: ItemSink, error?: Pick<ItemDraft, 'error' | 'resetsAt'>): void {
   const { content } = message;
   if (!Array.isArray(content)) return;
   content.forEach((block: unknown, index) => {
     if (!isObject(block)) return;
     if (block.type === 'text') {
       const text = str(block.text)?.trim();
-      if (text) sink.add(`${uuid}:${index}`, { kind: 'assistant', ts, text: clip(text, TEXT_MAX) });
+      if (text) sink.add(`${uuid}:${index}`, { kind: 'assistant', ts, text: clip(text, TEXT_MAX), ...error });
     } else if (block.type === 'tool_use') {
       const id = str(block.id);
       const name = str(block.name) ?? 'tool';
@@ -168,6 +181,8 @@ export class ClaudeMetaScan implements LineHandler {
   /** Model id (`message.model`) and `effort` of the last assistant turn. */
   model: string | undefined;
   effort: string | undefined;
+  /** The last usage limit the session hit (an API error record with `error: "rate_limit"`). */
+  limit: LimitHit | undefined;
 
   line(line: string): void {
     if (line.includes('"custom-title"')) {
@@ -185,6 +200,12 @@ export class ClaudeMetaScan implements LineHandler {
       if (model && model !== '<synthetic>') {
         this.model = model;
         this.effort = str(rec.effort);
+      }
+      const at = str(rec.timestamp);
+      const text = textOf(rec.message.content).trim();
+      if (rec.isApiErrorMessage === true && rec.error === 'rate_limit' && at && text) {
+        const resetsAt = apiError(rec)?.resetsAt;
+        this.limit = { at, text, ...(resetsAt && { resetsAt }) };
       }
     } else if (line.includes('"subtype":"compact_boundary"')) {
       // /compact writes no assistant usage; the boundary carries the size the context shrank to.
@@ -206,6 +227,7 @@ export class ClaudeMetaScan implements LineHandler {
     this.customTitle = this.aiTitle = this.firstPrompt = this.cwd = undefined;
     this.contextUsed = this.compactedAt = undefined;
     this.model = this.effort = undefined;
+    this.limit = undefined;
   }
 }
 

@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { JsonlTail, Transcript, TranscriptCache, type JsonlHead } from '../../jsonl.ts';
 import type { Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
-import { PromptBlocked, doneText, doneTitle, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
+import { LimitAlerts, PromptBlocked, doneText, doneTitle, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
 import { isObject, str } from '../../util.ts';
 import { CodexAccounts, type AccountsOptions } from './account.ts';
 import { codexAsk } from './ask.ts';
@@ -11,12 +11,12 @@ import {
   CodexMetaScan,
   SessionIndex,
   applyItemCompleted,
+  codexLineParser,
   itemDraft,
   mergeRateLimits,
   normalizeItem,
   normalizeItemCompleted,
   normalizeRateLimits,
-  parseCodexLine,
   usageOf,
 } from './parse.ts';
 import type { CodexRpc, ItemCompletedNotification, RateLimitSnapshot, RequestId, ServerRequest, ThreadStatus } from './rpc.ts';
@@ -77,6 +77,7 @@ export class CodexProvider implements SessionProvider {
   readonly home: string;
   readonly #historyDays: number;
   readonly #now: () => number;
+  readonly #limitAlerts: LimitAlerts;
   readonly #accounts: CodexAccounts;
   readonly #isAsk: (nativeId: string) => boolean;
   readonly #askCwd: string | undefined;
@@ -117,6 +118,7 @@ export class CodexProvider implements SessionProvider {
     this.home = options.home;
     this.#historyDays = options.historyDays;
     this.#now = options.now ?? Date.now;
+    this.#limitAlerts = new LimitAlerts(this.#now());
     this.#indexTail = new JsonlTail(join(this.home, 'session_index.jsonl'), this.#index);
     this.#rpc = options.rpc;
     this.#accounts = new CodexAccounts(options);
@@ -298,7 +300,9 @@ export class CodexProvider implements SessionProvider {
       const meta = this.#metas.get(id)?.scan;
       // An ask's rollout exists before the bridge has read its id from the CLI: its cwd tells it apart meanwhile.
       if (!meta || meta.subagent || (meta.cwd !== undefined && meta.cwd === this.#askCwd)) continue;
-      next.set(id, this.#build(id, file, meta, now));
+      const session = this.#build(id, file, meta, now);
+      next.set(id, session);
+      this.#limitAlerts.check(this.#hub, session, meta.limit);
     }
     const previous = this.#sessions;
     this.#sessions = next;
@@ -628,6 +632,6 @@ export class CodexProvider implements SessionProvider {
 
   #transcript(nativeId: string): Transcript | undefined {
     const meta = this.#sessions.has(nativeId) ? this.#metas.get(nativeId) : undefined;
-    return meta && this.#transcripts.get(nativeId, () => new Transcript(meta.path, parseCodexLine, meta.head));
+    return meta && this.#transcripts.get(nativeId, () => new Transcript(meta.path, codexLineParser(), meta.head));
   }
 }
