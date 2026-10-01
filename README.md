@@ -294,8 +294,10 @@ so every home's status line reaches the bridge. A `settings.json` copied from an
 recognised: its relay entry is replaced rather than saved as your original status line command
 (set that again with `/statusline` in the new home if you want one).
 
-Sessions and plan usage then carry `account` (id and label). For Codex a thread belongs to the
-account that created it (its rollout records it), and the daemon reports whose limits it sends.
+Sessions and plan usage then carry `account` (id and label). For Codex a live thread shows the
+login running it: the daemon's for a thread it has loaded, the home's (`auth.json`) for another;
+an ended thread shows the account that created it (its rollout records it). The daemon reports
+whose limits it sends.
 A thread can go on after the home switched accounts, and a running `codex` keeps the login it
 started with, so a rollout's rate-limit snapshot counts for the account the home was logged into
 when it was written, and only in a thread of that account: the bridge keeps a timeline of each

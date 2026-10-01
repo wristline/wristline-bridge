@@ -364,7 +364,12 @@ export class CodexProvider implements SessionProvider {
     };
     if (promptBlock) session.promptBlock = promptBlock;
     if (meta.context) session.context = meta.context;
-    if (meta.accountId) session.account = this.#accounts.account(meta.accountId);
+    // A thread runs under whichever login runs it now, not the one that created it: the daemon's for
+    // a thread it has loaded (null: an API key), the home's for another live one. An ended thread,
+    // or a live one while no login is known, keeps its creator's.
+    const running = loaded && this.#daemonAccount !== undefined ? this.#daemonAccount : status === 'ended' ? undefined : this.#login();
+    const accountId = running === null ? undefined : (running ?? meta.accountId);
+    if (accountId) session.account = this.#accounts.account(accountId);
     // The daemon's configured model is newer than the rollout's last turn (e.g. changed for the next one).
     const settings = loaded?.model ? loaded : meta;
     if (settings.model) session.model = settings.model;

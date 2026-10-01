@@ -122,6 +122,9 @@ test('codex: rollouts with index titles, sub-agents hidden, threads labelled by 
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${legacy}.jsonl`), codexRollout(legacy, undefined, 7, '2026-09-29T08:59:00.000Z'));
   writeFileSync(join(home, 'auth.json'), codexAuth(CODEX_B, 'b@example.com'));
   writeFileSync(join(home, 'session_index.jsonl'), `${JSON.stringify({ id, thread_name: 'Fix API tests', updated_at: '2026-09-29T09:00:00Z' })}\n`);
+  // Ended threads: labelled by the account that created them.
+  const hourAgo = new Date(Date.now() - 3600_000);
+  for (const tid of [id, other, legacy]) utimesSync(join(day, `rollout-2026-09-29T09-${tid === id ? '00' : '10'}-00-${tid}.jsonl`), hourAgo, hourAgo);
 
   const saved: Record<string, string>[] = [];
   const savedLogins: unknown[] = [];
@@ -146,9 +149,9 @@ test('codex: rollouts with index titles, sub-agents hidden, threads labelled by 
         provider: 'codex',
         title: 'Fix API tests',
         cwd: '/work/api',
-        status: 'idle',
+        status: 'ended',
         lastActivity: undefined,
-        promptBlock: 'unsupported',
+        promptBlock: 'not_live',
         context: { used: 40500, window: 258400 },
         account: { id: CODEX_A, label: 'me' },
         model: 'gpt-6-astra',
@@ -186,6 +189,8 @@ test('codex: only the usage of the home\'s current login reaches the watch; the 
   const [mine, theirs] = ['019a0000-0000-7000-8000-0000000000d1', '019a0000-0000-7000-8000-0000000000d2'];
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${mine}.jsonl`), codexRollout(mine, CODEX_B, 55));
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${theirs}.jsonl`), codexRollout(theirs, CODEX_A, 20, '2026-09-29T09:04:00.000Z'));
+  const hourAgo = new Date(Date.now() - 3600_000);
+  utimesSync(join(day, `rollout-2026-09-29T09-10-00-${theirs}.jsonl`), hourAgo, hourAgo); // Ended.
   const auth = join(home, 'auth.json');
   writeFileSync(auth, codexAuth(CODEX_B, 'b@example.com'));
   const provider = new CodexProvider({ home, historyDays: 7, logins: CODEX_LOGINS });
@@ -233,6 +238,8 @@ test('codex: a snapshot counts for the login in effect when it was written, in a
   const [switched, mine, before, early] = ['019a0000-0000-7000-8000-0000000000f1', '019a0000-0000-7000-8000-0000000000f4', '019a0000-0000-7000-8000-0000000000f2', '019a0000-0000-7000-8000-0000000000f3'];
   // A's thread, resumed under B (B's numbers) or run on by a process still logged in as A (A's): whose is not certain.
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${switched}.jsonl`), codexRollout(switched, CODEX_A, 55, '2026-09-29T09:45:00.000Z'));
+  const lastWrite = new Date('2026-09-29T09:45:00.000Z');
+  utimesSync(join(day, `rollout-2026-09-29T09-10-00-${switched}.jsonl`), lastWrite, lastWrite); // Ended by 10:00.
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${mine}.jsonl`), codexRollout(mine, CODEX_B, 33, '2026-09-29T09:40:00.000Z'));
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${before}.jsonl`), codexRollout(before, CODEX_A, 20, '2026-09-29T09:20:00.000Z'));
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${early}.jsonl`), codexRollout(early, CODEX_A, 90, '2026-09-29T08:30:00.000Z'));
@@ -246,7 +253,28 @@ test('codex: a snapshot counts for the login in effect when it was written, in a
     [CODEX_A, [20]],
     [CODEX_B, [33]],
   ]);
-  assert.equal(restarted.listSessions().find((s) => s.id === `codex:${switched}`)?.account?.id, CODEX_A, 'the thread keeps its creator');
+  assert.equal(restarted.listSessions().find((s) => s.id === `codex:${switched}`)?.account?.id, CODEX_A, 'the ended thread keeps its creator');
+});
+
+test('codex: a live thread shows the home\'s login, not the account that created it; once it ends, its creator again', async () => {
+  const home = join(root, 'codex-live');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const thread = '019a0000-0000-7000-8000-0000000000e9';
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${thread}.jsonl`), codexRollout(thread, CODEX_A, 20)); // Created while the home was logged in as A, resumed now.
+  writeFileSync(join(home, 'auth.json'), codexAuth(CODEX_B, 'b@example.com'));
+  let now = Date.now();
+  const provider = new CodexProvider({ home, historyDays: 3650, now: () => now, labels: { [CODEX_A]: 'Pro', [CODEX_B]: 'Work' }, logins: CODEX_LOGINS });
+  await provider.start(recordingHub());
+  try {
+    const shown = (): unknown => provider.listSessions().map((s) => [s.status, s.account]);
+    assert.deepEqual(shown(), [['idle', { id: CODEX_B, label: 'Work' }]]);
+    now += 3600_000;
+    await provider.refresh();
+    assert.deepEqual(shown(), [['ended', { id: CODEX_A, label: 'Pro' }]]);
+  } finally {
+    provider.stop();
+  }
 });
 
 test('codex: a login that changed while the bridge was not running counts for nobody from when the old one was last seen until the bridge saw the new one', async () => {

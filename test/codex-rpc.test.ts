@@ -498,6 +498,24 @@ test('codex provider: without auth.json (credentials kept in the OS keyring) the
   await showing([]);
 });
 
+test('codex provider: a thread the daemon has loaded shows the daemon\'s login, another live one the home\'s, not the account that created either', async (t) => {
+  const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
+  const [loaded, other] = ['019a0000-0000-7000-8000-0000000000a1', '019a0000-0000-7000-8000-0000000000a2'];
+  const { rpc, home } = fakeRpc('running-account', { loaded: [loaded], threads: { [loaded]: { status: { type: 'idle' } } }, account: { type: 'chatgpt', email: 'b@example.com', planType: 'pro' }, accountId: B, rateLimits: null });
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${loaded}.jsonl`), limitsRollout(loaded, A, '2026-09-29T09:01:00.000Z', 5, 1790683200)); // Created under A.
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${other}.jsonl`), limitsRollout(other, B, '2026-09-29T09:01:00.000Z', 5, 1790683200)); // Created under B.
+  writeFileSync(join(home, 'auth.json'), authJson(A, 'a@example.com')); // `codex login` as A since; the daemon still serves B.
+  captureLog(t);
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, labels: { [A]: 'Work', [B]: 'Pro' } });
+  t.after(() => provider.stop());
+  await provider.start(recordingHub());
+  const account = (id: string): string | undefined => provider.listSessions().find((s) => s.id === `codex:${id}`)?.account?.label;
+  await waitFor(() => account(loaded) === 'Pro');
+  assert.equal(account(other), 'Work');
+});
+
 /** An `auth.json` naming a ChatGPT login (an unsigned id_token; no token value is ever read out). */
 function authJson(accountId: string, email: string): string {
   const segment = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
