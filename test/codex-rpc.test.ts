@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { BridgeHub } from '../src/hub.ts';
 import { PendingRegistry } from '../src/pending.ts';
 import type { Item, PendingRequest, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub } from '../src/provider.ts';
@@ -461,6 +462,35 @@ test('codex provider: daemon usage carries the login\'s account; an update durin
     [B, 'school', [['primary', 50], ['secondary', 40]]],
   ]);
   assert.deepEqual(saved.at(-1), { [A]: 'a@example.com', [B]: 'b@example.com' });
+});
+
+test('codex provider: without auth.json (credentials kept in the OS keyring) the daemon\'s account is the home\'s login; no account is shown while no daemon says', async (t) => {
+  const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
+  const limits = (usedPercent: number): unknown => ({ limitId: 'codex', primary: { usedPercent, windowDurationMins: 10080, resetsAt: null }, secondary: null });
+  const { rpc, home, daemon } = fakeRpc('keyring', { account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' }, accountId: A, rateLimits: limits(2) });
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const thread = '019a0000-0000-7000-8000-00000000000d';
+  copyFileSync(new URL('./fixtures/codex/rollout.jsonl', import.meta.url), join(day, `rollout-2026-09-29T09-00-00-${thread}.jsonl`)); // A thread of A.
+  captureLog(t);
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc });
+  const hub = new BridgeHub({ providers: [provider], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: () => {} });
+  t.after(() => {
+    provider.stop();
+    hub.close();
+  });
+  const shown = (): unknown[] => hub.usageList().map((u) => [u.account?.id, u.windows.map((w) => [w.id, w.usedPercent])]);
+  const showing = (expected: unknown[]): Promise<true> => waitFor(() => JSON.stringify(shown()) === JSON.stringify(expected) || undefined);
+  await provider.start(hub);
+  // The rollout's numbers (A's) wait for the daemon to say whose login this is; the daemon's own then merge in.
+  await showing([[A, [['primary', 2], ['secondary', 40]]]]);
+  await rpc.request('fake/state', { account: { type: 'chatgpt', email: 'b@example.com', planType: 'plus' }, accountId: B, rateLimits: limits(50) });
+  await rpc.request('fake/notify', { method: 'account/updated', params: { authMode: 'chatgpt' } });
+  await showing([[B, [['primary', 50]]]]);
+  // The daemon goes away: nothing vouches for B any more.
+  daemon(undefined);
+  await assert.rejects(rpc.request('fake/exit'), /closed/);
+  await showing([]);
 });
 
 test('codex provider: a failed rate-limit read is retried on the next update, the usage label follows a later-learned email, and only the newest login read applies', async (t) => {

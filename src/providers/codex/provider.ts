@@ -206,7 +206,7 @@ export class CodexProvider implements SessionProvider {
     this.#files = files ?? new Map();
     await this.#indexTail.sync();
     // Rollouts of other accounts still name their threads' accounts; the hub sends only the current login's usage.
-    if (await this.#accounts.poll(this.home)) this.#hub?.login(this, this.#accounts.current);
+    if (await this.#accounts.poll(this.home)) this.#reportLogin();
     const now = this.#now();
 
     const cutoff = now - this.#historyDays * DAY_MS;
@@ -245,6 +245,16 @@ export class CodexProvider implements SessionProvider {
       this.#hub?.usage(usage);
     }
     this.#rejoin();
+  }
+
+  /**
+   * The home's login for the hub: the one `auth.json` names; without the file (logged out, or the
+   * credentials are kept in the OS keyring), the daemon's while it is connected and has said whose
+   * limits it sends.
+   */
+  #reportLogin(): void {
+    const file = this.#accounts.current;
+    this.#hub?.login(this, file === null ? (this.#daemonAccount ?? undefined) : file);
   }
 
   /** A thread created by a TUI has no rollout until its first turn, so rejoining waits for it. */
@@ -372,6 +382,7 @@ export class CodexProvider implements SessionProvider {
     this.#asks.clear();
     this.#daemonLimits = undefined;
     this.#daemonAccount = undefined;
+    this.#reportLogin();
     this.#publish();
   }
 
@@ -391,6 +402,7 @@ export class CodexProvider implements SessionProvider {
       const daemon = await this.#accounts.daemon(this.#rpc);
       if (gen !== this.#syncGen || !daemon) return; // Superseded, or failed: the next update triggers another read.
       this.#daemonAccount = daemon.accountId;
+      this.#reportLogin();
       this.#limits(daemon.rateLimits);
     } finally {
       this.#syncing--;

@@ -523,6 +523,13 @@ test('usage goes out only for the accounts logged in now: the others stay out of
     assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...c, windows: [] } });
     hub.login(homeA, 'acc-a');
     assert.deepEqual(await ws.next(), { type: 'usage', usage: report('claude-code', 'acc-a', 12) });
+    // Removals go first, whatever order the entries were stored in: acc-c (stored before acc-b) comes back after acc-b goes.
+    hub.login(homeB, 'acc-c');
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...b, windows: [] } });
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: c });
+    hub.login(homeB, 'acc-b');
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...c, windows: [] } });
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: b });
 
     // An entry whose last window has reset is removed the same way once a report shows it.
     clock = Date.parse('2026-09-29T12:00:01Z');

@@ -10,17 +10,29 @@ import type { CodexRpc } from './rpc.ts';
 
 const AUTH_CLAIM = 'https://api.openai.com/auth';
 
-/** The home's ChatGPT login, or undefined when logged out, using an API key, or unreadable. */
+/** The home's ChatGPT login, or undefined when logged out (no `auth.json`) or using an API key. Rejects when `auth.json` cannot be read or is not JSON. */
 export async function readCodexLogin(home: string): Promise<Account | undefined> {
+  return (await readAuth(home)) ?? undefined;
+}
+
+/**
+ * What `auth.json` says: the ChatGPT login, undefined for an API key or a login without an account
+ * id, null when there is no file (logged out, or the credentials are kept in the OS keyring).
+ * Rejects when the file cannot be read or is not JSON: Codex rewrites it in place when it
+ * refreshes tokens, so a read can catch it half-written.
+ */
+async function readAuth(home: string): Promise<Account | undefined | null> {
+  const path = join(home, 'auth.json');
   let text: string;
   try {
-    text = await readFile(join(home, 'auth.json'), 'utf8');
+    text = await readFile(path, 'utf8');
   } catch (err) {
-    if (isNotFound(err)) return undefined;
+    if (isNotFound(err)) return null;
     throw err;
   }
   const auth = parseJson(text);
-  if (!auth || auth.auth_mode === 'apikey') return undefined;
+  if (!auth) throw new Error(`${path} is not valid JSON`);
+  if (auth.auth_mode === 'apikey') return undefined;
   const idToken = isObject(auth.tokens) ? str(auth.tokens.id_token) : undefined;
   return idToken ? jwtClaims(idToken) : undefined;
 }
@@ -49,9 +61,11 @@ export class CodexAccounts {
   readonly #labels: Record<string, string>;
   readonly #save: ((accounts: Record<string, string>) => Promise<void>) | undefined;
   #accounts: Record<string, string>;
-  /** mtime and size of `auth.json` as last read; it is re-read only when these change. */
+  /** mtime, ctime and size of `auth.json` as last read; it is re-read only when these change. */
   #authStat: string | undefined;
-  #current: string | undefined;
+  #current: string | undefined | null = null;
+  /** Whether `current` has been set by a read (or the first, failed one). */
+  #read = false;
 
   constructor(options: AccountsOptions) {
     this.#labels = options.labels ?? {};
@@ -70,32 +84,42 @@ export class CodexAccounts {
     this.#save?.(this.#accounts).catch((err: unknown) => console.error('wristline: codex: saving accounts failed:', err));
   }
 
-  /** The account id of the home's login as `auth.json` last named it; undefined when logged out or using an API key. */
-  get current(): string | undefined {
+  /**
+   * The account id of the home's login as `auth.json` last named it: undefined when logged out or
+   * using an API key, null when there is no file (or before the first read).
+   */
+  get current(): string | undefined | null {
     return this.#current;
   }
 
-  /** Learns the home's login from `auth.json` when the file changed; true when it was read (and `current` is up to date). Never rejects. */
+  /**
+   * Learns the home's login from `auth.json` when the file changed; true when `current` was set: by
+   * a read, or by a first read that failed (undefined: nothing vouches for an account then). A later
+   * failed read (e.g. of the file half-written) keeps the previous login. Never rejects.
+   */
   async poll(home: string): Promise<boolean> {
     const path = join(home, 'auth.json');
     let key = 'missing';
     try {
       const st = await stat(path);
-      key = `${st.mtimeMs}:${st.size}`;
+      // ctime too: a chmod that makes the file readable changes neither its mtime nor its size.
+      key = `${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
     } catch (err) {
       if (!isNotFound(err)) key = 'unreadable';
     }
     if (key === this.#authStat) return false;
-    this.#authStat = key; // Set first: an unreadable file is reported once, not every 2 s.
+    this.#authStat = key; // Set first: an unreadable or broken file is reported once, not every 2 s; its next change is read again.
     try {
-      const login = await readCodexLogin(home);
-      this.#current = login?.id;
+      const login = await readAuth(home);
+      this.#current = login === null ? null : login?.id;
       if (login) this.learn(login.id, login.label);
-      return true;
     } catch (err) {
       console.error(`wristline: codex: reading the login of ${home} failed:`, err instanceof Error ? err.message : err);
-      return false;
+      if (this.#read) return false;
+      this.#current = undefined;
     }
+    this.#read = true;
+    return true;
   }
 
   /**

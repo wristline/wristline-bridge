@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test, type TestContext } from 'node:test';
 import { BridgeHub } from '../src/hub.ts';
-import type { Item, Session } from '../src/protocol.ts';
+import type { Item, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked } from '../src/provider.ts';
 import { projectSlug, tmuxPane } from '../src/providers/claude-code/home.ts';
 import { ClaudeCodeProvider } from '../src/providers/claude-code/provider.ts';
@@ -187,6 +187,55 @@ test('codex: only the usage of the home\'s current login reaches the watch; the 
     assert.deepEqual(shown(), []);
   } finally {
     provider.stop();
+    hub.close();
+  }
+});
+
+test('codex: a half-written auth.json keeps the current login; a first read that fails shows no account until the file can be read (a chmod is noticed)', async (t) => {
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args.map(String).join(' '));
+  t.after(() => void (console.error = original));
+  const home = join(root, 'codex-auth-states');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const [mine, theirs] = ['019a0000-0000-7000-8000-0000000000e1', '019a0000-0000-7000-8000-0000000000e2'];
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${mine}.jsonl`), codexRollout(mine, CODEX_B, 55));
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${theirs}.jsonl`), codexRollout(theirs, CODEX_A, 20));
+  const auth = join(home, 'auth.json');
+  writeFileSync(auth, codexAuth(CODEX_B, 'b@example.com'));
+  chmodSync(auth, 0o000);
+  const provider = new CodexProvider({ home, historyDays: 7 });
+  const hub = new BridgeHub({ providers: [provider], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: quiet });
+  const sent: { type: string; usage?: Usage }[] = [];
+  const ws = { readyState: 1, send: (data: string) => void sent.push(JSON.parse(data) as { type: string; usage?: Usage }), on: () => {}, ping: () => {}, terminate: () => {}, close: () => {} };
+  try {
+    await provider.start(hub);
+    provider.stop();
+    const shown = (): unknown[] => hub.usageList().map((u) => [u.account?.id, u.windows.map((w) => w.usedPercent)]);
+    if (process.getuid?.() !== 0) {
+      assert.deepEqual(shown(), [], 'unreadable at the first read: no account vouched for, A\'s rollout included');
+      assert.equal(errors.filter((e) => e.includes(`reading the login of ${home} failed`)).length, 1);
+      await provider.refresh();
+      assert.equal(errors.filter((e) => e.includes(`reading the login of ${home} failed`)).length, 1, 'reported once, not on every poll');
+    }
+    chmodSync(auth, 0o600); // Neither mtime nor size changes.
+    await provider.refresh();
+    assert.deepEqual(shown(), [[CODEX_B, [55]]]);
+
+    hub.attach(ws as unknown as Parameters<BridgeHub['attach']>[0], 'device');
+    sent.length = 0;
+    writeFileSync(auth, codexAuth(CODEX_B, 'b@example.com').slice(0, 40)); // Codex rewrites it in place: caught half-written.
+    await provider.refresh();
+    assert.deepEqual(shown(), [[CODEX_B, [55]]], 'the previous login stays');
+    writeFileSync(auth, '');
+    await provider.refresh();
+    assert.deepEqual(shown(), [[CODEX_B, [55]]]);
+    writeFileSync(auth, codexAuth(CODEX_B, 'b@example.com'));
+    await provider.refresh();
+    assert.deepEqual(shown(), [[CODEX_B, [55]]]);
+    assert.deepEqual(sent, [], 'no removal went out');
+  } finally {
     hub.close();
   }
 });

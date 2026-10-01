@@ -95,8 +95,10 @@ export class ClaudeCodeProvider implements SessionProvider {
   /** Session id → account id known for certain (via a learned fingerprint). */
   readonly #sessionAccounts = new Map<string, string>();
   #logins: LoginEntry[];
-  /** Path, mtime and size of `.claude.json` as last read; it is re-parsed only when these change. */
+  /** Path, mtime, ctime and size of `.claude.json` as last read; it is re-parsed only when these change. */
   #loginStat: string | undefined;
+  /** Whether the hub has been told the home's login (after the first read, failed or not). */
+  #loginReported = false;
   #polling: Promise<void> | undefined;
   /** Newest registry entry per session id, from the last refresh. */
   #registry = new Map<string, RegistryEntry>();
@@ -212,8 +214,8 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (!isObject(input)) return;
     await this.#pollLogin();
     const usage = statuslineUsage(input, this.#now());
-    if (usage) {
-      const account = this.#usageAccount(str(input.session_id), statuslineFingerprint(input));
+    const account = usage && this.#usageAccount(str(input.session_id), statuslineFingerprint(input));
+    if (usage && account !== null) {
       if (account) usage.account = account;
       this.#hub?.usage(usage);
     }
@@ -236,27 +238,37 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (JSON.stringify(session) !== before) this.#hub?.session(session);
   }
 
-  /** A learned fingerprint names the account for certain; otherwise the report goes to the home's current login. */
-  #usageAccount(sessionId: string | undefined, fingerprint: string | undefined): Account | undefined {
+  /**
+   * Whose limits a statusLine report carries. A learned fingerprint names the account for certain;
+   * a process born after the home's current login was observed reports that login (and teaches its
+   * fingerprint). An older one may still run under an earlier login, and its fingerprint changes
+   * when that login's window resets, so its report goes to the login in effect when it started, as
+   * an estimate; null (the report is dropped) when that is unknown: the process is not in the
+   * registry, or started before the first login observed. Undefined when no login was ever observed.
+   */
+  #usageAccount(sessionId: string | undefined, fingerprint: string | undefined): Account | undefined | null {
     let id = fingerprint === undefined ? undefined : this.#fingerprints.get(fingerprint);
     let exact = id !== undefined;
     if (id === undefined) {
       const current = this.#logins.at(-1);
       if (!current) return undefined;
-      id = current.id;
       const startedAt = sessionId === undefined ? undefined : this.#registry.get(sessionId)?.startedAt;
-      // Only a process born after the login was observed teaches its fingerprint; an older one may still run under an earlier login.
-      if (fingerprint !== undefined && startedAt !== undefined && startedAt >= Date.parse(current.at)) {
-        this.#fingerprints.set(fingerprint, id);
-        exact = true;
+      if (startedAt !== undefined && startedAt >= Date.parse(current.at)) {
+        id = current.id;
+        if (fingerprint !== undefined) {
+          this.#fingerprints.set(fingerprint, id);
+          exact = true;
+        }
+      } else if (startedAt !== undefined) {
+        id = loginAt(this.#logins, startedAt)?.id;
       }
     }
     if (sessionId !== undefined) {
-      if (exact) this.#sessionAccounts.set(sessionId, id);
+      if (exact && id !== undefined) this.#sessionAccounts.set(sessionId, id);
       // A fingerprint no account is known for: the process may have switched accounts (`/login`), so its account is a guess again.
       else if (fingerprint !== undefined) this.#sessionAccounts.delete(sessionId);
     }
-    return this.#account(id, !exact);
+    return id === undefined ? null : this.#account(id, !exact);
   }
 
   #account(id: string, estimated: boolean): Account {
@@ -279,13 +291,23 @@ export class ClaudeCodeProvider implements SessionProvider {
     let key = `${path}:missing`;
     try {
       const st = await stat(path);
-      key = `${path}:${st.mtimeMs}:${st.size}`;
+      // ctime too: a chmod that makes the file readable changes neither its mtime nor its size.
+      key = `${path}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`;
     } catch (err) {
       if (!isNotFound(err)) key = `${path}:unreadable`;
     }
     if (key === this.#loginStat) return;
-    this.#loginStat = key; // Set first: a broken or unreadable file is reported once, not every 2 s.
-    const account = await readClaudeAccount(this.home);
+    this.#loginStat = key; // Set first: a broken or unreadable file is reported once, not every 2 s; its next change is read again.
+    let account: Account | undefined;
+    try {
+      account = await readClaudeAccount(this.home);
+    } catch (err) {
+      // The previous login stays: for a first read, the newest of the timeline (the one reports are attributed to).
+      if (!this.#loginReported) this.#hub?.login(this, this.#logins.at(-1)?.id);
+      this.#loginReported = true;
+      throw err;
+    }
+    this.#loginReported = true;
     this.#hub?.login(this, account?.id);
     if (!account) return;
     const logins = appendLogin(this.#logins, account, this.#now());

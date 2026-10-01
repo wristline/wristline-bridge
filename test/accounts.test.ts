@@ -105,7 +105,7 @@ function unsignedJwt(claims: unknown): string {
   return `${segment({ alg: 'none', typ: 'JWT' })}.${segment(claims)}.signature`;
 }
 
-test('readCodexLogin: only the account id and email leave auth.json; API-key, missing and broken logins → undefined', async () => {
+test('readCodexLogin: only the account id and email leave auth.json; API-key, missing and broken logins → undefined; a file that is not JSON (e.g. half-written) rejects', async () => {
   const home = join(root, 'codex');
   mkdirSync(home);
   const write = (value: unknown): void => writeFileSync(join(home, 'auth.json'), typeof value === 'string' ? value : JSON.stringify(value));
@@ -139,7 +139,9 @@ test('readCodexLogin: only the account id and email leave auth.json; API-key, mi
   write({ tokens: { id_token: 'not.a.jwt' } });
   assert.equal(await readCodexLogin(home), undefined);
   write('{');
-  assert.equal(await readCodexLogin(home), undefined);
+  await assert.rejects(readCodexLogin(home), /not valid JSON/);
+  write('');
+  await assert.rejects(readCodexLogin(home), /not valid JSON/);
 });
 
 test('account labels: an id named like an Object.prototype member gets a string label, never the prototype function', () => {

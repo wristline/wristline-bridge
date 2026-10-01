@@ -114,12 +114,20 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   Only accounts logged in now are sent. An entry with an `account` is in `GET /api/usage`, the
   `snapshot` and `usage` events only while that account is the current login of one of its
   provider's homes (Claude Code: `oauthAccount` of the home's `.claude.json`; Codex: the ChatGPT
-  login in the home's `auth.json`), so several homes can show several accounts; an entry without
-  `account` is always sent. The numbers of other accounts (a Claude Code process still running under
-  an earlier login, Codex rollouts of threads of another account) are kept but not sent. When a
-  home's login changes or it logs out, the bridge sends at once, outside the once-a-minute limit, an
-  event with empty `windows` for each entry no longer current, then the kept entry of the account
-  now logged in, if it has one; a change held back for a removed entry is not sent.
+  login in the home's `auth.json`, or without that file, e.g. with the credentials in the OS
+  keyring, the account the home's app-server daemon reports while it is connected), so several
+  homes can show several accounts; an entry without `account` is always sent. A login file that
+  cannot be read, or is caught half-written, leaves the home's login as it was; if that happens at
+  the bridge's first read, the home counts as logged into the newest login of its timeline (Claude
+  Code) or into none (Codex) until the file can be read (a change to the file, a `chmod` too,
+  makes the bridge read it again). Every entry of a provider passes only until the login of one of
+  its homes has been read, which at start comes before its first usage. The numbers of other
+  accounts (a Claude Code process that started before the home's current login was seen, which
+  counts for the login it started under, see `POST /local/statusline`; Codex rollouts of threads
+  of another account) are kept but not sent. When a home's login changes or it logs out, the
+  bridge sends at once, outside the once-a-minute limit, an event with empty `windows` for each
+  entry no longer current, then the kept entry of each account now shown, if it has one; a change
+  held back for a removed entry is not sent.
 
 - **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `threadId` (the id of the
   first ask of the conversation it belongs to; its own id for a first ask), `question` (the
@@ -309,7 +317,13 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   Code homes, the report goes to the home whose `projects/` holds `transcript_path` (real paths
   compared), else to the home that lists `session_id`, else to the only home unless the path lies
   under some other `projects/` directory; otherwise it is dropped (logged once per session). The
-  usage entry carries the home's `account`.
+  usage goes to the account of the reporting process: the one its `resets_at` (`seven_day`, else
+  `five_hour`) is known to belong to; else, for a process that started after the home's current
+  login was seen, that login (and its `resets_at` is learned); else the login in effect when the
+  process started, marked `estimated` (an older process may still run under an earlier login, and
+  its `resets_at` changes when that login's window resets). The usage of a process missing from
+  the home's `sessions/` registry, or that started before the bridge first saw a login of the home,
+  is dropped; without any login seen, the usage has no `account`.
 - `POST /hooks/permission-request` — Claude Code's PermissionRequest hook input. Answers an empty
   `200` at once when no watch is present (connected now or within 90 s); otherwise opens a
   request and answers when the watch does: `allow` → `{"hookSpecificOutput": {"hookEventName":

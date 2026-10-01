@@ -239,9 +239,9 @@ export class BridgeHub implements Hub {
     if (this.#logins.has(provider) && this.#logins.get(provider) === accountId) return;
     const before = new Map([...this.#usage].map(([key, u]) => [key, this.#visible(u)]));
     this.#logins.set(provider, accountId);
-    for (const [key, u] of this.#usage) {
-      if (this.#visible(u) === before.get(key)) continue;
-      // Sent at once, past the throttle: a removal must not wait, nor an entry coming back; a change held back for one now hidden is void.
+    const changed = [...this.#usage].filter(([key, u]) => this.#visible(u) !== before.get(key)).map(([key]) => key);
+    // Removals first, then the entries now shown. Sent at once, past the throttle: a removal must not wait, nor an entry coming back; a change held back for one now hidden is void.
+    for (const key of [...changed.filter((k) => before.get(k)), ...changed.filter((k) => !before.get(k))]) {
       const t = this.#usageThrottles.get(key);
       if (t) {
         clearTimeout(t.timer);
@@ -255,7 +255,9 @@ export class BridgeHub implements Hub {
   /**
    * Whether the watch may see the entry: always without an account, else only while its account is
    * the current login of a home of its provider. Until a home of that provider has reported its
-   * login there is nothing to go by, and every entry passes.
+   * login there is nothing to go by, and every entry passes: providers report one after their first
+   * read of it (a failed read too), before they report usage, so this only covers tests and the
+   * moment after start.
    */
   #visible(usage: Usage): boolean {
     if (!usage.account) return true;
