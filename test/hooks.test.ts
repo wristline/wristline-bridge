@@ -188,15 +188,38 @@ test('always passes the suggestions back as updatedPermissions; deny carries a m
   await emptyOk(await defer);
 });
 
-test('no "always" option without suggestions; ExitPlanMode shows the plan', async () => {
-  const pending = hook(bridge, 'permission-request', { session_id: SID, tool_name: 'ExitPlanMode', tool_input: { plan: `# Plan\n${'x'.repeat(2000)}` } });
+test('no "always" option without suggestions', async () => {
+  const pending = hook(bridge, 'permission-request', { session_id: SID, tool_name: 'Bash', tool_input: { command: 'ls' } });
+  const request = await nextRequest();
+  assert.deepEqual(request.questions[0]?.options.map((o) => o.id), ['allow', 'deny', 'defer']);
+  await answer(bridge, request.id, { decision: ['defer'] });
+  await emptyOk(await pending);
+});
+
+test('ExitPlanMode: the plan is the text; approving hands the input back, "always" also auto-accepts edits', async () => {
+  // Recorded from Claude Code 2.1.286 (no permission_suggestions). A bare allow leaves its dialog up.
+  const toolInput = { plan: `# Plan\n${'x'.repeat(5000)}`, planFilePath: '/home/u/.claude/plans/p.md' };
+  const plan = { session_id: SID, hook_event_name: 'PermissionRequest', permission_mode: 'plan', tool_name: 'ExitPlanMode', tool_input: toolInput };
+  const allow = hook(bridge, 'permission-request', plan);
   const request = await nextRequest();
   const question = request.questions[0];
-  assert.deepEqual(question?.options.map((o) => o.id), ['allow', 'deny', 'defer']);
-  assert.equal(question?.text.length, 1500);
+  assert.deepEqual(question?.options.map((o) => o.id), ['allow', 'always', 'deny', 'defer']);
+  assert.equal(question?.options[1]?.description, 'mode: acceptEdits');
+  assert.equal(question?.text.length, 4000);
   assert.ok(question?.text.startsWith('# Plan\nxxx'));
   await answer(bridge, request.id, { decision: ['allow'] });
-  await pending;
+  assert.deepEqual(await (await allow).json(), {
+    hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: toolInput } },
+  });
+
+  const always = hook(bridge, 'permission-request', plan);
+  await answer(bridge, (await nextRequest()).id, { decision: ['always'] });
+  assert.deepEqual(await (await always).json(), {
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow', updatedInput: toolInput, updatedPermissions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }] },
+    },
+  });
 });
 
 test('timeout hands the dialog back to the terminal with an empty 200', async () => {

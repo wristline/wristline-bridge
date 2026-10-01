@@ -28,7 +28,7 @@ test('item_completed records become items; reasoning and response_item are skipp
       ['tool', 'Shell(git diff --stat)', true],
       ['tool', 'Edit(/work/api/src/app.ts, /work/api/src/new.ts)', false],
       ['assistant', '테스트를 고쳤습니다.', false],
-      ['notice', '1. Reproduce\n2. Fix', false],
+      ['assistant', '1. Reproduce\n2. Fix', false],
     ],
   );
   const shell = items[1];

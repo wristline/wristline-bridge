@@ -287,6 +287,12 @@ test('WebSocket events', async () => {
   const item = await ws.next();
   fixture('event-item', item);
   assert.deepEqual(await talk.next(), item, 'the tool update was not sent to the kinds subscription');
+  // A plan is an assistant item: the subscription without tool rows gets it too.
+  const plan: Item = { seq: 7, kind: 'assistant', ts: '2026-09-29T10:00:05.000Z', text: '# Plan: fix the build\n\n1. Pin Node in build.sh\n2. Re-run npm test', plan: true };
+  provider.emit('6f1c2d3e-0000-4000-8000-000000000001', plan);
+  const planItem = await ws.next();
+  fixture('event-item-plan', planItem);
+  assert.deepEqual(await talk.next(), planItem);
   talk.close();
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(other.pending(), 0, 'items only reach subscribers of that session');

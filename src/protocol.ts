@@ -57,6 +57,8 @@ export interface Item {
   detail?: string;
   pending?: boolean;
   error?: boolean;
+  /** On an `assistant` item: a plan the agent proposed in plan mode (Claude Code: ExitPlanMode's plan; Codex: a plan item). */
+  plan?: boolean;
 }
 
 export interface Option {

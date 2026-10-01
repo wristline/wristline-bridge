@@ -67,6 +67,17 @@ test('tool_result updates the tool_use item in place and re-emits it with the sa
   assert.equal(edit?.detail, 'old_string not found in file');
 });
 
+test('ExitPlanMode: the plan is an assistant item marked plan, before its tool row', () => {
+  const input = { plan: '# Plan\n\n- one\n', planFilePath: '/home/u/.claude/plans/p.md' };
+  const message = { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_plan', name: 'ExitPlanMode', input }] };
+  const ts = '2026-10-01T10:44:58.556Z';
+  const { items } = parseAll([JSON.stringify({ type: 'assistant', uuid: 'u-plan', timestamp: ts, message })]).page(undefined, 10);
+  assert.deepEqual(items, [
+    { seq: 1, kind: 'assistant', ts, text: '# Plan\n\n- one', plan: true },
+    { seq: 2, kind: 'tool', ts, text: 'ExitPlanMode(/home/u/.claude/plans/p.md)', pending: true },
+  ]);
+});
+
 test('summarizes tools by their most telling argument', () => {
   assert.equal(toolText('Read', { file_path: '/a.ts' }), 'Read(/a.ts)');
   assert.equal(toolText('Grep', { pattern: 'TODO', path: 'src' }), 'Grep(TODO)');

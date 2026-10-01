@@ -1,0 +1,11 @@
+{
+  "type": "item",
+  "sessionId": "claude-code:6f1c2d3e-0000-4000-8000-000000000001",
+  "item": {
+    "seq": 7,
+    "kind": "assistant",
+    "ts": "2026-09-29T10:00:05.000Z",
+    "text": "# Plan: fix the build\n\n1. Pin Node in build.sh\n2. Re-run npm test",
+    "plan": true
+  }
+}

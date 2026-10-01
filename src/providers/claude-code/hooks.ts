@@ -1,7 +1,7 @@
 // Claude Code hooks: the HTTP handlers served on the local port. The settings.json merge that
 // installs them and the statusLine relay script live in settings.ts. Verified against Claude Code 2.1.284.
 
-import { PERMISSION_QUESTION, type Option, type Question } from '../../protocol.ts';
+import { PERMISSION_QUESTION, TEXT_MAX, type Option, type Question } from '../../protocol.ts';
 import type { BridgeHub } from '../../hub.ts';
 import { doneText, doneTitle, sessionKey, type Hub } from '../../provider.ts';
 import type { HookHandler } from '../../server.ts';
@@ -12,8 +12,13 @@ import { humanPrompt } from './turn.ts';
 export const HOOK_NAMES = ['permission-request', 'pre-tool-use', 'notification', 'stop'] as const;
 export type HookName = (typeof HOOK_NAMES)[number];
 
-/** Longest tool description (e.g. an ExitPlanMode plan) shown on a permission request. */
+/** Longest tool description shown on a permission request; an ExitPlanMode plan may use TEXT_MAX. */
 const PERMISSION_TEXT_MAX = 1500;
+/**
+ * What `always` adds to an approved plan: the terminal's "Yes, auto-accept edits". ExitPlanMode's
+ * PermissionRequest carries no `permission_suggestions`.
+ */
+const PLAN_ACCEPT_EDITS = [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }];
 const ALERT_TEXT_MAX = 120;
 /** Notifications that mean "the session waits for you" when no request is open for it. */
 const NEEDS_INPUT = new Set(['permission_prompt', 'agent_needs_input']);
@@ -77,7 +82,11 @@ async function permissionRequest(input: JsonObject, ctx: HookContext): Promise<J
     const answers = await ask(sessionId, toolInput, ctx);
     return answers && decision({ behavior: 'allow', updatedInput: { ...toolInput, answers } });
   }
-  const suggestions = Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [];
+  const plan = tool === 'ExitPlanMode';
+  const suggestions = plan ? PLAN_ACCEPT_EDITS : Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [];
+  // Claude Code ignores a bare allow for ExitPlanMode (as for AskUserQuestion) and keeps its dialog
+  // up: the hook must hand the input back. Approving then restores the mode from before plan mode.
+  const allowed: JsonObject = plan ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'allow' };
   const options: Option[] = [{ id: 'allow', label: 'Allow' }];
   if (suggestions.length > 0) {
     const description = describeSuggestions(suggestions);
@@ -95,9 +104,9 @@ async function permissionRequest(input: JsonObject, ctx: HookContext): Promise<J
   );
   switch (answers?.[PERMISSION_QUESTION]?.[0]) {
     case 'allow':
-      return decision({ behavior: 'allow' });
+      return decision(allowed);
     case 'always':
-      return decision({ behavior: 'allow', updatedPermissions: suggestions });
+      return decision({ ...allowed, updatedPermissions: suggestions });
     case 'deny':
       return decision({ behavior: 'deny', message: 'Denied from watch' });
     default:
@@ -157,8 +166,8 @@ async function ask(sessionId: string, toolInput: JsonObject, ctx: HookContext): 
 }
 
 function permissionText(tool: string, input: JsonObject): string {
-  const text = tool === 'ExitPlanMode' ? str(input.plan) : toolSummary(tool, input, PERMISSION_TEXT_MAX);
-  return clip(text?.trim() || tool, PERMISSION_TEXT_MAX);
+  if (tool === 'ExitPlanMode') return clip(str(input.plan)?.trim() || tool, TEXT_MAX);
+  return clip(toolSummary(tool, input, PERMISSION_TEXT_MAX)?.trim() || tool, PERMISSION_TEXT_MAX);
 }
 
 /** A short description of what "always allow" would add, e.g. `Bash(npm run build:*)`. */

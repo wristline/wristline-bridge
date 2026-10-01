@@ -1,5 +1,5 @@
 // Pure parsing of Claude Code transcripts (~/.claude/projects/<slug>/<sessionId>.jsonl) and
-// statusLine input. Verified against Claude Code 2.1.284.
+// statusLine input. Verified against Claude Code 2.1.284 (ExitPlanMode: 2.1.286).
 
 import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
 import { DETAIL_MAX, TEXT_MAX, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
@@ -56,6 +56,10 @@ export function toolSummary(name: string, input: unknown, jsonMax: number): stri
     case 'Task':
     case 'Agent':
       summary = str(args.description);
+      break;
+    case 'ExitPlanMode':
+      // The plan itself is its own item.
+      summary = str(args.planFilePath);
       break;
   }
   if (summary === undefined && Object.keys(args).length > 0) summary = clip(JSON.stringify(args), jsonMax);
@@ -119,7 +123,12 @@ function applyAssistant(uuid: string, message: JsonObject, ts: string, sink: Ite
       if (text) sink.add(`${uuid}:${index}`, { kind: 'assistant', ts, text: clip(text, TEXT_MAX) });
     } else if (block.type === 'tool_use') {
       const id = str(block.id);
-      if (id) sink.add(id, { kind: 'tool', ts, text: clip(toolText(str(block.name) ?? 'tool', block.input), TEXT_MAX), pending: true });
+      const name = str(block.name) ?? 'tool';
+      // A plan put up for approval is conversation, shown even where tool rows are hidden. Claude
+      // Code writes the plan (read from the plan file) into the transcript's input.
+      const plan = name === 'ExitPlanMode' && isObject(block.input) ? str(block.input.plan)?.trim() : undefined;
+      if (plan) sink.add(`${uuid}:${index}`, { kind: 'assistant', ts, text: clip(plan, TEXT_MAX), plan: true });
+      if (id) sink.add(id, { kind: 'tool', ts, text: clip(toolText(name, block.input), TEXT_MAX), pending: true });
     }
   });
 }

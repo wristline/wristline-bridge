@@ -136,7 +136,8 @@ export function itemDraft(item: ThreadItem, ts: string): ItemDraft | undefined {
       return text ? { kind: 'assistant', ts, text: clip(text, TEXT_MAX) } : undefined;
     }
     case 'plan':
-      return { kind: 'notice', ts, text: clip(item.text.trim(), TEXT_MAX) };
+      // Plan mode's proposed plan: conversation, not a notice (hidden with tool rows).
+      return { kind: 'assistant', ts, text: clip(item.text.trim(), TEXT_MAX), plan: true };
     case 'commandExecution': {
       // `pending` is always set: a live `item/started` item is later replaced by its completion.
       const draft: ItemDraft = { kind: 'tool', ts, text: clip(`Shell(${item.command})`, TEXT_MAX), pending: item.status === 'inProgress' };

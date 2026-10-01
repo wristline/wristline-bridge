@@ -72,13 +72,19 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   `seq` starts at 1 and orders items within a session; an updated item (e.g. a tool that finished)
   is sent again with the same `seq`. `text` is at most 4000 UTF-16 code units, `detail` (tool
   output) at most 600; longer text is cut with `…`. `pending` marks a tool still running, `error`
-  a failed one.
+  a failed one. `plan: true` marks an `assistant` item that is a plan the agent proposed in plan
+  mode, shown wherever assistant items are (Claude Code: the plan of an `ExitPlanMode` call, which
+  is followed by its `tool` row; Codex: a plan item, which earlier bridges sent as a `notice`).
 - **PendingRequest** — something the agent waits on. `kind` is `permission` or `question`. A
   permission carries exactly one question with id `decision` whose option ids are drawn from
   `allow`, `always`, `deny` and `defer` ("answer on the PC"). The bridge sends ids; the watch
   localises the wording. Codex requests never offer `defer` (the terminal shows the same
   request, and whoever answers first wins) and have no timeout; they resolve `by: "terminal"`
   when answered in the terminal or when the agent stops waiting.
+  A Claude Code plan approval is a permission titled `ExitPlanMode` whose text is the plan (at most
+  4000 code units; other permissions at most 1500): `allow` approves it and returns to the mode the
+  session had before plan mode, `always` approves it and switches to `acceptEdits` (description
+  `mode: acceptEdits`), `deny` keeps planning.
 - **Answers** — `{ "<questionId>": ["<optionId>", ...] }`, every question answered, exactly one
   option for a question with `multi: false`.
 - **Usage** — per provider and account: `windows[]` with `id`, optional `label`, `usedPercent`,
@@ -231,7 +237,7 @@ Server events (JSON text frames):
 | `snapshot` | `apiVersion, sessions, requests, usage, alerts` | right after connecting; `sessions` as in `GET /api/sessions` (live only); `alerts`: the last 10 alerts of the past 10 minutes, oldest first (see "Missed alerts") | `event-snapshot.json` |
 | `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json` |
 | `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
-| `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json` |
+| `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first. Empty `windows`: remove the entry (its last window reset, or its account is no longer logged in; a login change is sent at once) | `event-usage.json`, `event-usage-removed.json` |
@@ -345,7 +351,10 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   request and answers when the watch does: `allow` → `{"hookSpecificOutput": {"hookEventName":
   "PermissionRequest", "decision": {"behavior": "allow"}}}`, `always` → the same plus
   `"updatedPermissions": <permission_suggestions>`, `deny` → `{"behavior": "deny", "message":
-  "Denied from watch"}`, `defer`/timeout/answered in the terminal → empty `200`. For
+  "Denied from watch"}`, `defer`/timeout/answered in the terminal → empty `200`. For `ExitPlanMode`
+  (no `permission_suggestions`), `allow` and `always` also carry `"updatedInput": <tool_input>`:
+  Claude Code ignores a bare allow for it and keeps its dialog up; `always` sends
+  `[{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]`. For
   `AskUserQuestion` the request is a question and the answer is `{"behavior": "allow",
   "updatedInput": {...tool_input, "answers": {"<question>": "<label>[, <label>...]"}}}`.
 - `POST /hooks/pre-tool-use` — answers `AskUserQuestion` the same way with `"permissionDecision":
