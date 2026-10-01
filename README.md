@@ -79,9 +79,13 @@ needs hooks. `wristline-bridge hooks install` shows the diff, asks, backs up
 `~/.claude/settings.json` to `~/.config/wristline/backups/`, and then **adds** (never removes or
 reorders your entries):
 
-- `PermissionRequest`: an http hook to `http://127.0.0.1:47771/hooks/permission-request` with the
-  local token in an `Authorization` header (the install makes the file private, mode 0600; tell
-  us if you publish your settings as dotfiles). Its timeout is `permissionWaitSec + 10` seconds.
+- `PermissionRequest`: a command hook, `~/.config/wristline/hook.sh permission-request`. The script
+  posts the request to `http://127.0.0.1:47771/hooks/permission-request` with the local token from
+  `~/.config/wristline/hook-header` and prints the bridge's answer, so `settings.json` holds no
+  secret and can be kept in a dotfiles repo. If the bridge is stopped or refuses, it prints
+  nothing and exits 0, and Claude Code shows its terminal dialog as usual. Its timeout is
+  `permissionWaitSec + 10` seconds. Earlier versions installed an http hook with the token in an
+  `Authorization` header; running `hooks install` again replaces it.
 - `Notification` and `Stop`: asynchronous `curl … || true` commands that tell the bridge a session
   waits for you or finished. They never delay Claude Code and stay quiet while the bridge is
   stopped.
@@ -363,8 +367,8 @@ wristline-bridge devices --revoke <id>   # revoke one; its connections close imm
   `wristline-bridge pair --token`, which goes through the local port only.
 - The local port requires a separate token from `config.json`, because WSL2 also forwards it to
   Windows where a web page could otherwise reach it. It is never meant to be published.
-- `~/.config/wristline/` is created with mode 0700 and `config.json` with 0600; `hooks install`
-  sets the settings file it writes the local token into to 0600.
+- `~/.config/wristline/` is created with mode 0700 and `config.json` with 0600. `hooks install`
+  writes the local token only to `~/.config/wristline/hook-header` (0600), never to `settings.json`.
 - The bridge reads agent files; it never opens Claude Code's `~/.claude/sessions/*.key` or
   `.credentials.json` files. For accounts it reads only `oauthAccount` (id, email, organization)
   from `.claude.json`, and only the `email` and `chatgpt_account_id` claims of the id_token in

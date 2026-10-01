@@ -294,3 +294,20 @@ temporary, uncommitted log in the bridge service printed only the key names unde
   Claude Code adds to the statusLine reaches the watch without a bridge change. Until then the
   watch gets `5h` and `7d` (plus `spend` behind a gateway); a Fable window would need the OAuth
   usage endpoint as a second source, which the bridge does not read.
+
+## PermissionRequest as a command hook (2026-10-01)
+
+**Why.** The http PermissionRequest hook carried the local token in its `Authorization` header,
+so `settings.json` held a secret and could not be kept in a dotfiles or backup repo.
+
+- **Docs** (code.claude.com/docs/en/hooks, Claude Code 2.1.286): an http hook's response body
+  "uses the same JSON output format as command hooks", and a command hook's stdout that starts
+  with `{` and ends with `}` on exit 0 is parsed as that JSON; on PermissionRequest, exit 0 with
+  no output means no decision (the normal permission flow). Http hooks can interpolate
+  `$VAR` into headers for names listed in `allowedEnvVars`, but the value must then be in Claude
+  Code's environment, which every Bash tool call and subprocess inherits.
+- **Decision:** PermissionRequest runs `~/.config/wristline/hook.sh permission-request` (timeout
+  `permissionWaitSec + 10` s). The script posts stdin with `curl -sf -H @hook-header` and prints
+  the body; when the bridge is stopped, refuses or times out it prints nothing and exits 0, the
+  same "no decision" a stopped bridge gave the http hook (S12).
+  `hooks install` replaces the http hook in place; `hooks uninstall` removes either form.

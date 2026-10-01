@@ -95,7 +95,7 @@ export function loginText(login: Account | undefined | null): string {
   return login === null ? 'unreadable' : login ? login.label : 'not logged in';
 }
 
-/** The hook token must exist before it is written into settings.json. */
+/** The hook token must exist before it is written into hook-header. */
 async function hookConfig(flags: Flags): Promise<Config & { hookToken: string }> {
   const dir = configDir();
   let stored = await readStored(dir);

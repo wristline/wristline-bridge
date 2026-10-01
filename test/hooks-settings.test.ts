@@ -1,6 +1,6 @@
-// settings.json merge (golden), install/uninstall on disk, and the generated statusLine relay.
+// settings.json merge (golden), install/uninstall on disk, and the generated hook.sh and statusLine relay.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -11,6 +11,7 @@ import {
   applyInstall,
   applyUninstall,
   hookFiles,
+  hookScript,
   lineDiff,
   planInstall,
   planUninstall,
@@ -38,7 +39,6 @@ const existing = {
 
 const opts: HookSettings = {
   hookPort: 47771,
-  hookToken: 'tok',
   permissionTimeoutSec: 600,
   statuslineCommand: '/home/dev/.config/wristline/statusline.sh',
   headerFile: '/home/dev/.config/wristline/hook-header',
@@ -46,6 +46,10 @@ const opts: HookSettings = {
 };
 
 const permission = {
+  hooks: [{ type: 'command', command: '/home/dev/.config/wristline/hook.sh permission-request', timeout: 600 }],
+};
+/** The PermissionRequest handler earlier versions installed, with the token in settings.json. */
+const oldPermission = {
   hooks: [{ type: 'http', url: 'http://127.0.0.1:47771/hooks/permission-request', headers: { Authorization: 'Bearer tok' }, timeout: 600 }],
 };
 const command = (name: string): unknown => ({
@@ -81,19 +85,38 @@ test('install is idempotent and refreshes our handlers in place', () => {
   const twice = withHooks(once, opts);
   assert.deepEqual(twice.settings, once);
   assert.equal(twice.statuslineOrig, undefined, 'statusline.orig is kept');
-  const rotated = withHooks(once, { ...opts, hookToken: 'new', permissionTimeoutSec: 310 }).settings;
-  assert.deepEqual((rotated.hooks as Record<string, unknown[]>).PermissionRequest, [
-    { hooks: [{ ...permission.hooks[0], headers: { Authorization: 'Bearer new' }, timeout: 310 }] },
-  ]);
+  const rotated = withHooks(once, { ...opts, permissionTimeoutSec: 310 }).settings;
+  assert.deepEqual((rotated.hooks as Record<string, unknown[]>).PermissionRequest, [{ hooks: [{ ...permission.hooks[0], timeout: 310 }] }]);
+});
+
+test('install replaces the http PermissionRequest hook of earlier versions (token in settings.json) in place', () => {
+  const old = structuredClone(existing) as { hooks: Record<string, unknown[]> };
+  old.hooks.PermissionRequest = [{ matcher: '', hooks: [{ type: 'command', command: 'echo mine' }, ...oldPermission.hooks] }];
+  const migrated = withHooks(old, opts).settings as { hooks: Record<string, unknown[]> };
+  assert.deepEqual(migrated.hooks.PermissionRequest, [{ matcher: '', hooks: [{ type: 'command', command: 'echo mine' }, ...permission.hooks] }]);
+  assert.doesNotMatch(JSON.stringify(migrated), /Bearer|Authorization/);
+  assert.deepEqual(withHooks(migrated, opts).settings, migrated);
+});
+
+test('hook.sh is recognised under a quoted path and only in our config directory', () => {
+  const spaced = { ...opts, configDir: "/home/dev/it's config" };
+  const installed = withHooks({}, spaced).settings as { hooks: Record<string, { hooks: { command: string }[] }[]> };
+  assert.equal(installed.hooks.PermissionRequest?.[0]?.hooks[0]?.command, `'/home/dev/it'\\''s config/hook.sh' permission-request`);
+  assert.deepEqual(withHooks(installed, spaced).settings, installed, 'no second handler');
+  assert.deepEqual(withoutHooks(installed, { ...spaced, statuslineOrig: null }), {});
+  const other = { hooks: { PermissionRequest: [{ hooks: [{ type: 'command', command: '/home/dev/bin/hook.sh permission-request' }] }] } };
+  assert.deepEqual(withoutHooks(other, { ...opts, statuslineOrig: null }), other);
 });
 
 test('uninstall removes only our entries and restores the statusLine', () => {
   const installed = withHooks(existing, opts).settings;
   assert.deepEqual(withoutHooks(installed, { ...opts, statuslineOrig: 'npx -y ccstatusline@latest' }), existing);
-  // The http shape an earlier version installed for Notification/Stop is recognised too.
+  // The http shapes earlier versions installed (PermissionRequest with the token, Notification/Stop) are recognised too.
   const older = structuredClone(installed) as { hooks: Record<string, unknown[]> };
   older.hooks.Stop = [...existing.hooks.Stop, { hooks: [{ type: 'http', url: 'http://127.0.0.1:47771/hooks/stop', timeout: 5 }] }];
+  older.hooks.PermissionRequest = [oldPermission];
   assert.deepEqual(withoutHooks(older, { ...opts, statuslineOrig: 'npx -y ccstatusline@latest' }), existing);
+  assert.deepEqual(withoutHooks(existing, { ...opts, statuslineOrig: 'npx -y ccstatusline@latest' }), existing, 'uninstalling again changes nothing');
   // Handlers installed while the bridge used another port are ours too.
   const moved = { hooks: { Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:9999/hooks/stop' }] }] } };
   assert.deepEqual(withoutHooks(moved, { ...opts, statuslineOrig: null }), {});
@@ -140,7 +163,11 @@ function onDisk(name: string): { settingsPath: string; configDir: string; instal
   const settingsPath = join(root, name, 'claude', 'settings.json');
   mkdirSync(join(root, name, 'claude'), { recursive: true });
   writeFileSync(settingsPath, `${JSON.stringify(existing, null, 2)}\n`, { mode: 0o644 });
-  return { settingsPath, configDir, install: { ...opts, settingsPath, configDir, statuslineCommand: hookFiles(configDir).script, headerFile: hookFiles(configDir).header } };
+  return {
+    settingsPath,
+    configDir,
+    install: { ...opts, settingsPath, configDir, hookToken: 'hook-token-1', statuslineCommand: hookFiles(configDir).script, headerFile: hookFiles(configDir).header },
+  };
 }
 
 test('install and uninstall on disk: backup, file modes, semantic round trip, one statusLine owner', async () => {
@@ -154,16 +181,19 @@ test('install and uninstall on disk: backup, file modes, semantic round trip, on
   assert.equal(readFileSync(backup ?? '', 'utf8'), original);
   const files = hookFiles(configDir);
   assert.equal(statSync(files.script).mode & 0o777, 0o700);
+  assert.equal(statSync(files.hook).mode & 0o777, 0o700);
   assert.equal(statSync(files.header).mode & 0o777, 0o600);
-  assert.equal(statSync(settingsPath).mode & 0o777, 0o600, 'the settings file holds the hook token');
-  assert.equal(readFileSync(files.header, 'utf8'), 'Authorization: Bearer tok\n');
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o644, 'the settings file keeps its mode');
+  assert.equal(readFileSync(files.header, 'utf8'), 'Authorization: Bearer hook-token-1\n');
+  assert.ok(!readFileSync(settingsPath, 'utf8').includes('hook-token-1'), 'the token stays out of the settings file');
+  assert.match(readFileSync(files.hook, 'utf8'), /-m 600 .*127\.0\.0\.1:47771\/hooks\/\$1/);
   assert.equal(readFileSync(files.orig, 'utf8'), 'npx -y ccstatusline@latest');
 
-  chmodSync(settingsPath, 0o644);
+  chmodSync(settingsPath, 0o600);
   const again = await planInstall(install);
   assert.equal(again.after, again.before, 'second install changes nothing');
   assert.equal(await applyInstall(again, install), undefined, 'and makes no backup');
-  assert.equal(statSync(settingsPath).mode & 0o777, 0o600, 'but makes the file private again');
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
 
   const otherPath = join(root, 'disk', 'claude', 'other.json');
   writeFileSync(otherPath, '{"statusLine":{"type":"command","command":"echo other"}}');
@@ -172,7 +202,21 @@ test('install and uninstall on disk: backup, file modes, semantic round trip, on
   const change = await planUninstall({ settingsPath, configDir, statuslineCommand: install.statuslineCommand });
   await applyUninstall(change, configDir);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')), existing);
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600, 'a private file stays private');
   assert.deepEqual(readdirSync(configDir), ['backups']);
+});
+
+test('install on disk moves the token of an earlier http PermissionRequest hook out of the settings file', async () => {
+  const { settingsPath, install } = onDisk('migrate');
+  const old = { ...existing, hooks: { ...existing.hooks, PermissionRequest: [{ hooks: [{ ...oldPermission.hooks[0], headers: { Authorization: 'Bearer hook-token-1' } }] }] } };
+  writeFileSync(settingsPath, `${JSON.stringify(old, null, 2)}\n`);
+  chmodSync(settingsPath, 0o600); // Earlier versions made it private.
+  const plan = await planInstall(install);
+  await applyInstall(plan, install);
+  const text = readFileSync(settingsPath, 'utf8');
+  assert.ok(!text.includes('hook-token-1'));
+  assert.deepEqual(JSON.parse(text), withHooks(existing, install).settings);
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
 });
 
 test('apply refuses a settings file written since the plan was made', async () => {
@@ -212,7 +256,10 @@ test('a second home gets relay files of its own; a copied settings file is re-po
   await applyInstall(await planInstall(install), install);
   const suffix = '-school';
   const files = hookFiles(configDir, suffix);
-  assert.deepEqual([files.script, files.orig, files.owner, files.header].map((f) => basename(f)), ['statusline-school.sh', 'statusline-school.orig', 'statusline-school.owner', 'hook-header']);
+  assert.deepEqual(
+    [files.script, files.orig, files.owner, files.header, files.hook].map((f) => basename(f)),
+    ['statusline-school.sh', 'statusline-school.orig', 'statusline-school.owner', 'hook-header', 'hook.sh'],
+  );
   // The user copied the primary's settings.json (pointing at the primary relay) into the second home.
   const second = join(root, 'multi', 'school', 'settings.json');
   mkdirSync(dirname(second));
@@ -232,7 +279,7 @@ test('a second home gets relay files of its own; a copied settings file is re-po
   const { statusLine: _, ...rest } = existing;
   assert.deepEqual(JSON.parse(readFileSync(second, 'utf8')), rest);
   assert.equal(existsSync(files.script), false);
-  assert.ok(existsSync(hookFiles(configDir).script) && existsSync(hookFiles(configDir).header), 'the primary relay and the shared header stay');
+  assert.ok([hookFiles(configDir).script, files.header, files.hook].every((f) => existsSync(f)), 'the primary relay, the shared header and hook.sh stay');
   await applyUninstall(await planUninstall({ settingsPath, configDir, statuslineCommand: install.statuslineCommand }), configDir);
   assert.deepEqual(readdirSync(configDir), ['backups'], 'the header goes with the last relay');
 });
@@ -274,6 +321,54 @@ test('the statusLine relay posts stdin to the bridge and pipes it to the origina
       { auth: 'Bearer tok', body: input },
       { auth: 'Bearer tok', body: input },
     ]);
+  } finally {
+    server.close();
+  }
+});
+
+test('hook.sh posts stdin with the header file and prints the answer; on any failure it prints nothing and exits 0', async (t) => {
+  if (spawnSync('curl', ['--version']).status !== 0) return t.skip('curl is not installed');
+  const received: { url?: string; auth?: string; type?: string; body: string }[] = [];
+  let reply: { status: number; body: string } = { status: 200, body: '' };
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c: Buffer) => (body += c.toString()));
+    req.on('end', () => {
+      received.push({ url: req.url, auth: req.headers.authorization, type: req.headers['content-type'], body });
+      res.writeHead(reply.status, { 'content-type': 'application/json' }).end(reply.body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const dir = join(root, 'hook dir'); // A space checks the quoting.
+    mkdirSync(dir);
+    const files = hookFiles(dir);
+    writeFileSync(files.header, 'Authorization: Bearer tok\n');
+    const input = '{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}';
+    // Not spawnSync: the server answers on this event loop.
+    const run = (script: string): Promise<{ status: number | null; stdout: string }> => {
+      writeFileSync(files.hook, script, { mode: 0o700 });
+      const child = spawn(files.hook, ['permission-request']);
+      let stdout = '';
+      child.stdout.on('data', (c: Buffer) => (stdout += c.toString()));
+      child.stdin.end(input);
+      return new Promise((resolve) => child.on('close', (status) => resolve({ status, stdout })));
+    };
+
+    const answer = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
+    reply = { status: 200, body: answer };
+    assert.deepEqual(await run(hookScript(dir, port, 5)), { status: 0, stdout: answer });
+    assert.deepEqual(received, [{ url: '/hooks/permission-request', auth: 'Bearer tok', type: 'application/json', body: input }]);
+    reply = { status: 200, body: '' };
+    assert.deepEqual(await run(hookScript(dir, port, 5)), { status: 0, stdout: '' }, 'no decision');
+    reply = { status: 401, body: '{"error":"unauthorized"}' };
+    assert.deepEqual(await run(hookScript(dir, port, 5)), { status: 0, stdout: '' }, 'refused');
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const unused = (closed.address() as AddressInfo).port;
+    await new Promise((resolve) => closed.close(resolve));
+    assert.deepEqual(await run(hookScript(dir, unused, 5)), { status: 0, stdout: '' }, 'bridge stopped');
   } finally {
     server.close();
   }

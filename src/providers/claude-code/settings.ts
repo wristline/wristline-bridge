@@ -13,14 +13,13 @@ const EVENTS = [
 
 export interface HookSettings {
   hookPort: number;
-  hookToken: string;
   /** Seconds Claude Code waits for the PermissionRequest hook; a little over permissionWaitSec. */
   permissionTimeoutSec: number;
   /** The statusLine command that runs the generated relay script. */
   statuslineCommand: string;
   /** `hook-header` file that the command hooks pass to curl. */
   headerFile: string;
-  /** Directory of the generated relay files; a statusLine command already pointing into it is a relay of ours, not the user's. */
+  /** Directory of the generated files; a statusLine command or hook.sh already pointing into it is ours, not the user's. */
   configDir: string;
 }
 
@@ -41,25 +40,33 @@ export function hookUrlPrefix(hookPort: number): string {
 /** Ours at any port: an installed handler keeps the port the bridge used at the time. */
 const OUR_URL = /(?:^|\s)http:\/\/127\.0\.0\.1:\d+\/hooks\/(\S+)/;
 
-/** The hook name an installed handler of ours calls: from an http hook's url, or the URL in our curl command. */
-function ourHook(handler: unknown): string | undefined {
+/** `<hook.sh> <name>` as ourHandler writes it; the script may be shell-quoted. */
+const HOOK_SCRIPT_COMMAND = /^('(?:[^']|'\\'')*'|[^\s']+) ([a-z-]+)$/s;
+
+/**
+ * The hook name an installed handler of ours calls: the argument of our hook.sh, the URL in our
+ * curl command, or the url of the http hook (with the token in a header) that earlier versions installed.
+ */
+function ourHook(handler: unknown, configDir: string): string | undefined {
   if (!isObject(handler)) return undefined;
+  if (handler.type === 'command' && typeof handler.command === 'string') {
+    const [, word, name] = HOOK_SCRIPT_COMMAND.exec(handler.command) ?? [];
+    if (word && name && resolve(unquote(word)) === resolve(hookFiles(configDir).hook)) return name;
+  }
   const text = handler.type === 'http' ? handler.url : handler.type === 'command' ? handler.command : undefined;
   return typeof text === 'string' ? OUR_URL.exec(text)?.[1] : undefined;
 }
 
-function isOurs(handler: unknown): boolean {
-  return ourHook(handler) !== undefined;
-}
-
 /**
- * PermissionRequest must answer, so it is an http hook. Notification and Stop only inform the
- * bridge: async curl commands never delay Claude Code and stay quiet while the bridge is stopped
- * (an http hook would print "hook error: ECONNREFUSED" after every turn).
+ * PermissionRequest must answer: hook.sh prints the bridge's answer, reading the token from
+ * hook-header so that settings.json holds no secret (an http hook would need it in a header).
+ * Notification and Stop only inform the bridge: async curl commands never delay Claude Code and
+ * stay quiet while the bridge is stopped (an http hook would print "hook error: ECONNREFUSED"
+ * after every turn).
  */
-function ourHandler(event: (typeof EVENTS)[number][0], url: string, opts: HookSettings): JsonObject {
+function ourHandler(event: (typeof EVENTS)[number][0], name: string, url: string, opts: HookSettings): JsonObject {
   if (event === 'PermissionRequest') {
-    return { type: 'http', url, headers: { Authorization: `Bearer ${opts.hookToken}` }, timeout: opts.permissionTimeoutSec };
+    return { type: 'command', command: `${shellQuote(hookFiles(opts.configDir).hook)} ${name}`, timeout: opts.permissionTimeoutSec };
   }
   const command = `curl -s -m 2 -H @${shellQuote(opts.headerFile)} -H 'Content-Type: application/json' --data-binary @- ${url} >/dev/null 2>&1 || true`;
   return { type: 'command', command, async: true };
@@ -78,12 +85,12 @@ export function withHooks(original: JsonObject, opts: HookSettings): Merged {
   const hooks = hooksObject(settings);
   for (const [event, name] of EVENTS) {
     const url = `${prefix}${name}`;
-    const handler = ourHandler(event, url, opts);
+    const handler = ourHandler(event, name, url, opts);
     if (hooks[event] === undefined) hooks[event] = [];
     const groups = hooks[event];
     if (!Array.isArray(groups)) throw new Error(`"hooks.${event}" in the settings file is not an array; fix it first`);
     // Re-running install refreshes our handler where it is instead of adding another one.
-    const mine = (h: unknown): boolean => ourHook(h) === name;
+    const mine = (h: unknown): boolean => ourHook(h, opts.configDir) === name;
     const group = groups.find((g: unknown) => isObject(g) && Array.isArray(g.hooks) && g.hooks.some(mine));
     if (isObject(group) && Array.isArray(group.hooks)) group.hooks = group.hooks.map((h: unknown) => (mine(h) ? handler : h));
     else groups.push({ hooks: [handler] });
@@ -106,9 +113,14 @@ export function withHooks(original: JsonObject, opts: HookSettings): Merged {
   return { settings, statuslineOrig };
 }
 
+/** A word as shellQuote wrote it, unquoted. */
+function unquote(word: string): string {
+  return /^'(.*)'$/s.exec(word)?.[1]?.replace(/'\\''/g, "'") ?? word;
+}
+
 /** A statusLine command that runs one of our relay scripts (`<configDir>/statusline*.sh`), possibly shell-quoted. */
 function isRelay(command: string, configDir: string): boolean {
-  const word = /^'(.*)'$/s.exec(command)?.[1]?.replace(/'\\''/g, "'") ?? command;
+  const word = unquote(command);
   return resolve(dirname(word)) === resolve(configDir) && /^statusline.*\.sh$/.test(basename(word));
 }
 
@@ -116,7 +128,7 @@ function isRelay(command: string, configDir: string): boolean {
  * Removes only our handlers (and arrays or groups that held nothing else) and restores the
  * statusLine command saved in statusline.orig; an empty or missing one means there was none.
  */
-export function withoutHooks(original: JsonObject, opts: { statuslineCommand: string; statuslineOrig: string | null }): JsonObject {
+export function withoutHooks(original: JsonObject, opts: { statuslineCommand: string; statuslineOrig: string | null; configDir: string }): JsonObject {
   const settings = structuredClone(original);
   if (isObject(settings.hooks)) {
     const hooks = settings.hooks;
@@ -126,7 +138,7 @@ export function withoutHooks(original: JsonObject, opts: { statuslineCommand: st
       let touched = false;
       const kept = groups.flatMap((g: unknown) => {
         if (!isObject(g) || !Array.isArray(g.hooks)) return [g];
-        const rest = g.hooks.filter((h: unknown) => !isOurs(h));
+        const rest = g.hooks.filter((h: unknown) => ourHook(h, opts.configDir) === undefined);
         if (rest.length === g.hooks.length) return [g];
         touched = true;
         return rest.length === 0 ? [] : [{ ...g, hooks: rest }];
@@ -155,17 +167,20 @@ export interface HookFiles {
   orig: string;
   /** The settings file whose statusLine command `orig` holds. */
   owner: string;
-  /** `Authorization: Bearer <hookToken>` for curl's `-H @file`, so the token stays out of `ps`. */
+  /** `Authorization: Bearer <hookToken>` for curl's `-H @file`, so the token stays out of `ps` and settings.json. */
   header: string;
+  /** The PermissionRequest command: `hook.sh <name>` posts stdin to the bridge and prints its answer. */
+  hook: string;
 }
 
-/** The relay files of one Claude home: `statusline<suffix>.*` (no suffix for the primary home); `hook-header` is shared. */
+/** The relay files of one Claude home: `statusline<suffix>.*` (no suffix for the primary home); `hook-header` and `hook.sh` are shared. */
 export function hookFiles(configDir: string, suffix = ''): HookFiles {
   return {
     script: join(configDir, `statusline${suffix}.sh`),
     orig: join(configDir, `statusline${suffix}.orig`),
     owner: join(configDir, `statusline${suffix}.owner`),
     header: join(configDir, 'hook-header'),
+    hook: join(configDir, 'hook.sh'),
   };
 }
 
@@ -187,6 +202,23 @@ input=$(cat)
 printf '%s' "$input" | curl -s -m 1 -H @${shellQuote(files.header)} -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:${hookPort}/local/statusline >/dev/null 2>&1 &
 [ -s ${shellQuote(files.orig)} ] || exit 0
 printf '%s' "$input" | /bin/sh -c "$(cat ${shellQuote(files.orig)})"
+`;
+}
+
+/**
+ * `hook.sh <name>` posts the hook's JSON to `/hooks/<name>` and prints the answer, which Claude
+ * Code reads like an http hook's response body. When the bridge is stopped, refuses (-f) or
+ * times out it prints nothing and exits 0: no decision, so Claude Code shows its terminal dialog.
+ */
+export function hookScript(configDir: string, hookPort: number, timeoutSec: number): string {
+  const files = hookFiles(configDir);
+  return `#!/bin/sh
+# Generated by \`wristline-bridge hooks install\`; \`wristline-bridge hooks uninstall\` removes it.
+# Claude Code runs \`hook.sh <name>\` for a hook that must answer (PermissionRequest): it posts the
+# hook's JSON to the Wristline bridge with the token from ${basename(files.header)} and prints the answer.
+# On any failure it prints nothing and exits 0, so Claude Code carries on as without the hook.
+out=$(curl -sf -m ${timeoutSec} -H @${shellQuote(files.header)} -H 'Content-Type: application/json' --data-binary @- "http://127.0.0.1:${hookPort}/hooks/$1") || exit 0
+printf '%s' "$out"
 `;
 }
 
@@ -226,6 +258,7 @@ function render(settings: JsonObject): string {
 
 export interface InstallOptions extends HookSettings {
   settingsPath: string;
+  hookToken: string;
   /** Names this home's relay files (`statusline<suffix>.sh`); empty for the primary home. */
   suffix?: string;
 }
@@ -269,8 +302,8 @@ async function backup(configDir: string, text: string, now: Date): Promise<strin
   return path;
 }
 
-/** Atomic replace that follows a symlinked settings file and keeps its mode unless one is given. */
-async function replaceFile(path: string, text: string, mode?: number): Promise<void> {
+/** Atomic replace that follows a symlinked settings file and keeps its mode. */
+async function replaceFile(path: string, text: string): Promise<void> {
   let target = path;
   let kept = 0o644;
   try {
@@ -281,7 +314,7 @@ async function replaceFile(path: string, text: string, mode?: number): Promise<v
     await mkdir(dirname(path), { recursive: true });
   }
   const tmp = `${target}.wristline-${process.pid}.tmp`;
-  await writeFile(tmp, text, { mode: mode ?? kept });
+  await writeFile(tmp, text, { mode: kept });
   await rename(tmp, target);
 }
 
@@ -296,20 +329,17 @@ export async function applyInstall(plan: InstallPlan, opts: InstallOptions, now 
   const files = hookFiles(opts.configDir, opts.suffix);
   await mkdir(opts.configDir, { recursive: true, mode: 0o700 });
   await writePrivate(files.header, hookHeader(opts.hookToken), 0o600);
+  await writePrivate(files.hook, hookScript(opts.configDir, opts.hookPort, opts.permissionTimeoutSec), 0o700);
   await writePrivate(files.script, statuslineScript(opts.configDir, opts.hookPort, opts.suffix), 0o700);
   if (plan.statuslineOrig !== undefined) await writePrivate(files.orig, plan.statuslineOrig ?? '', 0o600);
   await writePrivate(files.owner, resolve(opts.settingsPath), 0o600);
-  // The settings file holds the hook token, so it is private like config.json.
-  if (plan.after === plan.before) {
-    await chmod(plan.path, 0o600);
-    return undefined;
-  }
+  if (plan.after === plan.before) return undefined;
   const saved = plan.before === undefined ? undefined : await backup(opts.configDir, plan.before, now);
-  await replaceFile(plan.path, plan.after, 0o600);
+  await replaceFile(plan.path, plan.after);
   return saved;
 }
 
-/** Removes this home's relay files; the shared header goes once no relay script of another home remains. */
+/** Removes this home's relay files; the shared header and hook.sh go once no relay script of another home remains. */
 export async function applyUninstall(change: SettingsChange, configDir: string, suffix = '', now = new Date()): Promise<string | undefined> {
   await assertUnchanged(change.path, change.before);
   let saved: string | undefined;
@@ -320,7 +350,7 @@ export async function applyUninstall(change: SettingsChange, configDir: string, 
   const files = hookFiles(configDir, suffix);
   await Promise.all([files.script, files.orig, files.owner].map((f) => rm(f, { force: true })));
   const left = await readdir(configDir).catch(() => []);
-  if (!left.some((name) => /^statusline.*\.sh$/.test(name))) await rm(files.header, { force: true });
+  if (!left.some((name) => /^statusline.*\.sh$/.test(name))) await Promise.all([files.header, files.hook].map((f) => rm(f, { force: true })));
   return saved;
 }
 
