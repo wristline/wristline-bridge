@@ -296,7 +296,10 @@ function recordingHub(): Hub & { requests: PendingRequest[]; resolved: string[];
     alerts,
     session: () => {},
     removed: () => {},
-    usage: (u) => usages.push(u),
+    usage: (u) => {
+      usages.push(u);
+      return true;
+    },
     liveUsage: (_provider, u) => void (u && usages.push(u)),
     login: () => {},
     alert: (sessionId, kind, text, title) => void alerts.push([sessionId, kind, text, title]),
@@ -543,7 +546,7 @@ test('codex provider: the daemon\'s live numbers replace what rollouts said of i
   const report = hub.usage.bind(hub);
   hub.usage = (u) => {
     reports.push([u.account?.id, u.windows.map((w) => w.usedPercent)]);
-    report(u);
+    return report(u);
   };
   t.after(() => {
     provider.stop();
@@ -569,23 +572,116 @@ test('codex provider: the daemon\'s live numbers replace what rollouts said of i
   assert.deepEqual(shown(), [[A, [['primary', 7, '2026-10-05T08:46:40.000Z'], ['secondary', 6, '2026-10-05T08:46:40.000Z']]]]);
 });
 
-test('codex provider: while the daemon serves another account than auth.json names, the home\'s timeline marks its login unknown until they agree', async (t) => {
+test('codex provider: while the daemon serves another account than auth.json names, the login stays unknown in the timeline through a restart, a lost connection and a stop, and its turns count for nobody; it is certain once they agree', async (t) => {
   const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
-  const limits = { limitId: 'codex', primary: { usedPercent: 2, windowDurationMins: 10080, resetsAt: null }, secondary: null };
-  const { rpc, home } = fakeRpc('disagree', { account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' }, accountId: A, rateLimits: limits });
-  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const limits = (usedPercent: number): unknown => ({ limitId: 'codex', primary: { usedPercent, windowDurationMins: 10080, resetsAt: null }, secondary: null });
+  const { rpc, home } = fakeRpc('disagree', { account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' }, accountId: A, rateLimits: limits(2) });
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
   writeFileSync(join(home, 'auth.json'), authJson(B, 'b@example.com')); // `codex login` as B; the daemon has not taken it up
+  // As the last run saved it: A, then unknown from when auth.json named B while the daemon served A.
+  const stored = [{ at: '2026-09-29T08:00:00.000Z', id: A }, { at: '2026-09-29T09:00:00.000Z', id: '' }];
   const saved: { at: string; id: string }[][] = [];
-  const provider = new CodexProvider({ home, historyDays: 3650, rpc, saveLogins: async (l) => void saved.push(l) });
-  t.after(() => provider.stop());
-  const ids = (): string[] => (saved.at(-1) ?? []).map((l) => l.id);
-  await provider.start(recordingHub());
-  await waitFor(() => ids().length === 2);
-  assert.deepEqual(ids(), [B, '']);
-  await rpc.request('fake/state', { account: { type: 'chatgpt', email: 'b@example.com', planType: 'plus' }, accountId: B });
+  const save = async (l: { at: string; id: string }[]): Promise<void> => void saved.push(l);
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, logins: stored, saveLogins: save });
+  const hub = new BridgeHub({ providers: [provider], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: () => {} });
+  const reads: (string | undefined)[] = [];
+  const liveUsage = hub.liveUsage.bind(hub);
+  hub.liveUsage = (p, u) => {
+    reads.push(u?.account?.id);
+    liveUsage(p, u);
+  };
+  t.after(() => {
+    provider.stop();
+    hub.close();
+  });
+  await provider.start(hub);
+  await waitFor(() => reads.includes(A));
+  // A turn the daemon ran since, in a thread B created earlier: A's numbers.
+  writeFileSync(join(day, 'rollout-2026-09-29T09-00-00-019a0000-0000-7000-8000-0000000000b1.jsonl'), limitsRollout('019a0000-0000-7000-8000-0000000000b1', B, new Date().toISOString(), 77, 1791279979));
+  await provider.refresh();
+  assert.deepEqual(hub.usageList(), [], 'no number of A under B (and A is not logged in here)');
+  // The connection is lost while the daemon runs on; it is back and read again.
+  await assert.rejects(rpc.request('fake/exit'), /closed/);
+  await waitFor(() => reads.filter((id) => id === A).length === 2);
+  await provider.refresh();
+  provider.stop();
+  assert.equal(saved.length, 0, 'not known at any point: nothing saved');
+
+  // Restarted once the daemon has taken up B.
+  const again = fakeRpc('disagree', { account: { type: 'chatgpt', email: 'b@example.com', planType: 'plus' }, accountId: B, rateLimits: limits(5) });
+  const restarted = new CodexProvider({ home, historyDays: 3650, rpc: again.rpc, logins: stored, saveLogins: save });
+  t.after(() => restarted.stop());
+  const started = Date.now();
+  await restarted.start(recordingHub());
+  await waitFor(() => saved.length === 1);
+  assert.deepEqual(saved[0]?.slice(0, 2), stored);
+  assert.equal(saved[0]?.[2]?.id, B);
+  assert.ok(Date.parse(saved[0]?.[2]?.at ?? '') >= started, 'from when the daemon was read');
+});
+
+test('codex provider: with no daemon running, or none taking the connection (a socket left behind), the login auth.json names is certain', async (t) => {
+  const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
+  const stored = [{ at: '2026-09-29T08:00:00.000Z', id: A }, { at: '2026-09-29T09:00:00.000Z', id: '' }];
+  for (const left of [false, true]) {
+    const { home } = fakeRpc(`absent-${left}`, {}, { socket: left });
+    mkdirSync(join(home, 'sessions'), { recursive: true });
+    writeFileSync(join(home, 'auth.json'), authJson(B, 'b@example.com'));
+    captureLog(t);
+    // A proxy that finds nothing listening exits before the WebSocket upgrade.
+    const rpc = new CodexRpc({ codexHome: home, clientVersion: '0.1.0', command: { file: process.execPath, args: ['-e', 'process.exit(1)'] }, retryMs: 50 });
+    const saved: { at: string; id: string }[][] = [];
+    const provider = new CodexProvider({ home, historyDays: 3650, rpc, logins: stored, saveLogins: async (l) => void saved.push(l) });
+    t.after(() => provider.stop());
+    await provider.start(recordingHub());
+    assert.equal(saved.length, 0, 'before the first look for the daemon');
+    await waitFor(() => rpc.absent);
+    await provider.refresh();
+    assert.deepEqual(saved.map((l) => l.map((e) => e.id)), [[A, '', B]]);
+    provider.stop();
+  }
+});
+
+test('codex provider: the hub holds the daemon\'s account while its login is re-read; a report it set aside (another home\'s rollout) is offered again once the hold ends', async (t) => {
+  const A = 'a1a1a1a1-0000-4000-8000-00000000000a';
+  const logins = [{ at: '2026-09-29T08:00:00.000Z', id: A }];
+  const OCT5 = 1791190000;
+  const { rpc, home, daemon } = fakeRpc('hold', {
+    account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' },
+    accountId: A,
+    rateLimits: { limitId: 'codex', primary: { usedPercent: 3, windowDurationMins: 10080, resetsAt: OCT5 }, secondary: null },
+  });
+  writeFileSync(join(home, 'auth.json'), authJson(A, 'a@example.com'));
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const other = join(root, 'hold-other');
+  const otherDay = join(other, 'sessions', '2026', '09', '29');
+  mkdirSync(otherDay, { recursive: true });
+  writeFileSync(join(other, 'auth.json'), authJson(A, 'a@example.com'));
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, logins });
+  const second = new CodexProvider({ home: other, historyDays: 3650, logins });
+  const hub = new BridgeHub({ providers: [provider, second], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: () => {} });
+  t.after(() => {
+    provider.stop();
+    second.stop();
+    hub.close();
+  });
+  const shown = (): unknown[] => hub.usageList().map((u) => [u.account?.id, u.windows.map((w) => w.usedPercent)]);
+  const showing = (expected: unknown[]): Promise<true> => waitFor(() => JSON.stringify(shown()) === JSON.stringify(expected) || undefined);
+  await provider.start(hub);
+  await second.start(hub);
+  await showing([[A, [3]]]);
+  // The daemon's login is re-read slowly; meanwhile the other home writes a newer snapshot of A, far from the live window.
+  await rpc.request('fake/state', { accountDelayMs: 300 });
   await rpc.request('fake/notify', { method: 'account/updated', params: { authMode: 'chatgpt' } });
-  await waitFor(() => ids().length === 3);
-  assert.deepEqual(ids(), [B, '', B]);
+  writeFileSync(join(otherDay, 'rollout-2026-09-29T09-00-00-019a0000-0000-7000-8000-0000000000a1.jsonl'), limitsRollout('019a0000-0000-7000-8000-0000000000a1', A, new Date(Date.now() + 3600_000).toISOString(), 9, 1791279979));
+  await second.refresh();
+  assert.deepEqual(shown(), [[A, [3]]], 'still held during the re-read: nothing merged in');
+  // The daemon goes away: the hold ends, and the set-aside snapshot comes in at the other home's next refresh.
+  daemon(undefined);
+  await assert.rejects(rpc.request('fake/exit'), /closed/);
+  await waitFor(() => provider.health().detail !== 'app-server connected');
+  await second.refresh();
+  assert.deepEqual(shown(), [[A, [9]]]);
 });
 
 test('codex provider: a failed rate-limit read is retried on the next update, the usage label follows a later-learned email, and only the newest login read applies', async (t) => {

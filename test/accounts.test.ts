@@ -144,26 +144,50 @@ test('readCodexLogin: only the account id and email leave auth.json; API-key, mi
   await assert.rejects(readCodexLogin(home), /not valid JSON/);
 });
 
-test('codex login timeline: a login is noted when first seen and saved, a repeat is not; loginAt is the login in effect, none before the first one seen or while unknown', () => {
+test('codex login timeline: a login is noted when first seen and saved, a repeat only now and then as still seen; loginAt is the login in effect, none before the first one seen or while unknown', () => {
   const saved: unknown[] = [];
   const accounts = new CodexAccounts({ saveLogins: async (logins) => void saved.push(logins) });
   const t = (hm: string): number => Date.parse(`2026-09-29T${hm}:00.000Z`);
   accounts.noteLogin('', t('08:00')); // Nothing known yet: an unknown start is no entry.
   accounts.noteLogin('A', t('09:00'));
-  accounts.noteLogin('A', t('09:10'));
+  accounts.noteLogin('A', t('09:05'));
+  accounts.noteLogin('A', t('09:10')); // Ten minutes on: saved as still seen.
   accounts.noteLogin('', t('09:20')); // E.g. the daemon still serves A after auth.json switched to B.
+  accounts.noteLogin('', t('09:25'));
   accounts.noteLogin('B', t('09:30'));
+  const a = { at: '2026-09-29T09:00:00.000Z', id: 'A' };
+  const seen = { ...a, seen: '2026-09-29T09:10:00.000Z' };
   assert.deepEqual(saved, [
-    [{ at: '2026-09-29T09:00:00.000Z', id: 'A' }],
-    [{ at: '2026-09-29T09:00:00.000Z', id: 'A' }, { at: '2026-09-29T09:20:00.000Z', id: '' }],
-    [{ at: '2026-09-29T09:00:00.000Z', id: 'A' }, { at: '2026-09-29T09:20:00.000Z', id: '' }, { at: '2026-09-29T09:30:00.000Z', id: 'B' }],
+    [a],
+    [seen],
+    [seen, { at: '2026-09-29T09:20:00.000Z', id: '' }],
+    [seen, { at: '2026-09-29T09:20:00.000Z', id: '' }, { at: '2026-09-29T09:30:00.000Z', id: 'B' }],
   ]);
   assert.deepEqual(['08:59', '09:00', '09:19', '09:25', '09:30', '23:00'].map((hm) => accounts.loginAt(t(hm))), [undefined, 'A', 'A', undefined, 'B', 'B']);
-  // A timeline saved by an earlier run goes on from its newest login.
-  const restarted = new CodexAccounts({ logins: [{ at: '2026-09-29T09:30:00.000Z', id: 'B' }], saveLogins: async (logins) => void saved.push(logins) });
-  restarted.noteLogin('B', t('10:00'));
-  assert.equal(saved.length, 3);
-  assert.equal(restarted.loginAt(t('09:29')), undefined);
+});
+
+test('codex login timeline after a restart: the same login goes on; another one changed while the bridge was not running, so the login is unknown from when the saved one was last seen', () => {
+  const t = (hm: string): number => Date.parse(`2026-09-29T${hm}:00.000Z`);
+  const b = { at: '2026-09-29T09:30:00.000Z', id: 'B', seen: '2026-09-29T09:50:00.000Z' };
+  const run = (logins: { at: string; id: string; seen?: string }[], ...noted: [string, string][]): { saved: unknown[]; accounts: CodexAccounts } => {
+    const saved: unknown[] = [];
+    const accounts = new CodexAccounts({ logins, saveLogins: async (l) => void saved.push(l) });
+    for (const [id, hm] of noted) accounts.noteLogin(id, t(hm));
+    return { saved, accounts };
+  };
+  const same = run([b], ['B', '09:55'], ['B', '10:00']);
+  assert.deepEqual(same.saved, [[{ ...b, seen: '2026-09-29T10:00:00.000Z' }]]);
+  assert.equal(same.accounts.loginAt(t('09:29')), undefined);
+  const other = run([b], ['A', '10:00'], ['B', '10:05']);
+  assert.deepEqual(other.saved.at(0), [b, { at: '2026-09-29T09:50:00.000Z', id: '' }, { at: '2026-09-29T10:00:00.000Z', id: 'A' }]);
+  assert.deepEqual(['09:49', '09:50', '09:59', '10:00', '10:05'].map((hm) => other.accounts.loginAt(t(hm))), ['B', undefined, undefined, 'A', 'B'], 'a later change is seen when it happens');
+  // Not known at the start either (the daemon's login is not read yet): one unknown entry, from when B was last seen.
+  assert.deepEqual(run([b], ['', '10:00']).saved, [[b, { at: '2026-09-29T09:50:00.000Z', id: '' }]]);
+  // Saved before `seen` existed: from its own time on.
+  const old = { at: b.at, id: b.id };
+  assert.deepEqual(run([old], ['A', '10:00']).saved, [[old, { at: '2026-09-29T09:30:00.000Z', id: '' }, { at: '2026-09-29T10:00:00.000Z', id: 'A' }]]);
+  // Unknown already: nothing to add before the login.
+  assert.deepEqual(run([b, { at: '2026-09-29T09:40:00.000Z', id: '' }], ['A', '10:00']).saved, [[b, { at: '2026-09-29T09:40:00.000Z', id: '' }, { at: '2026-09-29T10:00:00.000Z', id: 'A' }]]);
 });
 
 test('account labels: an id named like an Object.prototype member gets a string label, never the prototype function', () => {

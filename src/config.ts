@@ -37,6 +37,8 @@ export interface LoginEntry {
 export interface CodexLoginEntry {
   at: string;
   id: string;
+  /** On the newest entry: the last time (saved every few minutes) the bridge saw it still current. */
+  seen?: string;
 }
 
 export interface Config {
@@ -241,7 +243,7 @@ function isLoginEntry(value: unknown): value is LoginEntry {
 }
 
 function isCodexLoginEntry(value: unknown): value is CodexLoginEntry {
-  return isObject(value) && typeof value.at === 'string' && typeof value.id === 'string';
+  return isObject(value) && typeof value.at === 'string' && typeof value.id === 'string' && (value.seen === undefined || typeof value.seen === 'string');
 }
 
 /** Keeps the keys whose value `pick` accepts. */

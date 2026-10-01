@@ -207,6 +207,7 @@ export class CodexProvider implements SessionProvider {
     await this.#indexTail.sync();
     // Before the scan: a snapshot written from now on counts for the login read here.
     if (await this.#accounts.poll(this.home)) this.#reportLogin();
+    this.#noteLogin();
     const now = this.#now();
 
     const cutoff = now - this.#historyDays * DAY_MS;
@@ -223,9 +224,11 @@ export class CodexProvider implements SessionProvider {
     const paths = new Set([...this.#files.values()].flatMap((f) => [f, ...f.previous].map((x) => x.path)));
     for (const path of this.#starts.keys()) if (!paths.has(path)) this.#starts.delete(path);
 
-    // The newest rate-limit snapshot per account: the home's login when the snapshot was written, not
-    // the thread's creator (a thread goes on under whatever login the home has later). A snapshot from
-    // before the first login the bridge saw here, or while the login was not certain, counts for nobody.
+    // The newest rate-limit snapshot per account. A snapshot counts for the home's login when it was
+    // written, and only in a thread that account created (or one that names no creator): a thread goes
+    // on under whatever login the home has later, and a process keeps the login it started with, so a
+    // snapshot in another account's thread is of either. A snapshot from before the first login the
+    // bridge saw here, or while the login was not certain, counts for nobody.
     const latest = new Map<string, NonNullable<CodexMetaScan['rateLimits']>>();
     this.#version = undefined;
     for (const [id, file] of recent) {
@@ -233,36 +236,53 @@ export class CodexProvider implements SessionProvider {
       if (meta.subagent) continue;
       this.#version ??= meta.version;
       const key = meta.rateLimits && this.#accounts.loginAt(Date.parse(meta.rateLimits.at));
-      if (key && meta.rateLimits && (latest.get(key)?.at ?? '') < meta.rateLimits.at) latest.set(key, meta.rateLimits);
+      if (!key || !meta.rateLimits || (meta.accountId !== undefined && meta.accountId !== key)) continue;
+      if ((latest.get(key)?.at ?? '') < meta.rateLimits.at) latest.set(key, meta.rateLimits);
     }
     this.#recent = recent;
     this.#publish();
 
     // The daemon's numbers are live for its own account; rollouts fill in the others and while it is not connected.
+    // A report the hub sets aside (another home's daemon holds the account) is offered again at the next refresh.
     const daemonKey = this.#daemonLimits ? (this.#daemonAccount ?? '') : undefined;
     for (const [key, limits] of latest) {
       if (key === daemonKey || limits.at <= (this.#usage.get(key)?.updatedAt ?? '')) continue;
       const usage = usageOf(limits.snapshot, limits.at, this.#accounts.account(key));
-      this.#usage.set(key, usage);
-      this.#hub?.usage(usage);
+      if (this.#hub?.usage(usage) !== false) this.#usage.set(key, usage);
     }
     this.#rejoin();
   }
 
-  /**
-   * The home's login for the hub: the one `auth.json` names; without the file (logged out, or the
-   * credentials are kept in the OS keyring), the daemon's while it is connected and has said whose
-   * limits it sends.
-   */
   #reportLogin(): void {
+    this.#hub?.login(this, this.#login());
+  }
+
+  /**
+   * The home's login: the one `auth.json` names; without the file (logged out, or the credentials
+   * are kept in the OS keyring), the daemon's while it is connected and has said whose limits it sends.
+   */
+  #login(): string | undefined {
     const file = this.#accounts.current;
-    const login = file === null ? (this.#daemonAccount ?? undefined) : file;
-    this.#hub?.login(this, login);
-    // The timeline rollout snapshots are attributed by. While the daemon serves another account than
-    // `auth.json` names (it has not taken up a new login yet), its turns record that account's numbers:
-    // whose login a snapshot was written under is not known then.
+    return file === null ? (this.#daemonAccount ?? undefined) : file;
+  }
+
+  /**
+   * Notes the home's login in the timeline rollout snapshots are attributed by. Besides processes
+   * started since, the daemon writes rollouts, under the login it started with: it takes up a new
+   * `codex login` only when it restarts. So the login is certain while the daemon serves it, while
+   * no daemon runs, and without a daemon connection (read-only); while the daemon serves another
+   * account it is not known. While the daemon's login is not known (connecting, being re-read, the
+   * connection lost, the bridge stopping), only a login the timeline already has stays certain.
+   */
+  #noteLogin(): void {
+    const login = this.#login();
+    if (login === undefined) return;
     const daemon = this.#daemonAccount;
-    if (login !== undefined) this.#accounts.noteLogin(daemon === undefined || daemon === login ? login : '', this.#now());
+    let id: string;
+    if (daemon !== undefined) id = daemon === login ? login : '';
+    else if (!this.#rpc || this.#rpc.absent) id = login;
+    else id = this.#accounts.newestLogin === login ? login : '';
+    this.#accounts.noteLogin(id, this.#now());
   }
 
   /** A thread created by a TUI has no rollout until its first turn, so rejoining waits for it. */
@@ -398,22 +418,27 @@ export class CodexProvider implements SessionProvider {
   /**
    * Re-reads the daemon's login and its full limits. Meanwhile the login is unknown, so a sparse
    * `account/rateLimits/updated` that arrives cannot be attributed and is dropped; the full
-   * snapshot read here carries its numbers again. Reads overlap when `account/updated` arrives
-   * while connecting; only the newest one applies.
+   * snapshot read here carries its numbers again. The hub keeps holding the entry of the account
+   * the daemon served until the read tells whose limits it sends now, or fails. Reads overlap when
+   * `account/updated` arrives while connecting; only the newest one applies.
    */
   async #syncAccount(): Promise<void> {
     if (!this.#rpc) return;
     const gen = ++this.#syncGen;
     this.#daemonAccount = undefined;
     this.#daemonLimits = undefined;
-    this.#hub?.liveUsage(this, undefined);
     this.#syncing++;
     try {
       const daemon = await this.#accounts.daemon(this.#rpc);
-      if (gen !== this.#syncGen || !daemon) return; // Superseded, or failed: the next update triggers another read.
-      this.#daemonAccount = daemon.accountId;
-      this.#reportLogin();
-      this.#limits(daemon.rateLimits);
+      if (gen !== this.#syncGen) return; // Superseded.
+      if (daemon) {
+        this.#daemonAccount = daemon.accountId;
+        this.#reportLogin();
+        this.#noteLogin();
+        this.#limits(daemon.rateLimits);
+      }
+      // Failed (the next update triggers another read), or no plan limits came with it: nothing is live meanwhile.
+      if (!this.#daemonLimits) this.#hub?.liveUsage(this, undefined);
     } finally {
       this.#syncing--;
     }

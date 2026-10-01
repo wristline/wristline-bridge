@@ -114,12 +114,19 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   Codex numbers come from a home's app-server daemon while it is connected: they are the daemon's
   account's and replace that entry as they are, without merging (a window of an older report with
   a later `resetsAt` does not survive), and while the daemon stays connected no rollout of any home
-  changes the entry. Otherwise they come from the newest rollout `token_count` snapshot written
-  under that account: a snapshot counts for the account the home was logged into when it was
-  written, not for the thread's creator (a thread goes on after its home switched accounts). The
-  bridge keeps a timeline of each Codex home's logins (`codexLogins` in `config.json`: account ids
-  and when each was first seen). A snapshot from before the first login the bridge saw in the home,
-  or from while the daemon served another account than `auth.json` named, counts for no account.
+  changes the entry, also while the bridge re-reads the daemon's login; only a read of its limits
+  that fails (or brings none) ends that. Otherwise they come from the newest rollout `token_count`
+  snapshot written under that account: a snapshot counts for the account the home was logged into
+  when it was written, and only in a thread that account created (or one that names no creator).
+  A thread goes on after its home switched accounts, and a process keeps the login it started with,
+  so a snapshot in another account's thread may be of either and counts for no account. The bridge
+  keeps a timeline of each Codex home's logins (`codexLogins` in `config.json`: account ids, when
+  each was first seen, and when the newest was last seen). The login counts as not known while the
+  daemon serves another account than `auth.json` names, and, while the daemon's login is not known
+  (connecting, a lost connection), from a change of `auth.json` on until the daemon is read or no
+  daemon runs. A login that changed while the bridge was not running counts as not known from when
+  the old one was last seen. A snapshot from before the first login the bridge saw in the home, or
+  from while the login was not known, counts for no account.
   Only accounts logged in now are sent. An entry with an `account` is in `GET /api/usage`, the
   `snapshot` and `usage` events only while that account is the current login of one of its
   provider's homes (Claude Code: `oauthAccount` of the home's `.claude.json`; Codex: the ChatGPT

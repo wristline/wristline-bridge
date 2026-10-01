@@ -200,8 +200,9 @@ For threads the daemon has loaded — a `codex` TUI in daemon mode, or other cli
 - **Prompts** from the watch start a turn (`turn/start`) and show in the TUI like typed ones.
   Refused with `busy` while a turn runs and `awaiting_input` while an approval is open.
 - **Plan usage** (`primary`/`secondary` windows) comes from the daemon while it is connected, as
-  it reports it for its account (nothing from rollouts is mixed in); without it, from the newest
-  rollout snapshot written while that account was the home's login (see Accounts).
+  it reports it for its account (nothing from rollouts is mixed in, unless a read of its limits
+  fails); without it, from the newest rollout snapshot written while that account was the home's
+  login, in a thread it created (see Accounts).
 
 Limits:
 
@@ -291,11 +292,13 @@ recognised: its relay entry is replaced rather than saved as your original statu
 
 Sessions and plan usage then carry `account` (id and label). For Codex a thread belongs to the
 account that created it (its rollout records it), and the daemon reports whose limits it sends.
-A thread can go on after the home switched accounts, so a rollout's rate-limit snapshots count for
-the account the home was logged into when each was written: the bridge keeps a timeline of each
-Codex home's logins (`codexLogins` in `config.json`; account ids and when each was first seen).
-Snapshots from before the first login it saw there, or from while the daemon still served another
-account than `auth.json` named, count for no account. For Claude Code
+A thread can go on after the home switched accounts, and a running `codex` keeps the login it
+started with, so a rollout's rate-limit snapshot counts for the account the home was logged into
+when it was written, and only in a thread of that account: the bridge keeps a timeline of each
+Codex home's logins (`codexLogins` in `config.json`; account ids, when each was first seen and
+when the newest was last seen). Snapshots from before the first login it saw there, from while the
+daemon still served another account than `auth.json` named (or could not be asked), or from a
+login change while the bridge was not running, count for no account. For Claude Code
 the bridge keeps a timeline of which account each home was logged into (`claudeLogins` in
 `config.json`; ids and emails only) and attributes a session to the login in effect at its last
 activity; a session whose status line the bridge has seen since its process started is attributed

@@ -72,7 +72,10 @@ export function recordingHub(): Hub & { sessions: Session[]; usages: Usage[]; lo
     resolved,
     session: (s) => sessions.push(s),
     removed: (id) => removedIds.push(id),
-    usage: (u) => usages.push(u),
+    usage: (u) => {
+      usages.push(u);
+      return true;
+    },
     liveUsage: (_provider, u) => void (u && usages.push(u)),
     login: (_provider, id) => logins.push(id ?? null),
     alert: () => {},

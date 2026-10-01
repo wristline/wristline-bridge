@@ -170,7 +170,8 @@ test('codex: rollouts with index titles, sub-agents hidden, threads labelled by 
     await provider.refresh();
     assert.equal(hub.usages.length, 2, 'unchanged snapshots are not re-published');
     assert.deepEqual(hub.logins, [CODEX_B], 'the home\'s login, reported when auth.json was read');
-    assert.deepEqual(savedLogins, [], 'the newest login of the timeline already: nothing to save');
+    const entries = (savedLogins as { at: string; id: string }[][]).map((l) => l.map(({ at, id }) => ({ at, id })));
+    assert.deepEqual(entries, [CODEX_LOGINS], 'the newest login of the timeline already: only saved as still seen');
     const page = await provider.readItems(id, undefined, 40);
     assert.equal(page?.items.length, 6);
   } finally {
@@ -207,7 +208,7 @@ test('codex: only the usage of the home\'s current login reaches the watch; the 
   }
 });
 
-test('codex: a thread created by A whose turns ran after the home switched to B counts for B, never A; a snapshot from before the first login seen counts for nobody; the timeline survives a restart', async () => {
+test('codex: a snapshot counts for the login in effect when it was written, in a thread of that account only: a thread A created that ran on after the switch to B counts for nobody, never A; a snapshot from before the first login seen neither; the timeline survives a restart', async () => {
   const home = join(root, 'codex-timeline');
   const auth = join(home, 'auth.json');
   mkdirSync(home, { recursive: true });
@@ -226,23 +227,45 @@ test('codex: a thread created by A whose turns ran after the home switched to B 
   ];
   assert.deepEqual(saved, [timeline.slice(0, 1), timeline], 'each login with the time it was first seen; no token or email');
 
-  // The rollouts the restarted bridge finds. All three threads were created by A.
+  // The rollouts the restarted bridge finds.
   const day = join(home, 'sessions', '2026', '09', '29');
   mkdirSync(day, { recursive: true });
-  const [switched, before, early] = ['019a0000-0000-7000-8000-0000000000f1', '019a0000-0000-7000-8000-0000000000f2', '019a0000-0000-7000-8000-0000000000f3'];
-  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${switched}.jsonl`), codexRollout(switched, CODEX_A, 55, '2026-09-29T09:40:00.000Z')); // B's numbers
+  const [switched, mine, before, early] = ['019a0000-0000-7000-8000-0000000000f1', '019a0000-0000-7000-8000-0000000000f4', '019a0000-0000-7000-8000-0000000000f2', '019a0000-0000-7000-8000-0000000000f3'];
+  // A's thread, resumed under B (B's numbers) or run on by a process still logged in as A (A's): whose is not certain.
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${switched}.jsonl`), codexRollout(switched, CODEX_A, 55, '2026-09-29T09:45:00.000Z'));
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${mine}.jsonl`), codexRollout(mine, CODEX_B, 33, '2026-09-29T09:40:00.000Z'));
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${before}.jsonl`), codexRollout(before, CODEX_A, 20, '2026-09-29T09:20:00.000Z'));
   writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${early}.jsonl`), codexRollout(early, CODEX_A, 90, '2026-09-29T08:30:00.000Z'));
-  const restarted = new CodexProvider({ home, historyDays: 3650, logins: saved.at(-1) as typeof timeline, saveLogins: async (l) => void saved.push(l) });
+  now = Date.parse('2026-09-29T10:00:00.000Z');
+  const restarted = new CodexProvider({ home, historyDays: 3650, now: () => now, logins: saved.at(-1) as typeof timeline, saveLogins: async (l) => void saved.push(l) });
   const hub = recordingHub();
   await restarted.start(hub);
   restarted.stop();
-  assert.equal(saved.length, 2, 'the same login after the restart is no new entry');
+  assert.deepEqual(saved.slice(2), [[timeline[0], { ...timeline[1], seen: '2026-09-29T10:00:00.000Z' }]], 'the same login after the restart is no new entry, only seen again');
   assert.deepEqual(hub.usages.map((u) => [u.account?.id, u.windows.map((w) => w.usedPercent)]).sort(), [
     [CODEX_A, [20]],
-    [CODEX_B, [55]],
+    [CODEX_B, [33]],
   ]);
   assert.equal(restarted.listSessions().find((s) => s.id === `codex:${switched}`)?.account?.id, CODEX_A, 'the thread keeps its creator');
+});
+
+test('codex: a login that changed while the bridge was not running counts for nobody from when the old one was last seen until the bridge saw the new one', async () => {
+  const home = join(root, 'codex-downtime');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  writeFileSync(join(home, 'auth.json'), codexAuth(CODEX_B, 'b@example.com')); // `codex login` as B at some time after 09:20
+  const stored = [{ at: '2026-09-29T09:00:00.000Z', id: CODEX_A, seen: '2026-09-29T09:20:00.000Z' }];
+  const [resumed, fresh, old] = ['019a0000-0000-7000-8000-0000000000c1', '019a0000-0000-7000-8000-0000000000c2', '019a0000-0000-7000-8000-0000000000c3'];
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${resumed}.jsonl`), codexRollout(resumed, CODEX_A, 66, '2026-09-29T09:40:00.000Z')); // A's thread, resumed under B
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${fresh}.jsonl`), codexRollout(fresh, CODEX_B, 44, '2026-09-29T09:50:00.000Z'));
+  writeFileSync(join(day, `rollout-2026-09-29T09-10-00-${old}.jsonl`), codexRollout(old, CODEX_A, 15, '2026-09-29T09:15:00.000Z'));
+  const saved: unknown[] = [];
+  const provider = new CodexProvider({ home, historyDays: 3650, now: () => Date.parse('2026-09-29T10:00:00.000Z'), logins: stored, saveLogins: async (l) => void saved.push(l) });
+  const hub = recordingHub();
+  await provider.start(hub);
+  provider.stop();
+  assert.deepEqual(saved, [[stored[0], { at: '2026-09-29T09:20:00.000Z', id: '' }, { at: '2026-09-29T10:00:00.000Z', id: CODEX_B }]]);
+  assert.deepEqual(hub.usages.map((u) => [u.account?.id, u.windows.map((w) => w.usedPercent)]), [[CODEX_A, [15]]]);
 });
 
 test('codex: a half-written auth.json keeps the current login; a first read that fails shows no account until the file can be read (a chmod is noticed)', async (t) => {

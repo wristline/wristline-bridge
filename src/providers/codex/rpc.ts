@@ -188,6 +188,7 @@ export class CodexRpc extends EventEmitter {
   #watcher: FSWatcher | undefined;
   /** Identity of the socket behind the control symlink at the last look; undefined while there is none. */
   #target: string | undefined;
+  #absent = false;
   #detail = 'app-server connecting';
 
   constructor(options: RpcOptions) {
@@ -200,6 +201,15 @@ export class CodexRpc extends EventEmitter {
 
   get ready(): boolean {
     return this.#ready;
+  }
+
+  /**
+   * Whether the last attempt found no daemon to talk to: no control socket, or a proxy that could not
+   * reach it (exited before the handshake). False before the first attempt, while connecting or
+   * connected, after a lost connection until the next attempt, and when the proxy cannot be run.
+   */
+  get absent(): boolean {
+    return this.#absent;
   }
 
   /** Human-readable connection state for `/api/health`. */
@@ -251,6 +261,7 @@ export class CodexRpc extends EventEmitter {
     try {
       this.#watchSocket();
       this.#target = await this.#readTarget();
+      this.#absent = this.#target === undefined;
       if (this.#target === undefined) {
         // No daemon: look again later, without spawning anything.
         this.#setDetail('app-server reconnecting (not running); read-only');
@@ -290,10 +301,16 @@ export class CodexRpc extends EventEmitter {
 
     const ws = new WebSocket('ws://localhost/', { createConnection: () => stdioSocket(child) as unknown as Socket });
     this.#ws = ws;
+    let opened = false;
     ws.on('message', (data: RawData) => this.#receive(data.toString()));
     ws.on('error', () => {}); // Followed by 'close'.
-    ws.on('close', () => this.#lost(child));
+    ws.on('close', () => {
+      // Closed before the upgrade (it comes before the proxy's exit): no daemon took the connection.
+      if (this.#child === child && !opened) this.#absent = true;
+      this.#lost(child);
+    });
     ws.on('open', () => {
+      opened = true;
       this.#handshake().catch((err: unknown) => {
         this.#setDetail(`app-server reconnecting (handshake failed: ${err instanceof Error ? err.message : String(err)}); read-only`);
         this.#lost(child);

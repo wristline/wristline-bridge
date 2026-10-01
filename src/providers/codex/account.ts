@@ -12,6 +12,8 @@ import type { CodexRpc } from './rpc.ts';
 const AUTH_CLAIM = 'https://api.openai.com/auth';
 /** Logins remembered per home; older ones are forgotten (as Claude Code's). */
 const LOGINS_MAX = 20;
+/** How often the newest login's `seen` time is saved while it stays current. */
+const SEEN_SAVE_MS = 10 * 60_000;
 
 /** The home's ChatGPT login, or undefined when logged out (no `auth.json`) or using an API key. Rejects when `auth.json` cannot be read or is not JSON. */
 export async function readCodexLogin(home: string): Promise<Account | undefined> {
@@ -70,6 +72,8 @@ export class CodexAccounts {
   readonly #saveLogins: ((logins: CodexLoginEntry[]) => Promise<void>) | undefined;
   #accounts: Record<string, string>;
   #logins: CodexLoginEntry[];
+  /** Whether a login has been noted since the timeline was loaded. */
+  #noted = false;
   /** mtime, ctime and size of `auth.json` as last read; it is re-read only when these change. */
   #authStat: string | undefined;
   #current: string | undefined | null = null;
@@ -97,12 +101,33 @@ export class CodexAccounts {
 
   /**
    * Records `id` as the home's login from `now` on when it differs from the newest one observed
-   * (`''`: not known for certain from then on).
+   * (`''`: not known for certain from then on); while it stays the same, saves now and then that it
+   * was still seen. The first login noted after a (re)start that differs from the saved newest one
+   * changed while the bridge was not running, at a time it cannot know: from when that one was last
+   * seen, the login counts as not known.
    */
   noteLogin(id: string, now: number): void {
-    if ((this.#logins.at(-1)?.id ?? '') === id) return;
-    this.#logins = [...this.#logins, { at: new Date(now).toISOString(), id }].slice(-LOGINS_MAX);
+    const first = !this.#noted;
+    this.#noted = true;
+    const last = this.#logins.at(-1);
+    const at = new Date(now).toISOString();
+    let logins: CodexLoginEntry[];
+    if ((last?.id ?? '') === id) {
+      if (!last || !id || now - Date.parse(last.seen ?? last.at) < SEEN_SAVE_MS) return;
+      logins = [...this.#logins.slice(0, -1), { ...last, seen: at }];
+    } else {
+      logins = [...this.#logins];
+      const gap = first && last?.id ? { at: last.seen ?? last.at, id: '' } : undefined;
+      if (gap) logins.push(gap);
+      if (id || !gap) logins.push({ at, id });
+    }
+    this.#logins = logins.slice(-LOGINS_MAX);
     this.#saveLogins?.(this.#logins).catch((err: unknown) => console.error('wristline: codex: saving logins failed:', err));
+  }
+
+  /** The newest login of the timeline (`''`: not known for certain), undefined while it is empty. */
+  get newestLogin(): string | undefined {
+    return this.#logins.at(-1)?.id;
   }
 
   /**

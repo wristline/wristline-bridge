@@ -210,10 +210,11 @@ export class BridgeHub implements Hub {
     this.#broadcast({ type: 'session_removed', sessionId }, waited);
   }
 
-  usage(usage: Usage): void {
+  usage(usage: Usage): boolean {
     // A connected daemon's numbers are its account's: a rollout (of any home) neither replaces nor merges into them.
-    if ([...this.#live.values()].includes(usageKey(usage))) return;
+    if ([...this.#live.values()].includes(usageKey(usage))) return false;
     this.#report(usage, false);
+    return true;
   }
 
   liveUsage(provider: SessionProvider, usage: Usage | undefined): void {

@@ -312,8 +312,9 @@ test('live usage (a connected daemon) replaces its entry, a stale window with a 
     hub.usage({ ...report('2026-09-29T09:00:00.000Z', 4, OCT6), windows: [{ id: 'primary', usedPercent: 4, resetsAt: OCT6 }, { id: 'secondary', usedPercent: 40 }] });
     hub.liveUsage(home1, report('2026-09-29T09:59:00.000Z', 0, OCT5));
     assert.deepEqual(shown(), [['acc-a', [['primary', 0, OCT5]]]], 'replaced, not merged: no later reset time or omitted window survives');
-    hub.usage(report('2026-09-29T09:59:30.000Z', 9, OCT6));
+    assert.equal(hub.usage(report('2026-09-29T09:59:30.000Z', 9, OCT6)), false, 'set aside: to be offered again');
     assert.deepEqual(shown(), [['acc-a', [['primary', 0, OCT5]]]], 'a newer rollout of the held account is ignored');
+    assert.equal(hub.usage(report('2026-09-29T09:59:30.000Z', 9, OCT6, b)), true);
     hub.liveUsage(home2, report('2026-09-29T09:59:40.000Z', 1, OCT5));
     hub.liveUsage(home1, report('2026-09-29T09:59:50.000Z', 2, OCT5, b)); // home1's daemon now serves B: home2 still holds A
     hub.usage(report('2026-09-29T09:59:55.000Z', 9, OCT6));

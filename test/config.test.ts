@@ -84,7 +84,7 @@ test('claudeHomes/codexHomes: primary first, extras resolved and deduplicated (s
 test('account lists round-trip through config.json; malformed shapes are dropped', async () => {
   const dir = join(root, 'accounts');
   const claudeLogins = { '/home/u/.claude': [{ at: '2026-09-30T01:00:00.000Z', id: 'acc-a', label: 'a@example.com' }] };
-  const codexLogins = { '/home/u/.codex': [{ at: '2026-09-30T01:00:00.000Z', id: 'acc-x' }, { at: '2026-09-30T02:00:00.000Z', id: '' }] };
+  const codexLogins = { '/home/u/.codex': [{ at: '2026-09-30T01:00:00.000Z', id: 'acc-x' }, { at: '2026-09-30T02:00:00.000Z', id: '' }, { at: '2026-09-30T03:00:00.000Z', id: 'acc-y', seen: '2026-09-30T04:00:00.000Z' }] };
   const stored = { extraClaudeHomes: ['/home/u/.claude-school'], extraCodexHomes: [], claudeLogins, codexLogins, codexAccounts: { 'acc-x': 'x@example.com' }, labels: { 'acc-a': 'me' } };
   await updateStored(dir, stored);
   assert.deepEqual(await readStored(dir), stored);
@@ -94,7 +94,7 @@ test('account lists round-trip through config.json; malformed shapes are dropped
       extraClaudeHomes: ['/ok', 1, null],
       extraCodexHomes: 'no',
       claudeLogins: { '/ok': [{ at: 't', id: 'i', label: 'l' }, { at: 1, id: 'i', label: 'l' }, 'x'], '/bad': 'no' },
-      codexLogins: { '/ok': [{ at: 't', id: 'i' }, { at: 't' }, null], '/bad': {} },
+      codexLogins: { '/ok': [{ at: 't', id: 'i' }, { at: 't' }, null, { at: 't', id: 'j', seen: 1 }], '/bad': {} },
       codexAccounts: { ok: 'e', bad: 1 },
       labels: ['x'],
     }),
