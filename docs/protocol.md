@@ -337,12 +337,15 @@ listed session (Quick Asks and sub-agents excluded):
   is a limit (e.g. "You've hit your usage limit. … try again at Sep 25th, 2026 1:21 PM." or "Your
   workspace is out of credits. …"). The error has no reset field; the rate-limit snapshots written
   just before it (`token_count.rate_limits`) give one, in this order: the latest `resets_at` of the
-  windows at 100% (also when the snapshot's `rate_limit_reached_type` says credits ran out, e.g.
-  `workspace_owner_credits_depleted`: Codex says so too when a plan's weekly window is used up);
-  else the time in the message (in the bridge machine's zone); else, when `rate_limit_reached_type`
-  names credits, `limitKind: "credits"` and no `resetsAt`; else the `resets_at` of the fullest
-  window at 95% or more, with `resetsEstimated: true`; else none. Every other limit is `limitKind:
-  "window"`.
+  windows at 100%; else the time in the message (in the bridge machine's zone); else, when
+  `rate_limit_reached_type` names credits and the rollout has no snapshot with windows,
+  `limitKind: "credits"` and no `resetsAt`; else the `resets_at` of the fullest window at 95% or
+  more, with `resetsEstimated: true`; else none. Every other limit is `limitKind: "window"`. A
+  workspace plan (e.g. `team`) reports every used-up window, 5h or weekly, as "Your workspace is
+  out of credits" with a windowless `premium` snapshot of `rate_limit_reached_type:
+  "workspace_owner_credits_depleted"`: the window ran out and no workspace credits were left to go
+  on with, so it is a window limit. The windowed (`codex`) snapshot before it comes with the start
+  of the last response and can lag (the 5h window at 98% when it ran out).
 
 `resetsAt`, `resetsEstimated` and `limitKind` go on the item and on the alert. A limit record written since the bridge
 started raises `alert limit` for its session once: a repeat of the session's last limit (same reset

@@ -96,15 +96,17 @@ test('claude-code: the reset time in a limit text is the next such time in its z
   assert.equal(resetsFromText('API Error: 529 Overloaded', '2026-10-02T00:00:00.000Z'), undefined);
 });
 
-test('codex: a failed turn is an error item; a usage limit resets when its full window does, else as its text says, else it is out of credits', () => {
+test('codex: a failed turn is an error item; a usage limit resets when its full window does, else as its text says, else as its fullest window; out of credits only without windows', () => {
   const log = new ItemLog();
   const parse = codexLineParser();
   for (const line of [
     ...codexLimit('2026-09-16T08:00:00.000Z'),
-    // Codex says "out of credits" also when a plan's weekly window is used up.
+    // A workspace plan says "out of credits" whichever window is used up: the weekly one here,
     ...codexLimit('2026-09-16T08:30:00.000Z', { message: NO_CREDITS, reached: 'workspace_owner_credits_depleted' }),
-    // Credits ran out while no window was full (the 5h one at 98%).
+    // the 5h one at 98% (the snapshot comes with the start of the last response; the turn went on after it resets).
     ...codexLimit('2026-09-16T09:00:00.000Z', { message: NO_CREDITS, primary: 98, secondary: 22, reached: 'workspace_owner_credits_depleted' }),
+    // A stale snapshot: a window ran out, but not known when it resets.
+    ...codexLimit('2026-09-16T09:05:00.000Z', { message: NO_CREDITS, primary: 72, secondary: 24, reached: 'workspace_owner_credits_depleted' }),
     ...codexLimit('2026-09-16T09:10:00.000Z', { secondary: 60 }),
     // A stale snapshot: no window full, the fullest at 97% gives an estimate; under 95% none.
     ...codexLimit('2026-09-16T09:20:00.000Z', { message: "You've hit your usage limit.", primary: 97, secondary: 60 }),
@@ -116,19 +118,25 @@ test('codex: a failed turn is an error item; a usage limit resets when its full 
     [
       { text: "You've hit your usage limit.", error: true, resetsAt: '2026-09-19T09:37:15.000Z', resetsEstimated: undefined, limitKind: 'window' },
       { text: 'Your workspace is out of cre', error: true, resetsAt: '2026-09-19T09:37:15.000Z', resetsEstimated: undefined, limitKind: 'window' },
-      { text: 'Your workspace is out of cre', error: true, resetsAt: undefined, resetsEstimated: undefined, limitKind: 'credits' },
+      { text: 'Your workspace is out of cre', error: true, resetsAt: '2026-09-16T12:16:20.000Z', resetsEstimated: true, limitKind: 'window' },
+      { text: 'Your workspace is out of cre', error: true, resetsAt: undefined, resetsEstimated: undefined, limitKind: 'window' },
       { text: "You've hit your usage limit.", error: true, resetsAt: new Date(2026, 8, 25, 13, 21).toISOString(), resetsEstimated: undefined, limitKind: 'window' },
       { text: "You've hit your usage limit.", error: true, resetsAt: '2026-09-16T12:16:20.000Z', resetsEstimated: true, limitKind: 'window' },
       { text: "You've hit your usage limit.", error: true, resetsAt: undefined, resetsEstimated: undefined, limitKind: 'window' },
       { text: 'Selected model is at capacit', error: true, resetsAt: undefined, resetsEstimated: undefined, limitKind: undefined },
     ],
   );
+  // Credits with no window to go by (a thread whose first request failed, or a plan without windows): no reset time.
+  const credits = new ItemLog();
+  const fresh = codexLineParser();
+  for (const line of codexLimit('2026-09-17T04:35:29.957Z', { message: NO_CREDITS, reached: 'workspace_owner_credits_depleted' }).slice(1)) fresh(line, credits);
+  assert.deepEqual(credits.page(undefined, 10).items.map(({ resetsAt, limitKind }) => ({ resetsAt, limitKind })), [{ resetsAt: undefined, limitKind: 'credits' }]);
 
   const meta = new CodexMetaScan();
   for (const line of codexLimit('2026-09-16T08:33:07.959Z')) meta.line(line);
   assert.deepEqual([meta.limit?.at, meta.limit?.resetsAt, meta.limit?.limitKind], ['2026-09-16T08:33:07.959Z', '2026-09-19T09:37:15.000Z', 'window']);
   for (const line of codexLimit('2026-09-16T09:00:00.000Z', { message: NO_CREDITS, primary: 98, secondary: 22, reached: 'workspace_owner_credits_depleted' })) meta.line(line);
-  assert.deepEqual(meta.limit, { at: '2026-09-16T09:00:00.000Z', text: NO_CREDITS, limitKind: 'credits' });
+  assert.deepEqual(meta.limit, { at: '2026-09-16T09:00:00.000Z', text: NO_CREDITS, limitKind: 'window', resetsAt: '2026-09-16T12:16:20.000Z', resetsEstimated: true });
   for (const line of codexLimit('2026-09-16T09:30:00.000Z', { info: 'server_overloaded', message: 'Selected model is at capacity.' })) meta.line(line);
   assert.equal(meta.limit?.at, '2026-09-16T09:00:00.000Z', 'another error is no limit');
 });
@@ -192,7 +200,7 @@ test('providers raise a limit alert for a hit appended while running, not for on
       codexHub.alerts.map((a) => [a.sessionId, a.alert, a.resetsAt, a.limitKind]),
       [
         [`codex:${thread}`, 'limit', '2026-09-19T09:37:15.000Z', 'window'],
-        [`codex:${thread}`, 'limit', undefined, 'credits'],
+        [`codex:${thread}`, 'limit', '2026-09-16T12:16:20.000Z', 'window'],
       ],
     );
     const page = await codex.readItems(thread, undefined, 2);
@@ -200,7 +208,7 @@ test('providers raise a limit alert for a hit appended while running, not for on
       page?.items.map((i) => [i.error, i.resetsAt, i.limitKind]),
       [
         [true, '2026-09-19T09:37:15.000Z', 'window'],
-        [true, undefined, 'credits'],
+        [true, '2026-09-16T12:16:20.000Z', 'window'],
       ],
     );
   } finally {

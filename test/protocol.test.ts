@@ -314,7 +314,7 @@ test('WebSocket events', async () => {
   const limitItem = await ws.next();
   fixture('event-item-limit', limitItem);
   assert.deepEqual(await talk.next(), limitItem);
-  // Usage credits ran out (and no window is full): no reset time.
+  // Usage credits ran out (with no plan window to go by): no reset time.
   const credits: Item = { seq: 9, kind: 'assistant', ts: '2026-09-29T10:00:10.000Z', text: 'Your workspace is out of credits. Add credits to continue.', error: true, limitKind: 'credits' };
   provider.emit('6f1c2d3e-0000-4000-8000-000000000001', credits);
   const creditsItem = await ws.next();

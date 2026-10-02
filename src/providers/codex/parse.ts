@@ -186,11 +186,12 @@ export function tryAgainAt(text: string): string | undefined {
  * `usage_limit_exceeded` ("You've hit your usage limit. … try again at Sep 25th, 2026 1:21 PM.",
  * "Your workspace is out of credits. …"), `server_overloaded`, `unauthorized`. A usage limit
  * carries no reset time of its own field; in order, it is: the latest reset of the windows at 100%
- * in `limits` (the rollout's last rate-limit snapshot, written just before; this is also the cause
- * when the snapshot says workspace credits ran out, as Codex says when a plan's weekly window is
- * used up), the time in the message, no time when `reached` (the snapshot's
- * `rate_limit_reached_type`, e.g. `workspace_owner_credits_depleted`) names credits (`limitKind:
- * credits`), else the reset of the fullest window at 95% or more (`resetsEstimated`).
+ * in `limits` (the rollout's last rate-limit snapshot, written just before), the time in the
+ * message, no time when `reached` (the snapshot's `rate_limit_reached_type`) names credits and
+ * `limits` has no windows (`limitKind: credits`), else the reset of the fullest window at 95% or
+ * more (`resetsEstimated`). A workspace plan's limit names credits whichever window is used up:
+ * `workspace_owner_credits_depleted` ("Your workspace is out of credits") means the window ran out
+ * and no workspace credits were left to go on with, so with windows it is a window limit.
  */
 export function turnError(error: unknown, limits: RateLimitSnapshot | undefined, reached?: string): { text: string; limit?: LimitReset } | undefined {
   if (!isObject(error)) return undefined;
@@ -202,7 +203,7 @@ export function turnError(error: unknown, limits: RateLimitSnapshot | undefined,
   if (full.length > 0) return { text, limit: { limitKind: 'window', resetsAt: toIso(Math.max(...full.map((w) => w.resetsAt))) } };
   const stated = tryAgainAt(text);
   if (stated) return { text, limit: { limitKind: 'window', resetsAt: stated } };
-  if (reached?.includes('credits')) return { text, limit: { limitKind: 'credits' } };
+  if (reached?.includes('credits') && windows.length === 0) return { text, limit: { limitKind: 'credits' } };
   const fullest = windows.filter((w) => w.usedPercent >= ESTIMATE_PERCENT).sort((a, b) => b.usedPercent - a.usedPercent)[0];
   const resetsAt = fullest && toIso(fullest.resetsAt);
   return { text, limit: { limitKind: 'window', ...(resetsAt && { resetsAt, resetsEstimated: true }) } };
