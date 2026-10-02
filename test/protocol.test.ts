@@ -368,6 +368,12 @@ test('WebSocket events', async () => {
   const heard: string[] = [];
   while (other.pending() > 0) heard.push((await other.next()).type);
   assert.deepEqual(heard, ['resolved', 'session', 'session_removed', 'resolved', 'session'], 'the background watch heard the two resolutions, the sessions leaving needs_input and the removal, not the item, the login churn or usage');
+
+  // A turn with no task list that launched two sub-agents, one of them finished: progress counts the sub-agents.
+  const agents: Session = { ...running, id: 'claude-code:6f1c2d3e-0000-4000-8000-000000000003', title: 'Review the release', progress: { kind: 'agents', done: 1, total: 2, current: 'Check the changelog' } };
+  bridge.hub.session(agents);
+  fixture('event-session-agents', await ws.next());
+  bridge.hub.removed(agents.id);
   ws.close();
   other.close();
 });

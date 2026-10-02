@@ -346,3 +346,55 @@ test('task list (TodoWrite): each call replaces the list; without promptId a typ
   meta.line(user(undefined, '2026-09-29T10:10:00.000Z', 'Now the docs'));
   assert.deepEqual([meta.turnStartedAt, meta.progress], ['2026-09-29T10:10:00.000Z', undefined]);
 });
+
+test('sub-agents: without a task list, progress counts the Agent/Task launches of the turn and names the first unfinished one', () => {
+  const meta = new ClaudeMetaScan();
+  const agent = (id: string, description: string, name = 'Agent') => ({ id, name, input: { subagent_type: 'Explore', description, prompt: 'p' } });
+  meta.line(user('p1', '2026-09-29T10:00:00.000Z', 'Review the release'));
+  meta.line(toolUses('2026-09-29T10:00:01.000Z', [agent('toolu_a1', 'Check the changelog'), agent('toolu_a2', `Audit  the\ndeploy ${'x'.repeat(90)}`, 'Task')]));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 0, total: 2, current: 'Check the changelog' });
+  meta.line(result('p1', '2026-09-29T10:00:30.000Z', 'toolu_a1', 'The changelog is complete.'));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 1, total: 2, current: `Audit the` }, 'a result finishes a sub-agent; current is its description\'s first line');
+  meta.line(user('p1', '2026-09-29T10:01:00.000Z', [{ type: 'tool_result', tool_use_id: 'toolu_a2', content: 'Failed', is_error: true }]));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 2, total: 2 }, 'an error result finishes it too');
+  meta.line(toolUses('2026-09-29T10:01:01.000Z', [agent('toolu_s1', 'Nested')], { isSidechain: true }));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 2, total: 2 }, 'a sub-agent\'s own launches are its own');
+  meta.line(user('p2', '2026-09-29T10:05:00.000Z', 'Thanks'));
+  assert.equal(meta.progress, undefined, 'the next turn starts without progress');
+
+  // Background sub-agents: the result only says one started; each reports back in a task notification, a turn of its own.
+  const launched = (id: string): object => ({ isAsync: true, status: 'async_launched', agentId: `a-${id}`, description: 'd' });
+  meta.line(toolUses('2026-09-29T10:05:01.000Z', [agent('toolu_b1', 'Scan the logs'), agent('toolu_b2', 'Read the docs')]));
+  meta.line(result('p2', '2026-09-29T10:05:02.000Z', 'toolu_b1', 'Async agent launched successfully.', launched('b1')));
+  meta.line(result('p2', '2026-09-29T10:05:02.000Z', 'toolu_b2', 'Async agent launched successfully.', launched('b2')));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 0, total: 2, current: 'Scan the logs' });
+  const notification = (promptId: string, ts: string, toolUseId: string): string =>
+    user(promptId, ts, `<task-notification>\n<task-id>a-x</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>completed</status>\n<summary>Agent "x" completed</summary>\n</task-notification>`);
+  meta.line(notification('p3', '2026-09-29T10:06:00.000Z', 'toolu_b1'));
+  assert.equal(meta.turnStartedAt, '2026-09-29T10:06:00.000Z');
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 1, total: 2, current: 'Read the docs' });
+  meta.line(user('p4', '2026-09-29T10:06:30.000Z', '<task-notification>\n<tool-use-id>toolu_bash</tool-use-id>\n<status>completed</status>\n<summary>Background command finished</summary>\n</task-notification>'));
+  assert.equal(meta.progress, undefined, 'a notification about something else is a turn without progress');
+  meta.line(notification('p5', '2026-09-29T10:07:00.000Z', 'toolu_b2'));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 2, total: 2 });
+  meta.line(toolUses('2026-09-29T10:07:01.000Z', [agent('toolu_c1', 'Write the notes')]));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 0, total: 1, current: 'Write the notes' }, 'a launch after all finished starts a new count');
+  meta.line(user('p6', '2026-09-29T10:08:00.000Z', 'Stop waiting'));
+  meta.line(notification('p7', '2026-09-29T10:09:00.000Z', 'toolu_c1'));
+  assert.equal(meta.progress, undefined, 'a prompt drops the sub-agents still out');
+
+  meta.line(toolUses('2026-09-29T10:09:01.000Z', [agent('toolu_d1', 'Run it again')]));
+  meta.reset();
+  assert.equal(meta.progress, undefined);
+});
+
+test('sub-agents and a task list in the same turn: the task list wins', () => {
+  const meta = new ClaudeMetaScan();
+  meta.line(user('p1', '2026-09-29T10:00:00.000Z', 'Ship it'));
+  meta.line(toolUses('2026-09-29T10:00:01.000Z', [{ id: 'toolu_a1', name: 'Agent', input: { description: 'Review', prompt: 'p' } }]));
+  assert.deepEqual(meta.progress, { kind: 'agents', done: 0, total: 1, current: 'Review' });
+  meta.line(toolUses('2026-09-29T10:00:02.000Z', [{ id: 'toolu_t1', name: 'TodoWrite', input: { todos: [{ content: 'Build', status: 'in_progress' }, { content: 'Tag', status: 'pending' }] } }]));
+  assert.deepEqual(meta.progress, { done: 0, total: 2, current: 'Build' });
+  meta.line(result('p1', '2026-09-29T10:00:30.000Z', 'toolu_a1', 'Looks good.'));
+  assert.deepEqual(meta.progress, { done: 0, total: 2, current: 'Build' });
+});

@@ -1,0 +1,29 @@
+{
+  "type": "session",
+  "session": {
+    "id": "claude-code:6f1c2d3e-0000-4000-8000-000000000003",
+    "provider": "claude-code",
+    "title": "Review the release",
+    "cwd": "/home/dev/app",
+    "status": "running",
+    "lastActivity": "2026-09-29T09:59:30.000Z",
+    "turnStartedAt": "2026-09-29T09:58:00.000Z",
+    "progress": {
+      "kind": "agents",
+      "done": 1,
+      "total": 2,
+      "current": "Check the changelog"
+    },
+    "context": {
+      "used": 86000,
+      "window": 200000
+    },
+    "account": {
+      "id": "acc-school",
+      "label": "school",
+      "estimated": true
+    },
+    "model": "Fable 5.1",
+    "effort": "xhigh"
+  }
+}

@@ -70,9 +70,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   with a new `promptId`: a prompt, a task notification, a scheduled prompt; the turn's tool results
   and an interruption share it). Codex: `turn/started`'s `turn.startedAt` for a thread the daemon
   has loaded, else the rollout's `task_started` (`started_at`, else the record's time).
-  `progress` (`{done, total, current?}`, `total` ≥ 1) is the agent's own task list as of its last
-  change in the current turn, or in the last one while no new turn has started: `total` tasks,
-  `done` of them completed. A new turn clears it until the agent updates its list again. Claude
+  `progress` (`{kind?, done, total, current?}`, `total` ≥ 1) is the agent's own task list as of
+  its last change in the current turn, or in the last one while no new turn has started: `total`
+  tasks, `done` of them completed. A new turn clears it until the agent updates its list again. Claude
   Code: its task list (`TaskCreate` adds a task once its result names the task's id, `TaskUpdate`
   sets a task's `status`, `deleted` removes it; `TodoWrite` replaces the whole list with its
   `todos[]`); the list itself carries over into later turns. Codex: the steps of the turn's latest
@@ -82,6 +82,18 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   most 80 code units): Claude Code: a `TaskCreate`/`TaskUpdate` task's `subject` (else its
   `title`, else its `description`), a `TodoWrite` todo's `content`; Codex: a plan step's `step`
   (status `in_progress`, or `inProgress` from the app-server). Absent when no task is in progress.
+  `progress.kind` is absent (meaning `tasks`) for a task list. When the turn has not touched a task
+  list, Claude Code falls back to the sub-agents it launched, with `kind: "agents"`
+  ([`event-session-agents.json`](../protocol/v1/event-session-agents.json)): `total` `Agent` (`Task`
+  in older versions) tool calls, `done` of them finished, and `current` the `description` of the
+  first unfinished one (same limits). A sub-agent finishes with its `tool_result`, except a
+  background one's (`toolUseResult.status: "async_launched"`), which finishes with the task
+  notification naming its `<tool-use-id>`. That notification opens a turn of its own, so the
+  sub-agents launched since the last turn not opened by a task notification count together; such a
+  turn shows them only if it finishes one of them, and any other turn (a prompt) drops them. A launch
+  after all of them finished starts a new count. A task list touched in the turn always wins.
+  Codex sends no `agents` progress: its rollouts do not record a turn's spawned sub-agents and their
+  completion in a form the bridge reads.
 - **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
@@ -263,7 +275,7 @@ Server events (JSON text frames):
 | `type` | Fields | When | Fixture |
 |---|---|---|---|
 | `snapshot` | `apiVersion, sessions, requests, usage, alerts` | right after connecting; `sessions` as in `GET /api/sessions` (live only); `alerts`: the last 10 alerts of the past 10 minutes, oldest first (see "Missed alerts") | `event-snapshot.json` |
-| `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json` |
+| `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json`, `event-session-agents.json` |
 | `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json`, `event-item-limit.json`, `event-item-limit-credits.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |

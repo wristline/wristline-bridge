@@ -42,7 +42,7 @@ export interface Session {
   promptBlock?: PromptBlock;
   /** While `running`: when the current turn started (ISO 8601), when known. */
   turnStartedAt?: string;
-  /** The agent's own task list as of its last update in the current or last turn (cleared when the next turn starts); `total` > 0. */
+  /** The agent's own task list as of its last update in the current or last turn (cleared when the next turn starts), else (Claude Code) the sub-agents it launched; `total` > 0. */
   progress?: Progress;
   context?: { used: number; window: number };
   /** Absent for a single or unknown account. */
@@ -53,11 +53,16 @@ export interface Session {
   effort?: string;
 }
 
-/** Claude Code: its task list (TaskCreate/TaskUpdate, TodoWrite); Codex: its plan (`update_plan`). `done`: tasks completed. */
+/**
+ * Claude Code: its task list (TaskCreate/TaskUpdate, TodoWrite); Codex: its plan (`update_plan`). `done`: tasks completed.
+ * `kind: 'agents'` (Claude Code, when the turn has no task list): the sub-agents launched (`Agent`/`Task`), `done` of them finished.
+ */
 export interface Progress {
+  /** Absent means `tasks`. */
+  kind?: 'tasks' | 'agents';
   done: number;
   total: number;
-  /** The title of the first task in progress that has one (one line, at most CURRENT_MAX code units); absent when none is in progress. */
+  /** The title of the first task in progress that has one, or the description of the first unfinished sub-agent (one line, at most CURRENT_MAX code units); absent when there is none. */
   current?: string;
 }
 

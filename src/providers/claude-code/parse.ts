@@ -249,17 +249,31 @@ export class ClaudeMetaScan implements LineHandler {
   readonly #creates = new Map<string, string | undefined>();
   /** Whether the task list was written in the current turn. */
   #touched = false;
+  /** Sub-agents (Agent/Task tool_use id) launched since the last turn not opened by a task notification -> whether it finished, and its description. */
+  readonly #agents = new Map<string, { done: boolean; title: string | undefined }>();
+  /** Whether the current turn launched or finished one of them. */
+  #agentsTouched = false;
 
-  /** The task list as of its last change in the current turn; undefined when the turn has not touched it, or it is empty. */
+  /**
+   * The task list as of its last change in the current turn, else the sub-agents when the turn
+   * launched or finished one; undefined when neither applies, or the list is empty.
+   */
   get progress(): Progress | undefined {
-    if (!this.#touched || this.#tasks.size === 0) return undefined;
     let done = 0;
     let current: string | undefined;
-    for (const { status, title } of this.#tasks.values()) {
-      if (status === 'completed') done++;
-      else if (status === 'in_progress') current ??= title;
+    if (this.#touched && this.#tasks.size > 0) {
+      for (const { status, title } of this.#tasks.values()) {
+        if (status === 'completed') done++;
+        else if (status === 'in_progress') current ??= title;
+      }
+      return { done, total: this.#tasks.size, ...(current && { current }) };
     }
-    return { done, total: this.#tasks.size, ...(current && { current }) };
+    if (!this.#agentsTouched || this.#agents.size === 0) return undefined;
+    for (const agent of this.#agents.values()) {
+      if (agent.done) done++;
+      else current ??= agent.title;
+    }
+    return { kind: 'agents', done, total: this.#agents.size, ...(current && { current }) };
   }
 
   line(line: string): void {
@@ -296,35 +310,50 @@ export class ClaudeMetaScan implements LineHandler {
     }
   }
 
-  /** A user record is parsed only when it may open a turn, carry a TaskCreate result, or give the first prompt or cwd. */
+  /** A user record is parsed only when it may open a turn, carry a TaskCreate or sub-agent result, or give the first prompt or cwd. */
   #user(line: string): void {
     const promptId = /"promptId":"([^"]*)"/.exec(line)?.[1];
     // Without a promptId (older Claude Code, local commands such as /login), a record of tool results never opens a turn.
     const opens = promptId !== undefined ? promptId !== this.turnId : !line.includes('"tool_result"');
     const created = [...this.#creates.keys()].find((id) => line.includes(`"${id}"`));
-    if (!opens && created === undefined && this.firstPrompt !== undefined && this.cwd !== undefined) return;
+    const agent = [...this.#agents].find(([id, { done }]) => !done && line.includes(`"${id}"`))?.[0];
+    if (!opens && created === undefined && agent === undefined && this.firstPrompt !== undefined && this.cwd !== undefined) return;
     const rec = parseJson(line);
     if (rec?.type !== 'user' || rec.isSidechain === true) return;
     this.cwd ??= str(rec.cwd);
-    const user = isObject(rec.message) ? classifyUserText(textOf(rec.message.content)) : undefined;
+    const text = isObject(rec.message) ? textOf(rec.message.content) : undefined;
+    const user = text !== undefined ? classifyUserText(text) : undefined;
     // A prompt, a task notification, a scheduled (meta) prompt: each starts a turn with a new promptId.
     if (opens && (promptId !== undefined || (rec.isMeta !== true && (user?.kind === 'prompt' || user?.kind === 'notice') && !user.text.startsWith('[Request interrupted')))) {
       this.turnId = promptId;
       this.turnStartedAt = toIso(rec.timestamp);
-      this.#touched = false;
+      this.#touched = this.#agentsTouched = false;
+      // Background sub-agents report back in task notifications, each its own turn: until another kind of turn, they are still the ones being waited on.
+      const notification = text?.startsWith('<task-notification>') === true;
+      if (!notification) this.#agents.clear();
+      const finished = notification ? /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(text)?.[1] : undefined;
+      if (finished !== undefined) this.#agentDone(finished);
     }
     if (created !== undefined) this.#created(created, rec);
+    if (agent !== undefined) this.#agentResult(agent, rec);
     if (this.firstPrompt === undefined && rec.isMeta !== true && user?.kind === 'prompt') this.firstPrompt = clip(oneLine(user.text), TITLE_MAX);
   }
 
   /**
    * TodoWrite (`todos[]` with `status`, `content`) rewrites the whole list; TaskUpdate (`taskId`,
    * `status`, `subject`; `deleted` removes the task) changes one task; TaskCreate adds one once its
-   * result names its id.
+   * result names its id. Agent (formerly Task) launches a sub-agent.
    */
   #taskTool(block: JsonObject): void {
     const input = isObject(block.input) ? block.input : {};
-    if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
+    if (block.name === 'Agent' || block.name === 'Task') {
+      const id = str(block.id);
+      if (!id) return;
+      // A launch after every earlier sub-agent finished starts a new count.
+      if ([...this.#agents.values()].every((a) => a.done)) this.#agents.clear();
+      this.#agents.set(id, { done: false, title: headline(str(input.description), CURRENT_MAX) });
+      this.#agentsTouched = true;
+    } else if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
       this.#tasks.clear();
       input.todos.forEach((todo: unknown, i) =>
         this.#tasks.set(String(i), isObject(todo) ? { status: str(todo.status) || 'pending', title: headline(str(todo.content), CURRENT_MAX) } : { status: 'pending', title: undefined }),
@@ -360,6 +389,21 @@ export class ClaudeMetaScan implements LineHandler {
     this.#touched = true;
   }
 
+  /** A sub-agent's result finishes it, unless it only says a background sub-agent started (`toolUseResult.status: "async_launched"`). */
+  #agentResult(toolUseId: string, rec: JsonObject): void {
+    const content = isObject(rec.message) ? rec.message.content : undefined;
+    const block = Array.isArray(content) ? content.find((b: unknown) => isObject(b) && b.type === 'tool_result' && b.tool_use_id === toolUseId) : undefined;
+    if (!isObject(block) || (isObject(rec.toolUseResult) && rec.toolUseResult.status === 'async_launched')) return;
+    this.#agentDone(toolUseId);
+  }
+
+  #agentDone(toolUseId: string): void {
+    const agent = this.#agents.get(toolUseId);
+    if (!agent || agent.done) return;
+    agent.done = true;
+    this.#agentsTouched = true;
+  }
+
   reset(): void {
     this.customTitle = this.aiTitle = this.firstPrompt = this.cwd = undefined;
     this.contextUsed = this.compactedAt = undefined;
@@ -369,6 +413,8 @@ export class ClaudeMetaScan implements LineHandler {
     this.#tasks.clear();
     this.#creates.clear();
     this.#touched = false;
+    this.#agents.clear();
+    this.#agentsTouched = false;
   }
 }
 
