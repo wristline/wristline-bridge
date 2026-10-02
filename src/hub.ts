@@ -136,6 +136,11 @@ export interface HubOptions {
 }
 
 /** Fans provider changes out to connected watches and tracks what each one subscribed to. */
+/** The fields of a session a background client is sent changes of: what a Now Bar count or a turn's Live Update shows. */
+function backgroundKey({ status, turnStartedAt, progress }: Session): string {
+  return JSON.stringify([status, turnStartedAt ?? null, progress ?? null]);
+}
+
 export class BridgeHub implements Hub {
   readonly pending: PendingRegistry;
   readonly #providers: SessionProvider[];
@@ -154,8 +159,8 @@ export class BridgeHub implements Hub {
   readonly #ping: NodeJS.Timeout;
   /** Oldest first, at most ALERT_KEEP. */
   readonly #alerts: Alert[] = [];
-  /** Status as last broadcast per session: a background client hears of a change to or from needs_input only. */
-  readonly #lastStatus = new Map<string, Session['status']>();
+  /** Status, turn start and progress as last broadcast per session (see `backgroundKey`): a background client hears of a session only when one of them changes. */
+  readonly #lastShown = new Map<string, string>();
   readonly #now: () => number;
   readonly #newId: () => string;
   readonly #log: (line: string) => void;
@@ -206,10 +211,9 @@ export class BridgeHub implements Hub {
   removed(sessionId: string): void {
     clearTimeout(this.#throttles.get(sessionId)?.timer);
     this.#throttles.delete(sessionId);
-    // A background client told the session needs input would otherwise keep showing that.
-    const waited = this.#lastStatus.get(sessionId) === 'needs_input';
-    this.#lastStatus.delete(sessionId);
-    this.#broadcast({ type: 'session_removed', sessionId }, waited);
+    // A removal changes what a background client counts (running, waiting): it always hears of it.
+    this.#lastShown.delete(sessionId);
+    this.#broadcast({ type: 'session_removed', sessionId }, true);
   }
 
   usage(usage: Usage): boolean {
@@ -536,7 +540,7 @@ export class BridgeHub implements Hub {
     for (const c of this.#clients) if (c.mode === 'foreground' || background) this.#sendRaw(c, data);
   }
 
-  /** What a background client hears: requests and their resolution, alerts, and a session entering or leaving needs_input (`removed` adds the removal of one that needed input). */
+  /** What a background client hears: requests and their resolution, alerts, and a session whose status, turn start or progress changed (`removed` adds every removal). */
   #forBackground(event: ServerEvent): boolean {
     switch (event.type) {
       case 'request':
@@ -544,10 +548,11 @@ export class BridgeHub implements Hub {
       case 'alert':
         return true;
       case 'session': {
-        const { id, status } = event.session;
-        const was = this.#lastStatus.get(id) === 'needs_input';
-        this.#lastStatus.set(id, status);
-        return was !== (status === 'needs_input');
+        const { id } = event.session;
+        const was = this.#lastShown.get(id);
+        const now = backgroundKey(event.session);
+        this.#lastShown.set(id, now);
+        return was !== now;
       }
       default:
         return false;

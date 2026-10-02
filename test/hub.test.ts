@@ -156,7 +156,7 @@ test('usage is kept per provider and account; a labelled entry retires the unlab
   }
 });
 
-test('background mode: only requests, resolutions, alerts and needs_input transitions reach the client; foreground gets everything', async () => {
+test('background mode: only requests, resolutions, alerts, status, turn-start and progress transitions and removals reach the client; foreground gets everything', async () => {
   const p = new FakeProvider();
   const s1 = session('s1');
   p.sessions = [s1];
@@ -178,14 +178,43 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
       return out;
     };
 
-    // Churn a background client must not hear: a title change, an item, usage, a Quick Ask event.
-    bridge.hub.session({ ...s1, title: 'renamed' });
+    // A session's first event is a change: the bridge has sent no status for it yet.
+    bridge.hub.session({ ...s1, status: 'running' });
+    assert.equal((await bg.next()).type, 'session');
+    assert.equal((await fg.next()).type, 'session');
+    await new Promise((r) => setTimeout(r, 2100)); // the per-session throttle
+
+    // Churn a background client must not hear: a lastActivity and title change, an item, usage, a Quick Ask event.
+    bridge.hub.session({ ...s1, status: 'running', title: 'renamed', lastActivity: '2026-09-29T10:00:01.000Z' });
     p.emit('s1', { seq: 1, kind: 'assistant', ts: '2026-09-29T10:00:01.000Z', text: 'hi' });
     bridge.hub.usage({ provider: 'codex', updatedAt: '2026-09-29T10:00:00.000Z', windows: [{ id: 'primary', usedPercent: 5 }] });
     bridge.hub.sendToDevice(bridge.auth.authenticate(bridge.token)?.id ?? '', { type: 'ask', askId: 'ask-1', provider: 'codex', status: 'running' });
     assert.deepEqual(await types(fg, 4), ['session', 'item', 'usage', 'ask']);
     await bg.settle();
     assert.equal(bg.pending(), 0);
+
+    // A turn's Live Update: its start and progress changes reach the background client, a lastActivity-only update does not.
+    const turn = { ...s1, status: 'running' as const, title: 'renamed', turnStartedAt: '2026-09-29T10:00:00.000Z' };
+    for (const done of [2, 3]) {
+      await new Promise((r) => setTimeout(r, 2100));
+      bridge.hub.session({ ...turn, progress: { done, total: 7 } });
+      const heard = await bg.next();
+      assert.deepEqual(heard.type === 'session' && [heard.session.turnStartedAt, heard.session.progress], ['2026-09-29T10:00:00.000Z', { done, total: 7 }]);
+      assert.equal((await fg.next()).type, 'session');
+    }
+    await new Promise((r) => setTimeout(r, 2100));
+    bridge.hub.session({ ...turn, progress: { done: 3, total: 7 }, lastActivity: '2026-09-29T10:05:00.000Z' });
+    assert.equal((await fg.next()).type, 'session');
+    await bg.settle();
+    assert.equal(bg.pending(), 0, 'a lastActivity-only change stays in the foreground');
+
+    // running -> idle: the background client's running count changes.
+    await new Promise((r) => setTimeout(r, 2100));
+    bridge.hub.session(s1);
+    const idle = await bg.next();
+    assert.equal(idle.type === 'session' && idle.session.status, 'idle');
+    assert.equal((await fg.next()).type, 'session');
+    await new Promise((r) => setTimeout(r, 2100));
 
     // What it must hear: a request and its session turning needs_input, the resolution and the way back, an alert.
     const answers = bridge.hub.pending.open({ sessionId: s1.id, kind: 'permission', title: 'Bash', questions: [{ id: 'decision', text: 'ls', multi: false, options: [{ id: 'allow', label: 'Allow' }] }] }, { timeoutMs: 60_000 });
@@ -197,9 +226,10 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     bridge.hub.alert(s1.id, 'done', 'Finished the task as requested.');
     assert.equal((await bg.next()).type, 'alert');
     bridge.hub.removed(s1.id);
+    assert.equal((await bg.next()).type, 'session_removed');
     assert.deepEqual(await types(fg, 6), ['request', 'session', 'resolved', 'session', 'alert', 'session_removed']);
     await bg.settle();
-    assert.equal(bg.pending(), 0, 'no session_removed, no other session churn');
+    assert.equal(bg.pending(), 0, 'no other session churn');
 
     // A session removed while it needs input: without this the background client would keep its badge.
     await new Promise((r) => setTimeout(r, 2100));
@@ -210,9 +240,9 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     assert.deepEqual(await types(fg, 3), ['request', 'session', 'session_removed']);
     assert.equal(bridge.hub.pending.answer('req-2', { decision: ['allow'] }), 'ok');
     await dangling;
-    // The removal forgot the session's last status: its idle session event is not a change from needs_input any more.
+    // The removal forgot the session's last status: its next session event is a first one again.
     assert.deepEqual(await types(fg, 2), ['resolved', 'session']);
-    assert.deepEqual(await types(bg, 1), ['resolved']);
+    assert.deepEqual(await types(bg, 2), ['resolved', 'session']);
     await bg.settle();
     assert.equal(bg.pending(), 0);
 

@@ -196,7 +196,7 @@ export type ServerEvent =
 
 /**
  * `background` (the watch app is not on screen): the bridge sends only `request`, `resolved`,
- * `alert` and `session` events whose status changed to or from `needs_input`. `foreground` (the
+ * `alert`, `session` events whose status, turnStartedAt or progress changed and `session_removed`. `foreground` (the
  * default for a new connection) sends everything.
  */
 export type ClientMode = 'foreground' | 'background';
