@@ -92,8 +92,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   sub-agents launched since the last turn not opened by a task notification count together; such a
   turn shows them only if it finishes one of them, and any other turn (a prompt) drops them. A launch
   after all of them finished starts a new count. A task list touched in the turn always wins.
-  Codex sends no `agents` progress: its rollouts do not record a turn's spawned sub-agents and their
-  completion in a form the bridge reads.
+  Codex sends no `agents` progress: its sub-agents (`spawn_agent`) are long-lived, take follow-up
+  tasks (`followup_task`) and mostly report completing them in later turns, so they do not map onto
+  a turn's launches.
 - **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
