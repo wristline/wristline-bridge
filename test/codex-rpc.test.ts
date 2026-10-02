@@ -1006,14 +1006,18 @@ test('codex provider: a completed turn raises done by the Stop hook rule; an app
   await said(other, 't3', 'a'.repeat(80), [long]);
   // Nothing for a short answer, "No response requested.", a turn that did not complete, a sub-agent or a Quick Ask thread.
   await said(named, 't4', 'hi', ['Done.']);
+  await said(named, 't4k', 'hi', ['완료'.repeat(3)]);
   await said(named, 't5', 'hi', ['No response requested.']);
   await said(named, 't6', 'hi', [long], 'interrupted');
   await said(sub, 't7', 'task', [long]);
   await said(ask, 't8', 'question', [long]);
+  // A short answer in Hangul, Han or Kana still raises one from 8 characters.
+  await said(named, 't9', '테스트 돌려줘', ['테스트 전부 통과했어요']);
   assert.deepEqual(hub.alerts, [
     [`codex:${named}`, 'done', 'All 164 tests pass and the build is green.', 'run the tests and tell me what failed'],
     [`codex:${named}`, 'done', `${'x'.repeat(499)}…`, 'Named thread'],
     [`codex:${other}`, 'done', `${'x'.repeat(499)}…`, `${'a'.repeat(59)}…`],
+    [`codex:${named}`, 'done', '테스트 전부 통과했어요', '테스트 돌려줘'],
   ]);
 
   // Waiting on an approval: the request that follows the status is the notification; without one, needs_input.

@@ -315,11 +315,14 @@ test('notification: needs_input alert only when no request is open', async () =>
 
 test('stop: no alert for an empty, short or "No response requested." answer', async () => {
   const stop = (last: unknown): Promise<Response> => hook(bridge, 'stop', { session_id: SID, hook_event_name: 'Stop', last_assistant_message: last });
-  for (const last of [undefined, '', '   \n\t ', 'a'.repeat(19), '가'.repeat(19), 'No response requested.', ' no response requested \n', 'NO RESPONSE REQUESTED.']) {
+  for (const last of [undefined, '', '   \n\t ', 'a'.repeat(19), 'Done.', '가'.repeat(7), '完了しました', 'No response requested.', ' no response requested \n', 'NO RESPONSE REQUESTED.']) {
     await emptyOk(await stop(last));
   }
-  await emptyOk(await stop('가'.repeat(20)));
-  assert.deepEqual(bare(await nextOf(ws, 'alert')), { type: 'alert', sessionId: session.id, alert: 'done', text: '가'.repeat(20), title: 't' });
+  // Hangul, Han or Kana say as much in fewer characters: 8 suffice.
+  for (const text of ['빌드 다 통과했어요', '測試已經全部通過', 'テストは全部通った']) {
+    await emptyOk(await stop(text));
+    assert.deepEqual(bare(await nextOf(ws, 'alert')), { type: 'alert', sessionId: session.id, alert: 'done', text, title: 't' });
+  }
   await emptyOk(await stop('No response requested. Pushed the fix anyway.'));
   assert.equal((await nextOf(ws, 'alert')).type === 'alert' && ws.pending(), 0);
 });

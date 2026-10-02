@@ -307,10 +307,10 @@ rejoined. `turn/completed` with `status: "completed"` for a listed thread (not a
 sub-agent thread) raises `alert done` by the same rule as Claude Code's Stop hook (see
 `POST /hooks/stop` below): `text` is up to 500 characters of the turn's last `agentMessage` (from
 the turn's `item/completed` notifications; `turn.items` of the notification may be empty), and
-nothing is raised when that answer, trimmed, is shorter than 20 characters or is "No response
-requested.". `title` is the first 60 characters of the turn's first `userMessage` (typed in the
-TUI or sent from the watch) on one line; without one, the session title, omitted when there is
-none. Interrupted and failed turns raise nothing. A thread whose status gains `waitingOnApproval` raises `alert
+nothing is raised when that answer, trimmed, is shorter than 20 characters (8 when it contains
+Hangul, Han or Kana) or is "No response requested.". `title` is the first 60 characters of the
+turn's first `userMessage` (typed in the TUI or sent from the watch) on one line; without one,
+the session title, omitted when there is none. Interrupted and failed turns raise nothing. A thread whose status gains `waitingOnApproval` raises `alert
 needs_input` without `text` when, one second later, it still waits and no request of its session
 is open (normally the approval itself is on the watch as a request); a sub-agent's counts for its
 parent's session.
@@ -393,8 +393,8 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
 - `POST /hooks/notification`, `POST /hooks/stop` — empty `200`; `permission_prompt` and
   `agent_needs_input` notifications raise `alert needs_input` when no request of that session is
   open. Stop raises `alert done` with up to 500 characters of `last_assistant_message`, unless the
-  trimmed answer is shorter than 20 characters or is "No response requested." (nothing is raised
-  then). Its `title` is the first 60 characters of the prompt when the turn was typed by the user
+  trimmed answer is shorter than 20 characters (8 when it contains Hangul, Han or Kana) or is
+  "No response requested." (nothing is raised then). Its `title` is the first 60 characters of the prompt when the turn was typed by the user
   (found in `transcript_path`: the newest non-tool_result user line, or the `origin` line of the
   same `promptId`, with `origin.kind` `human` and no `isMeta`; reminders, pasted content and
   command wrappers stripped); otherwise (task notification, peer message, scheduled task, local

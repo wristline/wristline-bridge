@@ -232,10 +232,10 @@ Without a `history_base` link a rollout is a thread of its own.
 
 When a turn of a thread the daemon has loaded finishes, the bridge sends the watch the same `done`
 alert as for Claude Code: up to 500 characters of the turn's last answer, titled by your prompt
-(or the thread title when the turn had none). Short answers (under 20 characters), "No response
-requested.", interrupted turns, sub-agents and Quick Asks raise none. A thread waiting on an
-approval that is not on the watch as a request raises `needs_input` instead. The watch shows
-these only while it is connected; alerts of the last 10 minutes are replayed when it reconnects.
+(or the thread title when the turn had none). Short answers (under 20 characters, or under 8 when
+they contain Korean, Chinese or Japanese), "No response requested.", interrupted turns, sub-agents
+and Quick Asks raise none. A thread waiting on an approval that is not on the watch as a request
+raises `needs_input` instead. The watch shows these only while it is connected; alerts of the last 10 minutes are replayed when it reconnects.
 Sessions of a TUI with its own embedded server (see Limits) raise no alerts.
 
 For when the watch is away, Codex's own `notify` program can post elsewhere (e.g. Slack). Codex

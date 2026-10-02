@@ -2,10 +2,16 @@ import type { AlertKind, Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, 
 import type { PendingRegistry } from './pending.ts';
 import { clip, oneLine } from './util.ts';
 
-/** A `done` alert carries up to DONE_TEXT_MAX of the answer and a title of up to DONE_TITLE_MAX; answers shorter than DONE_MIN (or "No response requested.") raise none. */
+/**
+ * A `done` alert carries up to DONE_TEXT_MAX of the answer and a title of up to DONE_TITLE_MAX;
+ * answers shorter than DONE_MIN characters (DONE_MIN_CJK when they contain Hangul, Han or Kana,
+ * which say as much in fewer characters), or "No response requested.", raise none.
+ */
 const DONE_TEXT_MAX = 500;
 const DONE_TITLE_MAX = 60;
 const DONE_MIN = 20;
+const DONE_MIN_CJK = 8;
+const CJK = /[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const NO_RESPONSE = /^no response requested\.?$/i;
 
 /** What providers call to publish changes; implemented by the WebSocket hub. */
@@ -60,7 +66,8 @@ export function sessionKey(provider: ProviderId, nativeId: string): string {
 /** The text of a turn's `done` alert, by the rule of the user's Slack Stop hook: undefined (no alert) for an empty, short or "No response requested." answer. */
 export function doneText(answer: string | undefined): string | undefined {
   const text = (answer ?? '').trim();
-  return [...text].length < DONE_MIN || NO_RESPONSE.test(text) ? undefined : clip(text, DONE_TEXT_MAX);
+  const min = CJK.test(text) ? DONE_MIN_CJK : DONE_MIN;
+  return [...text].length < min || NO_RESPONSE.test(text) ? undefined : clip(text, DONE_TEXT_MAX);
 }
 
 /** A usage limit the agent hit, from its transcript: the record's time, the agent's message and, when known, when the limit resets (ISO 8601). */
