@@ -68,7 +68,12 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
   (Claude Code only) marks an attribution inferred from the home's login timeline rather than
-  known for certain. A missing `account` means a single or unknown account.
+  known for certain. `primary: true` marks the account the provider's primary home is logged into
+  now (`claudeHome`/`codexHome`, as opposed to a home added with `accounts add`; with a single home,
+  its login), wherever it appears: in a session of any home and in usage; otherwise `primary` is
+  absent. It follows that home's login: when the login changes, the affected usage entries and live
+  sessions are sent again at once. The watch uses `primary` for default ordering; marks/labels
+  are chosen on the watch. A missing `account` means a single or unknown account.
 - **Item** — one entry of a conversation: `kind` is `user`, `assistant`, `tool` or `notice`.
   `seq` starts at 1 and orders items within a session; an updated item (e.g. a tool that finished)
   is sent again with the same `seq`. `text` is at most 4000 UTF-16 code units, `detail` (tool

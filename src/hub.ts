@@ -4,6 +4,7 @@ import { PendingRegistry, type PendingOptions, type Presence } from './pending.t
 import {
   API_VERSION,
   CLOSE_REVOKED,
+  type Account,
   type Alert,
   type AlertKind,
   type ClientMode,
@@ -257,8 +258,11 @@ export class BridgeHub implements Hub {
   login(provider: SessionProvider, accountId: string | undefined): void {
     if (this.#logins.has(provider) && this.#logins.get(provider) === accountId) return;
     const before = new Map([...this.#usage].map(([key, u]) => [key, this.#visible(u)]));
+    // A primary home's login change moves `primary` from one account to the other.
+    const flipped = new Set(this.#primaryHome(provider.id) === provider ? [this.#logins.get(provider), accountId] : []);
+    const flips = (u: Pick<Usage, 'provider' | 'account'>): boolean => u.provider === provider.id && u.account !== undefined && flipped.has(u.account.id);
     this.#logins.set(provider, accountId);
-    const changed = [...this.#usage].filter(([key, u]) => this.#visible(u) !== before.get(key)).map(([key]) => key);
+    const changed = [...this.#usage].filter(([key, u]) => this.#visible(u) !== before.get(key) || (flips(u) && this.#visible(u))).map(([key]) => key);
     // Removals first, then the entries now shown. Sent at once, past the throttle: a removal must not wait, nor an entry coming back; a change held back for one now hidden is void.
     for (const key of [...changed.filter((k) => before.get(k)), ...changed.filter((k) => !before.get(k))]) {
       const t = this.#usageThrottles.get(key);
@@ -269,6 +273,24 @@ export class BridgeHub implements Hub {
       }
       this.#sendUsage(key);
     }
+    for (const p of this.#providers) {
+      if (p.id !== provider.id) continue;
+      for (const s of p.listSessions()) if (s.status !== 'ended' && flips(s)) this.#broadcast({ type: 'session', session: this.#overlay(s) });
+    }
+  }
+
+  /** The instance of the provider listed first: its primary home (`claudeHome`/`codexHome`, see config.ts). */
+  #primaryHome(provider: ProviderId): SessionProvider | undefined {
+    return this.#providers.find((p) => p.id === provider);
+  }
+
+  /** The entry's account with `primary` set while it is the current login of its provider's primary home, without it otherwise. */
+  #stamp<T extends { provider: ProviderId; account?: Account }>(entry: T): T {
+    if (!entry.account) return entry;
+    const home = this.#primaryHome(entry.provider);
+    const { primary: _, ...account } = entry.account;
+    if (home && this.#logins.get(home) === account.id) return { ...entry, account: { ...account, primary: true } };
+    return entry.account.primary === undefined ? entry : { ...entry, account };
   }
 
   /**
@@ -316,7 +338,7 @@ export class BridgeHub implements Hub {
     const stored = this.#usage.get(key);
     if (!stored) return;
     const shown = this.#visible(stored) ? this.#current(key) : undefined;
-    this.#broadcast({ type: 'usage', usage: shown ?? { ...stored, windows: [] } });
+    this.#broadcast({ type: 'usage', usage: this.#stamp(shown ?? { ...stored, windows: [] }) });
   }
 
   /** The entry as the watch should see it now: without windows whose reset time has passed; undefined when none is left. */
@@ -366,7 +388,7 @@ export class BridgeHub implements Hub {
 
   /** The merged entries of accounts logged in now (and those without an account), without windows whose reset time has passed. */
   usageList(): Usage[] {
-    return [...this.#usage].flatMap(([key, u]) => (this.#visible(u) ? (this.#current(key) ?? []) : []));
+    return [...this.#usage].flatMap(([key, u]) => (this.#visible(u) ? (this.#current(key) ?? []) : [])).map((u) => this.#stamp(u));
   }
 
   /** The buffered alerts of the past ALERT_TTL_MS, oldest first: a reconnecting watch posts the ones it missed. */
@@ -479,8 +501,9 @@ export class BridgeHub implements Hub {
     }
   }
 
-  /** An open request means the session waits on an answer; a prompt would have to wait too. */
-  #overlay(session: Session): Session {
+  /** An open request means the session waits on an answer; a prompt would have to wait too. Its account is stamped (`primary`). */
+  #overlay(raw: Session): Session {
+    const session = this.#stamp(raw);
     if (!this.pending.hasSession(session.id)) return session;
     const lasting = session.promptBlock !== undefined && session.promptBlock !== 'busy';
     return { ...session, status: 'needs_input', promptBlock: lasting ? session.promptBlock : 'awaiting_input' };

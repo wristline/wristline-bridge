@@ -79,7 +79,7 @@ const usage: Usage = {
   ],
   account: { id: 'c0a1b2c3-0000-4000-8000-000000000001', label: 'dev@example.com' },
 };
-/** Two Claude Code accounts: one attributed for certain, one estimated from the home's login timeline. */
+/** Two Claude Code accounts: one attributed for certain (the primary home's login), one estimated from the home's login timeline (an extra home's login). */
 const claudeUsage: Usage[] = [
   {
     provider: 'claude-code',
@@ -109,6 +109,10 @@ provider.items.set('6f1c2d3e-0000-4000-8000-000000000001', items);
 provider.items.set('6f1c2d3e-0000-4000-8000-000000000002', []);
 const codexProvider = new FakeProvider('codex');
 codexProvider.sessions = [codex];
+/** An extra Claude Code home (`accounts add`), logged into acc-school; `provider` is the primary home, logged into acc-me. */
+const schoolHome = new FakeProvider();
+/** The Codex session as the watch sees it: its account is the primary Codex home's login. */
+const codexShown: Session = { ...codex, account: { id: 'c0a1b2c3-0000-4000-8000-000000000001', label: 'dev@example.com', primary: true } };
 /** Opened before the snapshot is taken and resolved after it, one from the watch and one in the terminal. */
 let permission: Promise<Answers | null>;
 let question: Promise<Answers | null>;
@@ -119,7 +123,10 @@ const now = (): number => clock;
 const fakeEnv = { FAKE_MODE: 'ok' };
 
 before(async () => {
-  bridge = await startBridge([provider, codexProvider], now, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { bins: { claude: 'claude' }, now }));
+  bridge = await startBridge([provider, codexProvider, schoolHome], now, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { bins: { claude: 'claude' }, now }));
+  bridge.hub.login(provider, 'acc-me');
+  bridge.hub.login(schoolHome, 'acc-school');
+  bridge.hub.login(codexProvider, usage.account?.id);
   for (const u of claudeUsage) bridge.hub.usage(u);
   bridge.hub.usage(usage);
 });
@@ -241,7 +248,7 @@ test('requests: open and list', async () => {
     { signal: terminal.signal },
   );
   fixture('event-request-question', await ws.next());
-  assert.deepEqual(await ws.next(), { type: 'session', session: { ...codex, status: 'needs_input', promptBlock: 'awaiting_input' } });
+  assert.deepEqual(await ws.next(), { type: 'session', session: { ...codexShown, status: 'needs_input', promptBlock: 'awaiting_input' } });
 
   // Raised before the snapshot below is taken, which replays it for a watch that was offline.
   bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.', 'Fix the build script');
@@ -332,17 +339,19 @@ test('WebSocket events', async () => {
   const changed = await ws.next();
   fixture('event-usage', changed);
   clock -= 60_000;
-  // The Codex home logs into another account: the entry is removed at once (empty windows), throttle or not; logging back in brings it back.
+  // The Codex home logs into another account: the entry is removed at once (empty windows), throttle or not, and the session of that account is no longer marked primary; logging back in brings both back.
   bridge.hub.login(codexProvider, 'c0a1b2c3-0000-4000-8000-000000000002');
   fixture('event-usage-removed', await ws.next());
+  assert.deepEqual(await ws.next(), { type: 'session', session: { ...codex, status: 'needs_input', promptBlock: 'awaiting_input' } });
   bridge.hub.login(codexProvider, usage.account?.id);
   assert.deepEqual(await ws.next(), changed);
+  assert.deepEqual(await ws.next(), { type: 'session', session: { ...codexShown, status: 'needs_input', promptBlock: 'awaiting_input' } });
 
   // The question is answered in the Codex terminal instead.
   terminal.abort();
   assert.equal(await question, null);
   assert.deepEqual(await ws.next(), { type: 'resolved', requestId: 'req-2', by: 'terminal' });
-  assert.deepEqual(await ws.next(), { type: 'session', session: codex });
+  assert.deepEqual(await ws.next(), { type: 'session', session: codexShown });
 
   await new Promise((r) => setTimeout(r, 100));
   const heard: string[] = [];

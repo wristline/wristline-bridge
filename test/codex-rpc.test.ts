@@ -516,6 +516,44 @@ test('codex provider: a thread the daemon has loaded shows the daemon\'s login, 
   assert.equal(account(other), 'Work');
 });
 
+test('codex provider: the primary home\'s login (here the daemon\'s, without auth.json) is marked primary in sessions and usage; an extra home\'s login is not', async (t) => {
+  const [A, B] = ['a1a1a1a1-0000-4000-8000-00000000000a', 'b2b2b2b2-0000-4000-8000-00000000000b'];
+  const [loaded, other] = ['019a0000-0000-7000-8000-0000000000b1', '019a0000-0000-7000-8000-0000000000b2'];
+  const { rpc, home } = fakeRpc('primary', {
+    loaded: [loaded],
+    threads: { [loaded]: { status: { type: 'idle' } } },
+    account: { type: 'chatgpt', email: 'a@example.com', planType: 'plus' },
+    accountId: A,
+    rateLimits: { limitId: 'codex', primary: { usedPercent: 2, windowDurationMins: 10080, resetsAt: null }, secondary: null },
+  });
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${loaded}.jsonl`), limitsRollout(loaded, B, '2026-09-29T09:01:00.000Z', 5, 1791279979)); // Created under B; the daemon runs it as A.
+  const extra = join(root, 'primary-extra');
+  const extraDay = join(extra, 'sessions', '2026', '09', '29');
+  mkdirSync(extraDay, { recursive: true });
+  writeFileSync(join(extra, 'auth.json'), authJson(B, 'b@example.com'));
+  writeFileSync(join(extraDay, `rollout-2026-09-29T09-00-00-${other}.jsonl`), limitsRollout(other, B, new Date(Date.now() + 3600_000).toISOString(), 9, 1791279979));
+  captureLog(t);
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc, logins: [{ at: '2026-09-29T08:00:00.000Z', id: A }] });
+  const second = new CodexProvider({ home: extra, historyDays: 3650, logins: [{ at: '2026-09-29T08:00:00.000Z', id: B }] });
+  const hub = new BridgeHub({ providers: [provider, second], alerts: { now: () => Date.parse('2026-09-29T10:00:00Z') }, log: () => {} });
+  t.after(() => {
+    provider.stop();
+    second.stop();
+    hub.close();
+  });
+  await provider.start(hub);
+  await second.start(hub);
+  const a = { id: A, label: 'a@example.com' };
+  const b = { id: B, label: 'b@example.com' };
+  const sessions = (): unknown[] => hub.sessions().sort((x, y) => x.id.localeCompare(y.id)).map((s) => s.account);
+  await waitFor(() => JSON.stringify(sessions()) === JSON.stringify([{ ...a, primary: true }, b]) || undefined);
+  const usage = (): unknown[] => hub.usageList().map((u) => u.account).sort((x, y) => (x?.id ?? '').localeCompare(y?.id ?? ''));
+  await waitFor(() => JSON.stringify(usage()) === JSON.stringify([{ ...a, primary: true }, b]) || undefined);
+  assert.equal(provider.listSessions().find((s) => s.id === `codex:${loaded}`)?.account?.primary, undefined, 'set by the hub, not stored by the provider');
+});
+
 /** An `auth.json` naming a ChatGPT login (an unsigned id_token; no token value is ever read out). */
 function authJson(accountId: string, email: string): string {
   const segment = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');

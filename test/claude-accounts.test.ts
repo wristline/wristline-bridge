@@ -141,6 +141,49 @@ test('claude-code: only the usage of the home\'s current login reaches the watch
   }
 });
 
+test('claude-code: the primary home\'s current login is marked primary in sessions and usage, an extra home\'s is not; the login timeline\'s estimate of an earlier login is not', async () => {
+  let clock = Date.now();
+  const main = accountHome('claude-primary', () => clock);
+  const extra = accountHome('claude-extra', () => clock);
+  const [mine, old, theirs] = ['dddddddd-0000-4000-8000-000000000001', 'dddddddd-0000-4000-8000-000000000002', 'dddddddd-0000-4000-8000-000000000003'];
+  main.login('acc-a', 'a@example.com');
+  extra.login('acc-b', 'b@example.com');
+  const primary = new ClaudeCodeProvider({ home: main.home, historyDays: 7, now: () => clock });
+  const second = new ClaudeCodeProvider({ home: extra.home, historyDays: 7, now: () => clock });
+  const hub = new BridgeHub({ providers: [primary, second], alerts: { now: () => clock }, log: quiet });
+  try {
+    await primary.start(hub);
+    await second.start(hub);
+    primary.stop();
+    second.stop();
+    clock += 1000;
+    main.entry(process.pid, mine);
+    main.entry(process.ppid, old);
+    extra.entry(process.pid, theirs);
+    await primary.refresh();
+    await second.refresh();
+    const accounts = (): unknown[] => hub.sessions().sort((x, y) => x.id.localeCompare(y.id)).map((s) => s.account);
+    const a = { id: 'acc-a', label: 'a@example.com' };
+    const b = { id: 'acc-b', label: 'b@example.com' };
+    assert.deepEqual(accounts(), [{ ...a, primary: true }, { ...a, primary: true }, b]);
+    assert.equal(primary.listSessions()[0]?.account?.primary, undefined, 'set by the hub, not stored by the provider');
+    const limits = { five_hour: { used_percentage: 10, resets_at: Math.floor(clock / 1000) + 3600 } };
+    await primary.statusline({ session_id: mine, rate_limits: limits });
+    await second.statusline({ session_id: theirs, rate_limits: limits });
+    assert.deepEqual(hub.usageList().map((u) => u.account), [{ ...a, primary: true }, b]);
+
+    // The primary home switches to acc-c: its sessions stay acc-a's (one known from its statusLine, one an estimate from the login timeline) and are no longer primary.
+    clock += 1000;
+    main.login('acc-c', 'c@example.com');
+    await primary.refresh();
+    assert.deepEqual(accounts(), [a, { ...a, estimated: true }, b]);
+    await primary.statusline({ session_id: mine, rate_limits: limits });
+    assert.deepEqual(hub.usageList().map((u) => u.account), [b], 'acc-a is logged in nowhere: not shown');
+  } finally {
+    hub.close();
+  }
+});
+
 test('claude-code: after a login switch, an old process whose weekly window reset (new fingerprint) never shows its numbers as the new login\'s, also after a bridge restart', async () => {
   let clock = Date.parse('2026-10-01T00:00:00Z');
   const { home, login, entry } = accountHome('claude-rollover', () => clock);

@@ -516,8 +516,10 @@ test('usage goes out only for the accounts logged in now: the others stay out of
       ...(account ? { account: { id: account, label: account } } : {}),
     });
     const [a, b, c, codex] = [report('claude-code', 'acc-a', 10), report('claude-code', 'acc-b', 20), report('claude-code', 'acc-c', 30), report('codex', undefined, 5)];
+    // Home A is the primary home: its login is marked.
+    const primary = (u: Usage): Usage => ({ ...u, account: { id: u.account?.id ?? '', label: u.account?.label ?? '', primary: true } });
     hub.usage(a);
-    assert.deepEqual(await ws.next(), { type: 'usage', usage: a });
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: primary(a) });
     hub.usage(c);
     hub.usage(b);
     assert.deepEqual(await ws.next(), { type: 'usage', usage: b }, 'nothing for acc-c');
@@ -538,7 +540,7 @@ test('usage goes out only for the accounts logged in now: the others stay out of
     hub.usage(report('claude-code', 'acc-a', 11));
     hub.login(homeA, 'acc-c');
     assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...a, windows: [] } });
-    assert.deepEqual(await ws.next(), { type: 'usage', usage: c });
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: primary(c) });
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(ws.pending(), 0, 'the change held back for acc-a does not follow its removal');
     assert.deepEqual(keys(hub.usageList()), ['claude-code:acc-c', 'claude-code:acc-b', 'codex:']);
@@ -551,7 +553,7 @@ test('usage goes out only for the accounts logged in now: the others stay out of
     hub.login(homeA, undefined); // logged out
     assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...c, windows: [] } });
     hub.login(homeA, 'acc-a');
-    assert.deepEqual(await ws.next(), { type: 'usage', usage: report('claude-code', 'acc-a', 12) });
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: primary(report('claude-code', 'acc-a', 12)) });
     // Removals go first, whatever order the entries were stored in: acc-c (stored before acc-b) comes back after acc-b goes.
     hub.login(homeB, 'acc-c');
     assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...b, windows: [] } });
@@ -569,6 +571,61 @@ test('usage goes out only for the accounts logged in now: the others stay out of
   } finally {
     hub.close();
     await server.close();
+  }
+});
+
+test('primary marks the current login of the primary home (the first instance) in sessions and usage, in every home; a change of that login moves it at once', async () => {
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  const [home, extra, codexHome] = [new FakeProvider(), new FakeProvider(), new FakeProvider('codex')];
+  const me: Account = { id: 'acc-me', label: 'me' };
+  const school: Account = { id: 'acc-school', label: 'school', estimated: true };
+  const mine = { ...session('mine'), account: me };
+  const theirs = { ...session('theirs'), account: school };
+  home.sessions = [mine, { ...session('old'), status: 'ended', account: me }];
+  extra.sessions = [theirs, { ...session('shared'), account: me }];
+  codexHome.sessions = [{ ...session('x'), id: 'codex:x', provider: 'codex', account: { id: 'cx', label: 'cx' } }];
+  const bridge = await startBridge([home, extra, codexHome], () => clock);
+  try {
+    const report = (account: Account): Usage => ({ provider: 'claude-code', updatedAt: new Date(clock).toISOString(), windows: [{ id: '5h', usedPercent: 1, resetsAt: '2026-09-29T12:00:00.000Z' }], account });
+    const mark = (x: { account?: Account }): unknown[] => [x.account?.id, x.account?.primary];
+    const marked = (shown: { account?: Account }[]): unknown[] => shown.map(mark);
+    // Before the primary home's login is known nobody is marked.
+    bridge.hub.usage(report(me));
+    assert.deepEqual(marked(bridge.hub.sessions()), [['acc-me', undefined], ['acc-school', undefined], ['acc-me', undefined], ['cx', undefined]]);
+    bridge.hub.login(home, 'acc-me');
+    bridge.hub.login(extra, 'acc-school');
+    bridge.hub.login(codexHome, undefined);
+    bridge.hub.usage(report(school));
+    // The account, not the home: the extra home's session of acc-me is marked too; estimated stays.
+    assert.deepEqual(marked(bridge.hub.sessions()), [['acc-me', true], ['acc-school', undefined], ['acc-me', true], ['cx', undefined]]);
+    assert.deepEqual(bridge.hub.usageList().map((u) => u.account), [{ ...me, primary: true }, school]);
+    const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+    const snapshot = await ws.next();
+    assert.ok(snapshot.type === 'snapshot');
+    assert.deepEqual(marked(snapshot.usage), [['acc-me', true], ['acc-school', undefined]]);
+    assert.deepEqual(marked(snapshot.sessions), [['acc-me', true], ['acc-school', undefined], ['acc-me', true], ['cx', undefined]]);
+
+    // The extra home's login changing moves nothing; the primary home's does, at once (usage first, then the live sessions it concerns).
+    bridge.hub.login(extra, 'acc-me');
+    assert.deepEqual(await ws.next(), { type: 'usage', usage: { ...report(school), windows: [] } });
+    bridge.hub.login(extra, 'acc-school');
+    assert.equal((await ws.next()).type, 'usage');
+    bridge.hub.login(home, 'acc-school');
+    const events = [await ws.next(), await ws.next(), await ws.next(), await ws.next()];
+    assert.deepEqual(events.map((e) => [e.type, e.type === 'usage' ? mark(e.usage) : e.type === 'session' ? [e.session.title, ...mark(e.session)] : undefined]), [
+      ['usage', ['acc-me', undefined]],
+      ['usage', ['acc-school', true]],
+      ['session', ['mine', 'acc-me', undefined]],
+      ['session', ['theirs', 'acc-school', true]],
+    ]);
+    const shared = await ws.next();
+    assert.deepEqual(shared.type === 'session' && [shared.session.title, shared.session.account], ['shared', me]);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(ws.pending(), 0, 'nothing for the ended session or the other provider');
+    assert.deepEqual(bridge.hub.usageList().map((u) => u.account), [{ ...school, primary: true }]);
+    ws.close();
+  } finally {
+    await bridge.close();
   }
 });
 

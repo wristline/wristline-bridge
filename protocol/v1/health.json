@@ -12,6 +12,11 @@
       "id": "codex",
       "status": "ok",
       "version": "0.159.0"
+    },
+    {
+      "id": "claude-code",
+      "status": "ok",
+      "version": "2.1.284"
     }
   ]
 }

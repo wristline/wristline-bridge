@@ -275,9 +275,10 @@ wristline-bridge accounts remove --claude-home ~/.claude-school
 `add` creates the directory (mode 0700) if needed, records it in `config.json` and prints the
 exact next steps: log in there (`CLAUDE_CONFIG_DIR=$HOME/.claude-school claude auth login`), an
 alias for your shell profile (`alias claude-school='CLAUDE_CONFIG_DIR=$HOME/.claude-school claude'`;
-the bridge never edits your profile), then `hooks install` and a bridge restart. `--label` gives
-the account a short name (up to 12 characters) shown on the watch instead of its email; if the
-home was not logged in yet, run the same `add` again afterwards. `setup` also proposes homes it
+the bridge never edits your profile), then `hooks install` and a bridge restart. `--label` is
+optional: it gives the account a short name (up to 12 characters) shown on the watch instead of
+its email; if the home was not logged in yet, run the same `add` again afterwards. The watch can
+also give each account a nickname of its own. `setup` also proposes homes it
 finds (`$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`, `~/.claude*`, `~/.codex*`) and asks about each one;
 with `--yes` (or without a terminal) it only lists them with the `accounts add` line to run, so a
 backup kept next to your home is never enrolled unasked. Each Claude Code home has its own
@@ -294,7 +295,8 @@ so every home's status line reaches the bridge. A `settings.json` copied from an
 recognised: its relay entry is replaced rather than saved as your original status line command
 (set that again with `/statusline` in the new home if you want one).
 
-Sessions and plan usage then carry `account` (id and label). For Codex a live thread shows the
+Sessions and plan usage then carry `account` (id and label; `primary` marks the account your
+default home, normally `~/.claude` or `~/.codex`, is logged into, which the watch lists first). For Codex a live thread shows the
 login running it: the daemon's for a thread it has loaded, the home's (`auth.json`) for another;
 an ended thread shows the account that created it (its rollout records it). The daemon reports
 whose limits it sends.

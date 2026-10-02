@@ -22,6 +22,8 @@ export interface Account {
   label: string;
   /** Claude Code only: inferred from the home's login timeline rather than known for certain. */
   estimated?: boolean;
+  /** The current login of the provider's primary home (`claudeHome`/`codexHome`, not one added with `accounts add`); absent otherwise. Set by the hub. */
+  primary?: boolean;
 }
 
 export interface Session {

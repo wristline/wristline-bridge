@@ -49,7 +49,8 @@
       ],
       "account": {
         "id": "acc-me",
-        "label": "dev@example.com"
+        "label": "dev@example.com",
+        "primary": true
       }
     },
     {
@@ -71,7 +72,8 @@
       ],
       "account": {
         "id": "c0a1b2c3-0000-4000-8000-000000000001",
-        "label": "dev@example.com"
+        "label": "dev@example.com",
+        "primary": true
       }
     }
   ]
