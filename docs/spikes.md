@@ -141,11 +141,11 @@ parent chain) so a stale or foreign pane never receives keystrokes.
 
 ## Phase 3 — Codex control (2026-09-29)
 
-**Setup.** Codex CLI 0.159.0, `CODEX_HOME=~/.codex-wsl`, a managed daemon already running as
+**Setup.** Codex CLI 0.159.0, a non-default `CODEX_HOME`, a managed daemon already running as
 `codex app-server --remote-control --listen unix:// --managed-daemon`, control socket
 `$CODEX_HOME/app-server-control/app-server-control.sock` (a symlink into
 `/tmp/codex-daemon-<uid>/`). A throwaway directory with its own `.codex/config.toml` (hooks and
-sub-agents off, so the user's global PreToolUse gate did not interfere) and an `AGENTS.md` asking
+sub-agents off, so a global PreToolUse hook did not interfere) and an `AGENTS.md` asking
 the model to run commands itself. The TUI ran in a dedicated tmux session as
 `codex -a on-request -s read-only`, a spike client connected through `codex app-server proxy`.
 Five short turns in total (model `gpt-6-astra`, effort low).
@@ -245,7 +245,7 @@ Bridge built from this commit (`dist/cli.js run`, separate `XDG_CONFIG_HOME`, po
 
 ## Codex rewind and daemon restart (2026-09-30)
 
-**Setup.** Codex CLI 0.159.2, the user's own `CODEX_HOME=~/.codex-wsl`, a TUI in daemon mode
+**Setup.** Codex CLI 0.159.2, a non-default `CODEX_HOME` in everyday use, a TUI in daemon mode
 that had rewound a thread (`thread/revert`), and a bridge that had been started ~2.5 h before the
 daemon (after a WSL restart, where `/tmp` — and with it the socket the control symlink points to —
 is gone).
@@ -274,7 +274,7 @@ is gone).
 
 ## Claude Code plan-limit windows (2026-09-30)
 
-**Setup.** Claude Code 2.1.285, the user's own sessions relaying their statusLine every 10 s. A
+**Setup.** Claude Code 2.1.285, everyday sessions relaying their statusLine every 10 s. A
 temporary, uncommitted log in the bridge service printed only the key names under `rate_limits`
 (never values); the Claude Code binary was searched for the code that builds the statusLine JSON.
 
