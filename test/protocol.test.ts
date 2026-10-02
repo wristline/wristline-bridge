@@ -363,7 +363,7 @@ test('WebSocket events', async () => {
   await new Promise((r) => setTimeout(r, 100));
   const heard: string[] = [];
   while (other.pending() > 0) heard.push((await other.next()).type);
-  assert.deepEqual(heard, ['resolved', 'session', 'resolved', 'session'], 'the background watch heard the two resolutions and the sessions leaving needs_input, not the item, session_removed or usage');
+  assert.deepEqual(heard, ['resolved', 'session', 'session_removed', 'resolved', 'session'], 'the background watch heard the two resolutions, the sessions leaving needs_input and the removal, not the item, the login churn or usage');
   ws.close();
   other.close();
 });

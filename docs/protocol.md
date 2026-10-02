@@ -281,14 +281,14 @@ While the watch app is not on screen it only needs what should wake the wearer. 
 
 - `request` and `resolved`,
 - `alert`,
-- `session` events whose `status` changed to or from `needs_input` (as last sent by the bridge;
-  a session's first event counts as a change only when it is `needs_input`),
-- `session_removed` for a session whose last `session` event was `needs_input` (it ended or left
-  the list without a `session` event: the client would otherwise keep showing it as waiting).
+- `session` events whose `status` changed (`running`, `idle`, `needs_input`; compared with the
+  status the bridge last sent for that session, so a session's first event always counts), still
+  throttled to one per session per 2 s: enough to keep the watch's running and waiting counts right,
+- every `session_removed` (a session that ended or left the list changes those counts).
 
 Nothing else: no `usage` (removals included: `GET /api/usage` has the current entries), no
-`item` (the subscription stays and resumes in the foreground), no other `session` churn or
-`session_removed`, no `ask`. `{"type": "mode", "mode": "foreground"}` restores the full stream. A new connection starts in the foreground and always gets its
+`item` (the subscription stays and resumes in the foreground), no `session` event that changes
+only other fields (`lastActivity`, `context`, `title`, ...), no `ask`. `{"type": "mode", "mode": "foreground"}` restores the full stream. A new connection starts in the foreground and always gets its
 `snapshot`; after reconnecting, a client re-sends its `mode` (after its `subscribe`). A `mode`
 with an unknown value is ignored.
 

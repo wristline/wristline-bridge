@@ -154,7 +154,7 @@ export class BridgeHub implements Hub {
   readonly #ping: NodeJS.Timeout;
   /** Oldest first, at most ALERT_KEEP. */
   readonly #alerts: Alert[] = [];
-  /** Status as last broadcast per session: a background client hears of a change to or from needs_input only. */
+  /** Status as last broadcast per session: a background client hears of a session only when its status changes. */
   readonly #lastStatus = new Map<string, Session['status']>();
   readonly #now: () => number;
   readonly #newId: () => string;
@@ -206,10 +206,9 @@ export class BridgeHub implements Hub {
   removed(sessionId: string): void {
     clearTimeout(this.#throttles.get(sessionId)?.timer);
     this.#throttles.delete(sessionId);
-    // A background client told the session needs input would otherwise keep showing that.
-    const waited = this.#lastStatus.get(sessionId) === 'needs_input';
+    // A removal changes what a background client counts (running, waiting): it always hears of it.
     this.#lastStatus.delete(sessionId);
-    this.#broadcast({ type: 'session_removed', sessionId }, waited);
+    this.#broadcast({ type: 'session_removed', sessionId }, true);
   }
 
   usage(usage: Usage): boolean {
@@ -534,7 +533,7 @@ export class BridgeHub implements Hub {
     for (const c of this.#clients) if (c.mode === 'foreground' || background) this.#sendRaw(c, data);
   }
 
-  /** What a background client hears: requests and their resolution, alerts, and a session entering or leaving needs_input (`removed` adds the removal of one that needed input). */
+  /** What a background client hears: requests and their resolution, alerts, and a session whose status changed (`removed` adds every removal). */
   #forBackground(event: ServerEvent): boolean {
     switch (event.type) {
       case 'request':
@@ -543,9 +542,9 @@ export class BridgeHub implements Hub {
         return true;
       case 'session': {
         const { id, status } = event.session;
-        const was = this.#lastStatus.get(id) === 'needs_input';
+        const was = this.#lastStatus.get(id);
         this.#lastStatus.set(id, status);
-        return was !== (status === 'needs_input');
+        return was !== status;
       }
       default:
         return false;
