@@ -308,16 +308,23 @@ test('WebSocket events', async () => {
     text: "You've hit your session limit · resets 7:40pm (Asia/Seoul)",
     error: true,
     resetsAt: '2026-09-29T10:40:00.000Z',
+    limitKind: 'window',
   };
   provider.emit('6f1c2d3e-0000-4000-8000-000000000001', limit);
   const limitItem = await ws.next();
   fixture('event-item-limit', limitItem);
   assert.deepEqual(await talk.next(), limitItem);
+  // Usage credits ran out (and no window is full): no reset time.
+  const credits: Item = { seq: 9, kind: 'assistant', ts: '2026-09-29T10:00:10.000Z', text: 'Your workspace is out of credits. Add credits to continue.', error: true, limitKind: 'credits' };
+  provider.emit('6f1c2d3e-0000-4000-8000-000000000001', credits);
+  const creditsItem = await ws.next();
+  fixture('event-item-limit-credits', creditsItem);
+  assert.deepEqual(await talk.next(), creditsItem);
   talk.close();
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(other.pending(), 0, 'items only reach subscribers of that session');
   // Its alert reaches every client, the one in background mode too.
-  bridge.hub.alert(running.id, 'limit', limit.text, running.title, limit.resetsAt);
+  bridge.hub.alert(running.id, 'limit', limit.text, running.title, { resetsAt: limit.resetsAt, limitKind: limit.limitKind });
   const limitAlert = await ws.next();
   fixture('event-alert-limit', limitAlert);
   assert.deepEqual(await other.next(), limitAlert);

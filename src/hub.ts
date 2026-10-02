@@ -9,6 +9,7 @@ import {
   type AlertKind,
   type ClientMode,
   type Item,
+  type LimitReset,
   type PendingRequest,
   type ProviderHealth,
   type ProviderId,
@@ -350,7 +351,7 @@ export class BridgeHub implements Hub {
     return windows.length === 0 ? undefined : windows.length === stored.windows.length ? stored : { ...stored, windows };
   }
 
-  alert(sessionId: string, kind: AlertKind, text?: string, title?: string, resetsAt?: string): void {
+  alert(sessionId: string, kind: AlertKind, text?: string, title?: string, reset?: LimitReset): void {
     const alert: Alert = {
       id: this.#newId(),
       at: new Date(this.#now()).toISOString(),
@@ -358,7 +359,9 @@ export class BridgeHub implements Hub {
       alert: kind,
       ...(text === undefined ? {} : { text }),
       ...(title === undefined ? {} : { title }),
-      ...(resetsAt === undefined ? {} : { resetsAt }),
+      ...(reset?.resetsAt === undefined ? {} : { resetsAt: reset.resetsAt }),
+      ...(reset?.resetsEstimated === undefined ? {} : { resetsEstimated: reset.resetsEstimated }),
+      ...(reset?.limitKind === undefined ? {} : { limitKind: reset.limitKind }),
     };
     this.#alerts.push(alert);
     if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();

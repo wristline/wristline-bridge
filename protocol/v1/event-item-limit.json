@@ -7,6 +7,7 @@
     "ts": "2026-09-29T10:00:09.000Z",
     "text": "You've hit your session limit · resets 7:40pm (Asia/Seoul)",
     "error": true,
-    "resetsAt": "2026-09-29T10:40:00.000Z"
+    "resetsAt": "2026-09-29T10:40:00.000Z",
+    "limitKind": "window"
   }
 }

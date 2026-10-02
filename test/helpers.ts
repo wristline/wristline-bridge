@@ -10,7 +10,7 @@ import { Auth, type AuthOptions } from '../src/auth.ts';
 import { BridgeHub } from '../src/hub.ts';
 import { pageItems } from '../src/jsonl.ts';
 import { PendingRegistry } from '../src/pending.ts';
-import type { Item, ItemKind, ItemPage, ProviderHealth, ProviderId, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
+import type { Item, ItemKind, ItemPage, LimitReset, ProviderHealth, ProviderId, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
 import { PromptBlocked, type Hub, type SessionProvider } from '../src/provider.ts';
 import { hookHandlers } from '../src/providers/claude-code/hooks.ts';
 import { startServer, type RunningServer } from '../src/server.ts';
@@ -64,14 +64,14 @@ export function recordingHub(): Hub & {
   logins: (string | null)[];
   removedIds: string[];
   resolved: string[];
-  alerts: { sessionId: string; alert: string; text?: string; title?: string; resetsAt?: string }[];
+  alerts: ({ sessionId: string; alert: string; text?: string; title?: string } & LimitReset)[];
 } {
   const sessions: Session[] = [];
   const usages: Usage[] = [];
   const logins: (string | null)[] = [];
   const removedIds: string[] = [];
   const resolved: string[] = [];
-  const alerts: { sessionId: string; alert: string; text?: string; title?: string; resetsAt?: string }[] = [];
+  const alerts: ({ sessionId: string; alert: string; text?: string; title?: string } & LimitReset)[] = [];
   return {
     sessions,
     usages,
@@ -87,7 +87,7 @@ export function recordingHub(): Hub & {
     },
     liveUsage: (_provider, u) => void (u && usages.push(u)),
     login: (_provider, id) => logins.push(id ?? null),
-    alert: (sessionId, alert, text, title, resetsAt) => void alerts.push({ sessionId, alert, ...(text !== undefined && { text }), ...(title !== undefined && { title }), ...(resetsAt !== undefined && { resetsAt }) }),
+    alert: (sessionId, alert, text, title, reset) => void alerts.push({ sessionId, alert, ...(text !== undefined && { text }), ...(title !== undefined && { title }), ...reset }),
     pending: new PendingRegistry({ onRequest: () => {}, onResolved: (r, by: ResolvedBy) => resolved.push(`${r.id}:${by}`) }),
   };
 }

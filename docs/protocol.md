@@ -80,7 +80,9 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   output) at most 600; longer text is cut with `…`. `pending` marks a tool still running, `error`
   a failed one; on an `assistant` item `error` marks an error the agent wrote into the conversation
   (a failed API call or turn, e.g. a usage limit; see "Limit alerts"), shown wherever assistant
-  items are, and `resetsAt` (ISO 8601), when known, is when that usage limit resets. `plan: true` marks an `assistant` item that is a plan the agent proposed in plan
+  items are; on a usage limit, `resetsAt` (ISO 8601), when known, is when it resets,
+  `resetsEstimated: true` marks a `resetsAt` inferred rather than read from the limit, and
+  `limitKind` is `window` or `credits` (see "Limit alerts"). `plan: true` marks an `assistant` item that is a plan the agent proposed in plan
   mode, shown wherever assistant items are (Claude Code: the plan of an `ExitPlanMode` call, which
   is followed by its `tool` row; Codex: a plan item, which earlier bridges sent as a `notice`).
 - **PendingRequest** — something the agent waits on. `kind` is `permission` or `question`. A
@@ -170,7 +172,7 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   codes with a generic message.
 
 - **Alert** — a session finished or waits for input: `id` (uuid), `at` (ISO 8601), `sessionId`,
-  `alert` (`needs_input`, `done` or `limit`), `text?`, `title?`, `resetsAt?` (see the `alert` event). Sent as it happens
+  `alert` (`needs_input`, `done` or `limit`), `text?`, `title?`, `resetsAt?`, `resetsEstimated?`, `limitKind?` (see the `alert` event). Sent as it happens
   and replayed in the `snapshot` (see "Missed alerts").
 
 All timestamps are ISO 8601 in UTC.
@@ -245,11 +247,11 @@ Server events (JSON text frames):
 | `snapshot` | `apiVersion, sessions, requests, usage, alerts` | right after connecting; `sessions` as in `GET /api/sessions` (live only); `alerts`: the last 10 alerts of the past 10 minutes, oldest first (see "Missed alerts") | `event-snapshot.json` |
 | `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json` |
 | `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
-| `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json`, `event-item-limit.json` |
+| `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json`, `event-item-limit.json`, `event-item-limit-credits.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first. Empty `windows`: remove the entry (its last window reset, or its account is no longer logged in; a login change is sent at once) | `event-usage.json`, `event-usage-removed.json` |
-| `alert` | `id, at, sessionId, alert, text?, title?, resetsAt?` | `needs_input` (text: short summary), `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) or `limit` (text: up to 500 characters of the agent's limit message; title: the session title; `resetsAt`: when the limit resets, when known; see "Limit alerts"); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json`, `event-alert-limit.json` |
+| `alert` | `id, at, sessionId, alert, text?, title?, resetsAt?, resetsEstimated?, limitKind?` | `needs_input` (text: short summary), `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) or `limit` (text: up to 500 characters of the agent's limit message; title: the session title; `resetsAt`, `resetsEstimated`, `limitKind`: as on its item; see "Limit alerts"); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json`, `event-alert-limit.json` |
 | `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
 Client events:
@@ -325,14 +327,24 @@ listed session (Quick Asks and sub-agents excluded):
   (e.g. "You've hit your session limit · resets 1:10am (Asia/Seoul)"), and, for a plan limit,
   `quotaLimits: {status: "rejected", resetsAt: <epoch seconds>, rateLimitType: "five_hour", …}`.
   Every `isApiErrorMessage` record is an `error` assistant item; only `rate_limit` is a limit.
+  `resetsAt` is `quotaLimits.resetsAt`, else the time in the text ("resets 1:10am (Asia/Seoul)",
+  "resets 2:30pm", "resets Oct 3, 1am (…)": the first such time after the record in that zone,
+  else the bridge machine's). A limit with `apiError: "model_requires_usage_credits"` ("You've
+  reached your Fable limit. Run /usage-credits to continue …") has `limitKind: "credits"` and no
+  `resetsAt`; every other limit `limitKind: "window"`.
 - Codex writes `task_complete` with `error: {message, codex_error_info}`; every such turn is an
   `error` assistant item (keyed by its `turn_id`), and `codex_error_info: "usage_limit_exceeded"`
   is a limit (e.g. "You've hit your usage limit. … try again at Sep 25th, 2026 1:21 PM." or "Your
-  workspace is out of credits. …"). The error has no reset time; the rate-limit snapshot written
-  just before it gives one: the latest `resets_at` of its windows at 100%, none when no window is
-  full.
+  workspace is out of credits. …"). The error has no reset field; the rate-limit snapshots written
+  just before it (`token_count.rate_limits`) give one, in this order: the latest `resets_at` of the
+  windows at 100% (also when the snapshot's `rate_limit_reached_type` says credits ran out, e.g.
+  `workspace_owner_credits_depleted`: Codex says so too when a plan's weekly window is used up);
+  else the time in the message (in the bridge machine's zone); else, when `rate_limit_reached_type`
+  names credits, `limitKind: "credits"` and no `resetsAt`; else the `resets_at` of the fullest
+  window at 95% or more, with `resetsEstimated: true`; else none. Every other limit is `limitKind:
+  "window"`.
 
-`resetsAt` (ISO 8601) goes on the item and on the alert. A limit record written since the bridge
+`resetsAt`, `resetsEstimated` and `limitKind` go on the item and on the alert. A limit record written since the bridge
 started raises `alert limit` for its session once: a repeat of the session's last limit (same reset
 time, else the same text) within an hour of its alert, e.g. a prompt retried against it, raises
 none. The session's status is not changed.

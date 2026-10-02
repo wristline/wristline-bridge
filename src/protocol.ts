@@ -63,7 +63,16 @@ export interface Item {
   plan?: boolean;
   /** On an `error` assistant item that is a usage limit the agent hit: when the limit resets (ISO 8601), when known. */
   resetsAt?: string;
+  /** With `resetsAt`: it is inferred from the agent's last rate-limit report (its fullest window, at 95% or more) rather than read from the limit itself. */
+  resetsEstimated?: boolean;
+  /** On a usage-limit item: `window` (a plan's rate-limit window is used up; it resets at `resetsAt` when known) or `credits` (the account's usage credits ran out; no reset time). */
+  limitKind?: LimitKind;
 }
+
+export type LimitKind = 'window' | 'credits';
+
+/** What is known about when a usage limit ends; on the limit's item and its `limit` alert. */
+export type LimitReset = Pick<Item, 'resetsAt' | 'resetsEstimated' | 'limitKind'>;
 
 export interface Option {
   id: string;
@@ -132,6 +141,10 @@ export interface Alert {
   title?: string;
   /** `limit`: when the limit resets (ISO 8601), when known. */
   resetsAt?: string;
+  /** `limit`: as on the item (see Item.resetsEstimated). */
+  resetsEstimated?: boolean;
+  /** `limit`: as on the item (see Item.limitKind). */
+  limitKind?: LimitKind;
 }
 
 export type AskStatus = 'running' | 'done' | 'error';

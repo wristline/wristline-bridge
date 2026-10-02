@@ -3,7 +3,7 @@
 
 import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
 import type { LimitHit } from '../../provider.ts';
-import { DETAIL_MAX, TEXT_MAX, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
+import { DETAIL_MAX, TEXT_MAX, type LimitReset, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
 import { clip, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 
 const TITLE_MAX = 40;
@@ -81,14 +81,69 @@ export function parseClaudeLine(line: string, sink: ItemSink): void {
 
 /**
  * A synthetic assistant message Claude Code writes for a failed API call (`isApiErrorMessage`,
- * model `<synthetic>`): an error, and for a usage limit (`error: "rate_limit"`, 429) the reset time
- * of `quotaLimits.resetsAt` (epoch seconds) when the record has one. E.g. "You've hit your session
- * limit · resets 1:10am (Asia/Seoul)" with `quotaLimits: {status: "rejected", resetsAt, rateLimitType: "five_hour"}`.
+ * model `<synthetic>`): an error, and for a usage limit (`error: "rate_limit"`, 429) when it ends:
+ * `quotaLimits.resetsAt` (epoch seconds) when the record has one, else the time in its text. E.g.
+ * "You've hit your session limit · resets 1:10am (Asia/Seoul)" with `quotaLimits: {status:
+ * "rejected", resetsAt, rateLimitType: "five_hour"}`. A limit with `apiError:
+ * "model_requires_usage_credits"` ("You've reached your Fable limit. Run /usage-credits to
+ * continue …", no quotaLimits) needs usage credits: `limitKind: credits`, no reset time.
  */
-function apiError(rec: JsonObject): Pick<ItemDraft, 'error' | 'resetsAt'> | undefined {
-  if (rec.isApiErrorMessage !== true) return undefined;
-  const resetsAt = rec.error === 'rate_limit' && isObject(rec.quotaLimits) ? toIso(rec.quotaLimits.resetsAt) : undefined;
-  return { error: true, ...(resetsAt && { resetsAt }) };
+function apiError(rec: JsonObject): (Pick<ItemDraft, 'error'> & LimitReset) | undefined {
+  return rec.isApiErrorMessage === true ? { error: true, ...usageLimit(rec) } : undefined;
+}
+
+function usageLimit(rec: JsonObject): LimitReset | undefined {
+  if (rec.isApiErrorMessage !== true || rec.error !== 'rate_limit') return undefined;
+  if (rec.apiError === 'model_requires_usage_credits') return { limitKind: 'credits' };
+  const text = isObject(rec.message) ? textOf(rec.message.content) : '';
+  const resetsAt = (isObject(rec.quotaLimits) ? toIso(rec.quotaLimits.resetsAt) : undefined) ?? resetsFromText(text, str(rec.timestamp) ?? '');
+  return { limitKind: 'window', ...(resetsAt && { resetsAt }) };
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/** The wall clock (year, month 0-11, day, hour, minute) of an instant in a time zone (the machine's when undefined). */
+function wallClock(ms: number, zone: string | undefined): number[] {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' }).formatToParts(ms);
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  return [get('year'), get('month') - 1, get('day'), get('hour'), get('minute')];
+}
+
+/** The instant a wall-clock time has in a time zone (the machine's when undefined); Date.UTC rolls over days. */
+function zonedTime(year: number, month: number, day: number, hour: number, minute: number, zone: string | undefined): number {
+  const asUtc = Date.UTC(year, month, day, hour, minute);
+  const offset = (ms: number) => {
+    const [y, mo, d, h, mi] = wallClock(ms, zone) as [number, number, number, number, number];
+    return Date.UTC(y, mo, d, h, mi) - Math.floor(ms / 60_000) * 60_000;
+  };
+  return asUtc - offset(asUtc - offset(asUtc));
+}
+
+/**
+ * The reset time in Claude Code's limit text ("… · resets 1:10am (Asia/Seoul)", "resets 2:30pm",
+ * "resets Oct 3, 1am (Asia/Seoul)"), as ISO 8601: the first such time after `at` (the record's
+ * time) in the named zone, else the machine's. Undefined when the text names none.
+ */
+export function resetsFromText(text: string, at: string): string | undefined {
+  const m = /\bresets (?:([A-Za-z]{3})[a-z]* (\d{1,2}),? (?:at )?)?(\d{1,2})(?::(\d{2}))? ?([ap]m)(?: \(([^)]+)\))?/i.exec(text);
+  const from = Date.parse(at);
+  if (!m || Number.isNaN(from)) return undefined;
+  const zone = m[6];
+  const hour = (Number(m[3]) % 12) + (m[5]!.toLowerCase() === 'pm' ? 12 : 0);
+  const minute = Number(m[4] ?? 0);
+  try {
+    const [year, month, day] = wallClock(from, zone) as [number, number, number];
+    if (m[1] === undefined) {
+      const today = zonedTime(year, month, day, hour, minute, zone);
+      return new Date(today > from ? today : zonedTime(year, month, day + 1, hour, minute, zone)).toISOString();
+    }
+    const named = MONTHS.indexOf(m[1].toLowerCase());
+    if (named < 0) return undefined;
+    const thisYear = zonedTime(year, named, Number(m[2]), hour, minute, zone);
+    return new Date(thisYear > from ? thisYear : zonedTime(year + 1, named, Number(m[2]), hour, minute, zone)).toISOString();
+  } catch {
+    return undefined; // an unknown time zone
+  }
 }
 
 function applyUser(uuid: string, message: JsonObject, ts: string, sink: ItemSink): void {
@@ -126,7 +181,7 @@ function resultPatch(block: JsonObject): Partial<ItemDraft> {
   return patch;
 }
 
-function applyAssistant(uuid: string, message: JsonObject, ts: string, sink: ItemSink, error?: Pick<ItemDraft, 'error' | 'resetsAt'>): void {
+function applyAssistant(uuid: string, message: JsonObject, ts: string, sink: ItemSink, error?: Pick<ItemDraft, 'error'> & LimitReset): void {
   const { content } = message;
   if (!Array.isArray(content)) return;
   content.forEach((block: unknown, index) => {
@@ -204,8 +259,7 @@ export class ClaudeMetaScan implements LineHandler {
       const at = str(rec.timestamp);
       const text = textOf(rec.message.content).trim();
       if (rec.isApiErrorMessage === true && rec.error === 'rate_limit' && at && text) {
-        const resetsAt = apiError(rec)?.resetsAt;
-        this.limit = { at, text, ...(resetsAt && { resetsAt }) };
+        this.limit = { at, text, ...usageLimit(rec) };
       }
     } else if (line.includes('"subtype":"compact_boundary"')) {
       // /compact writes no assistant usage; the boundary carries the size the context shrank to.

@@ -1,4 +1,4 @@
-import type { AlertKind, Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, ProviderId, Session, Usage } from './protocol.ts';
+import type { AlertKind, Item, ItemKind, ItemPage, LimitReset, PromptBlock, ProviderHealth, ProviderId, Session, Usage } from './protocol.ts';
 import type { PendingRegistry } from './pending.ts';
 import { clip, oneLine } from './util.ts';
 
@@ -29,7 +29,7 @@ export interface Hub {
   liveUsage(provider: SessionProvider, usage: Usage | undefined): void;
   /** The account the provider's home is logged into now (undefined: logged out or not known), after each read of its login (the first one also when it fails): usage is sent for current logins only. */
   login(provider: SessionProvider, accountId: string | undefined): void;
-  alert(sessionId: string, alert: AlertKind, text?: string, title?: string, resetsAt?: string): void;
+  alert(sessionId: string, alert: AlertKind, text?: string, title?: string, reset?: LimitReset): void;
   readonly pending: PendingRegistry;
 }
 
@@ -70,11 +70,10 @@ export function doneText(answer: string | undefined): string | undefined {
   return [...text].length < min || NO_RESPONSE.test(text) ? undefined : clip(text, DONE_TEXT_MAX);
 }
 
-/** A usage limit the agent hit, from its transcript: the record's time, the agent's message and, when known, when the limit resets (ISO 8601). */
-export interface LimitHit {
+/** A usage limit the agent hit, from its transcript: the record's time, the agent's message and what is known about when it ends. */
+export interface LimitHit extends LimitReset {
   at: string;
   text: string;
-  resetsAt?: string;
 }
 
 /** A repeat of a session's last limit (same reset time, else same text) raises no alert within this time of its alert. */
@@ -104,7 +103,8 @@ export class LimitAlerts {
       return;
     }
     this.#last.set(session.id, { at: hit.at, key, alertedAt: at });
-    hub?.alert(session.id, 'limit', clip(hit.text, DONE_TEXT_MAX), session.title || undefined, hit.resetsAt);
+    const { at: _at, text, ...reset } = hit;
+    hub?.alert(session.id, 'limit', clip(text, DONE_TEXT_MAX), session.title || undefined, reset);
   }
 }
 

@@ -6,5 +6,6 @@
   "alert": "limit",
   "text": "You've hit your session limit · resets 7:40pm (Asia/Seoul)",
   "title": "Fix failing CI build",
-  "resetsAt": "2026-09-29T10:40:00.000Z"
+  "resetsAt": "2026-09-29T10:40:00.000Z",
+  "limitKind": "window"
 }
