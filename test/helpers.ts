@@ -203,9 +203,10 @@ export class TestSocket {
   }
 
   async next(timeoutMs = 3000): Promise<ServerEvent> {
-    const deadline = Date.now() + timeoutMs;
+    // The monotonic clock: a wall clock stepped forward (as WSL2's is, by seconds) would end the wait early.
+    const deadline = performance.now() + timeoutMs;
     while (this.#queue.length === 0) {
-      if (Date.now() > deadline) throw new Error('no event');
+      if (performance.now() > deadline) throw new Error('no event');
       await new Promise<void>((resolve) => {
         this.#waiter = resolve;
         setTimeout(resolve, 50);
@@ -216,6 +217,13 @@ export class TestSocket {
 
   pending(): number {
     return this.#queue.length;
+  }
+
+  /** A ping round trip: the bridge has handled everything sent before it, and everything the bridge sent before its pong is queued. */
+  async settle(): Promise<void> {
+    const pong = once(this.ws, 'pong');
+    this.ws.ping();
+    await pong;
   }
 
   send(value: unknown): void {

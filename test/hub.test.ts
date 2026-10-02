@@ -171,7 +171,7 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     for (const ws of [fg, bg]) ws.send({ type: 'subscribe', sessionId: s1.id });
     bg.send({ type: 'mode', mode: 'background' });
     bg.send({ type: 'mode', mode: 'sideways' }); // Unknown modes are ignored.
-    await new Promise((r) => setTimeout(r, 100));
+    await Promise.all([fg.settle(), bg.settle()]);
     const types = async (ws: TestSocket, n: number): Promise<string[]> => {
       const out: string[] = [];
       for (let i = 0; i < n; i++) out.push((await ws.next()).type);
@@ -184,7 +184,7 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     bridge.hub.usage({ provider: 'codex', updatedAt: '2026-09-29T10:00:00.000Z', windows: [{ id: 'primary', usedPercent: 5 }] });
     bridge.hub.sendToDevice(bridge.auth.authenticate(bridge.token)?.id ?? '', { type: 'ask', askId: 'ask-1', provider: 'codex', status: 'running' });
     assert.deepEqual(await types(fg, 4), ['session', 'item', 'usage', 'ask']);
-    await new Promise((r) => setTimeout(r, 100));
+    await bg.settle();
     assert.equal(bg.pending(), 0);
 
     // What it must hear: a request and its session turning needs_input, the resolution and the way back, an alert.
@@ -198,7 +198,7 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     assert.equal((await bg.next()).type, 'alert');
     bridge.hub.removed(s1.id);
     assert.deepEqual(await types(fg, 6), ['request', 'session', 'resolved', 'session', 'alert', 'session_removed']);
-    await new Promise((r) => setTimeout(r, 100));
+    await bg.settle();
     assert.equal(bg.pending(), 0, 'no session_removed, no other session churn');
 
     // A session removed while it needs input: without this the background client would keep its badge.
@@ -213,12 +213,12 @@ test('background mode: only requests, resolutions, alerts and needs_input transi
     // The removal forgot the session's last status: its idle session event is not a change from needs_input any more.
     assert.deepEqual(await types(fg, 2), ['resolved', 'session']);
     assert.deepEqual(await types(bg, 1), ['resolved']);
-    await new Promise((r) => setTimeout(r, 100));
+    await bg.settle();
     assert.equal(bg.pending(), 0);
 
     // Back in the foreground the client hears everything again.
     bg.send({ type: 'mode', mode: 'foreground' });
-    await new Promise((r) => setTimeout(r, 100));
+    await bg.settle();
     bridge.hub.session({ ...s1, title: 'again' });
     assert.equal((await bg.next()).type, 'session');
     fg.close();
