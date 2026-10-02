@@ -4,8 +4,8 @@
 
 import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
 import type { LimitHit } from '../../provider.ts';
-import { DETAIL_MAX, TEXT_MAX, type LimitReset, type Progress, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
-import { clip, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
+import { CURRENT_MAX, DETAIL_MAX, TEXT_MAX, type LimitReset, type Progress, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
+import { clip, headline, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 
 const TITLE_MAX = 40;
 const TOOL_JSON_MAX = 120;
@@ -243,10 +243,10 @@ export class ClaudeMetaScan implements LineHandler {
   turnId: string | undefined;
   /** When that record was written (ISO 8601). */
   turnStartedAt: string | undefined;
-  /** The task list: task id (TodoWrite: its position) -> `pending` | `in_progress` | `completed`. */
-  readonly #tasks = new Map<string, string>();
-  /** TaskCreate calls whose result (it names the new task's id) has not been read yet. */
-  readonly #creates = new Set<string>();
+  /** The task list: task id (TodoWrite: its position) -> its status (`pending` | `in_progress` | `completed`) and title. */
+  readonly #tasks = new Map<string, { status: string; title: string | undefined }>();
+  /** TaskCreate calls whose result (it names the new task's id) has not been read yet -> the new task's title. */
+  readonly #creates = new Map<string, string | undefined>();
   /** Whether the task list was written in the current turn. */
   #touched = false;
 
@@ -254,8 +254,12 @@ export class ClaudeMetaScan implements LineHandler {
   get progress(): Progress | undefined {
     if (!this.#touched || this.#tasks.size === 0) return undefined;
     let done = 0;
-    for (const status of this.#tasks.values()) if (status === 'completed') done++;
-    return { done, total: this.#tasks.size };
+    let current: string | undefined;
+    for (const { status, title } of this.#tasks.values()) {
+      if (status === 'completed') done++;
+      else if (status === 'in_progress') current ??= title;
+    }
+    return { done, total: this.#tasks.size, ...(current && { current }) };
   }
 
   line(line: string): void {
@@ -297,7 +301,7 @@ export class ClaudeMetaScan implements LineHandler {
     const promptId = /"promptId":"([^"]*)"/.exec(line)?.[1];
     // Without a promptId (older Claude Code, local commands such as /login), a record of tool results never opens a turn.
     const opens = promptId !== undefined ? promptId !== this.turnId : !line.includes('"tool_result"');
-    const created = [...this.#creates].find((id) => line.includes(`"${id}"`));
+    const created = [...this.#creates.keys()].find((id) => line.includes(`"${id}"`));
     if (!opens && created === undefined && this.firstPrompt !== undefined && this.cwd !== undefined) return;
     const rec = parseJson(line);
     if (rec?.type !== 'user' || rec.isSidechain === true) return;
@@ -314,24 +318,29 @@ export class ClaudeMetaScan implements LineHandler {
   }
 
   /**
-   * TodoWrite (`todos[]` with `status`) rewrites the whole list; TaskUpdate (`taskId`, `status`;
-   * `deleted` removes the task) changes one task; TaskCreate adds one once its result names its id.
+   * TodoWrite (`todos[]` with `status`, `content`) rewrites the whole list; TaskUpdate (`taskId`,
+   * `status`, `subject`; `deleted` removes the task) changes one task; TaskCreate adds one once its
+   * result names its id.
    */
   #taskTool(block: JsonObject): void {
     const input = isObject(block.input) ? block.input : {};
     if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
       this.#tasks.clear();
-      input.todos.forEach((todo: unknown, i) => this.#tasks.set(String(i), (isObject(todo) && str(todo.status)) || 'pending'));
+      input.todos.forEach((todo: unknown, i) =>
+        this.#tasks.set(String(i), isObject(todo) ? { status: str(todo.status) || 'pending', title: headline(str(todo.content), CURRENT_MAX) } : { status: 'pending', title: undefined }),
+      );
       this.#touched = true;
     } else if (block.name === 'TaskCreate') {
       const id = str(block.id);
-      if (id) this.#creates.add(id);
+      if (id) this.#creates.set(id, taskTitle(input));
     } else if (block.name === 'TaskUpdate') {
       const id = str(input.taskId);
       const status = str(input.status);
-      if (!id || !status) return;
+      const title = taskTitle(input);
+      if (!id || (!status && !title)) return;
+      const task = this.#tasks.get(id);
       if (status === 'deleted') this.#tasks.delete(id);
-      else this.#tasks.set(id, status);
+      else this.#tasks.set(id, { status: status || task?.status || 'pending', title: title ?? task?.title });
       this.#touched = true;
     }
   }
@@ -341,12 +350,13 @@ export class ClaudeMetaScan implements LineHandler {
     const content = isObject(rec.message) ? rec.message.content : undefined;
     const block = Array.isArray(content) ? content.find((b: unknown) => isObject(b) && b.type === 'tool_result' && b.tool_use_id === toolUseId) : undefined;
     if (!isObject(block)) return;
+    const title = this.#creates.get(toolUseId);
     this.#creates.delete(toolUseId);
     if (block.is_error === true) return;
-    const result = isObject(rec.toolUseResult) && isObject(rec.toolUseResult.task) ? str(rec.toolUseResult.task.id) : undefined;
-    const id = result ?? /^Task #(\S+) created successfully/.exec(textOf(block.content))?.[1];
+    const task = isObject(rec.toolUseResult) && isObject(rec.toolUseResult.task) ? rec.toolUseResult.task : undefined;
+    const id = str(task?.id) ?? /^Task #(\S+) created successfully/.exec(textOf(block.content))?.[1];
     if (!id) return;
-    this.#tasks.set(id, 'pending');
+    this.#tasks.set(id, { status: 'pending', title: title ?? (task && taskTitle(task)) });
     this.#touched = true;
   }
 
@@ -360,6 +370,11 @@ export class ClaudeMetaScan implements LineHandler {
     this.#creates.clear();
     this.#touched = false;
   }
+}
+
+/** A TaskCreate/TaskUpdate task's title: its `subject`, else `title`, else the first line of its `description`. */
+function taskTitle(task: JsonObject): string | undefined {
+  return headline(str(task.subject) || str(task.title) || str(task.description), CURRENT_MAX);
 }
 
 /**

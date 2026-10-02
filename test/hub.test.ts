@@ -193,7 +193,7 @@ test('background mode: only requests, resolutions, alerts, status, turn-start an
     await bg.settle();
     assert.equal(bg.pending(), 0);
 
-    // A turn's Live Update: its start and progress changes reach the background client, a lastActivity-only update does not.
+    // A turn's Live Update: its start and progress changes (the task in progress included) reach the background client, a lastActivity-only update does not.
     const turn = { ...s1, status: 'running' as const, title: 'renamed', turnStartedAt: '2026-09-29T10:00:00.000Z' };
     for (const done of [2, 3]) {
       await new Promise((r) => setTimeout(r, 2100));
@@ -202,8 +202,14 @@ test('background mode: only requests, resolutions, alerts, status, turn-start an
       assert.deepEqual(heard.type === 'session' && [heard.session.turnStartedAt, heard.session.progress], ['2026-09-29T10:00:00.000Z', { done, total: 7 }]);
       assert.equal((await fg.next()).type, 'session');
     }
+    // The task in progress changing (same counts) is a progress change too.
     await new Promise((r) => setTimeout(r, 2100));
-    bridge.hub.session({ ...turn, progress: { done: 3, total: 7 }, lastActivity: '2026-09-29T10:05:00.000Z' });
+    bridge.hub.session({ ...turn, progress: { done: 3, total: 7, current: 'Fix the build script' } });
+    const renamed = await bg.next();
+    assert.deepEqual(renamed.type === 'session' && renamed.session.progress, { done: 3, total: 7, current: 'Fix the build script' });
+    assert.equal((await fg.next()).type, 'session');
+    await new Promise((r) => setTimeout(r, 2100));
+    bridge.hub.session({ ...turn, progress: { done: 3, total: 7, current: 'Fix the build script' }, lastActivity: '2026-09-29T10:05:00.000Z' });
     assert.equal((await fg.next()).type, 'session');
     await bg.settle();
     assert.equal(bg.pending(), 0, 'a lastActivity-only change stays in the foreground');

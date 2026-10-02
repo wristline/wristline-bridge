@@ -1080,19 +1080,19 @@ test('codex provider: turn/started and turn/plan/updated give a loaded thread it
   await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: [] } });
   assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', undefined]);
   await plan('t2', seven(2));
-  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', { done: 2, total: 7 }]);
+  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', { done: 2, total: 7, current: 's2' }]);
   await plan('t2', seven(3));
-  assert.deepEqual(published.at(-1)?.progress, { done: 3, total: 7 }, 'published at once');
+  assert.deepEqual(published.at(-1)?.progress, { done: 3, total: 7, current: 's3' }, 'published at once');
   await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: ['waitingOnApproval'] } });
-  assert.deepEqual(shown(), ['needs_input', undefined, { done: 3, total: 7 }], 'the start time is a running session\'s');
+  assert.deepEqual(shown(), ['needs_input', undefined, { done: 3, total: 7, current: 's3' }], 'the start time is a running session\'s');
   await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: [] } });
-  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', { done: 3, total: 7 }]);
+  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', { done: 3, total: 7, current: 's3' }]);
 
   await notify('turn/completed', { threadId: id, turn: { id: 't2', items: [], status: 'completed' } });
   await notify('thread/status/changed', { threadId: id, status: { type: 'idle' } });
-  assert.deepEqual(shown(), ['idle', undefined, { done: 3, total: 7 }], 'the plan stays after the turn');
+  assert.deepEqual(shown(), ['idle', undefined, { done: 3, total: 7, current: 's3' }], 'the plan stays after the turn');
   await provider.refresh();
-  assert.deepEqual(shown(), ['idle', undefined, { done: 3, total: 7 }], 'a rollout without the plan does not clear what the daemon said');
+  assert.deepEqual(shown(), ['idle', undefined, { done: 3, total: 7, current: 's3' }], 'a rollout without the plan does not clear what the daemon said');
 
   await notify('turn/started', { threadId: id, turn: { id: 't3', items: [], status: 'inProgress' } });
   await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: [] } });

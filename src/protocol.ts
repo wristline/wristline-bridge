@@ -9,6 +9,8 @@ export const API_VERSION = 1;
 /** Upper bounds (UTF-16 code units) the bridge enforces before sending text to the watch. */
 export const TEXT_MAX = 4000;
 export const DETAIL_MAX = 600;
+/** `Progress.current`: at most this many code units. */
+export const CURRENT_MAX = 80;
 
 export type ProviderId = 'claude-code' | 'codex';
 export type SessionStatus = 'running' | 'idle' | 'needs_input' | 'ended';
@@ -55,6 +57,8 @@ export interface Session {
 export interface Progress {
   done: number;
   total: number;
+  /** The title of the first task in progress that has one (one line, at most CURRENT_MAX code units); absent when none is in progress. */
+  current?: string;
 }
 
 export const ITEM_KINDS = ['user', 'assistant', 'tool', 'notice'] as const;

@@ -10,7 +10,8 @@
       "turnStartedAt": "2026-09-29T09:58:00.000Z",
       "progress": {
         "done": 3,
-        "total": 7
+        "total": 7,
+        "current": "Fix the build script"
       },
       "context": {
         "used": 86000,

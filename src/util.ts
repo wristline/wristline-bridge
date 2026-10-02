@@ -54,6 +54,11 @@ export function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** The first line of `text`, clipped to `max`; undefined when there is none. */
+export function headline(text: string | undefined, max: number): string | undefined {
+  return clip(oneLine(text?.trim().split('\n')[0] ?? ''), max) || undefined;
+}
+
 /** Text safe to print or show: control characters (which could rewrite a terminal line) become spaces. */
 export function printable(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();

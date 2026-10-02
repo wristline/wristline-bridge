@@ -38,7 +38,7 @@ const running: Session = {
   status: 'running',
   lastActivity: '2026-09-29T09:59:30.000Z',
   turnStartedAt: '2026-09-29T09:58:00.000Z',
-  progress: { done: 3, total: 7 },
+  progress: { done: 3, total: 7, current: 'Fix the build script' },
   context: { used: 86000, window: 200000 },
   account: { id: 'acc-school', label: 'school', estimated: true },
   model: 'Fable 5.1',

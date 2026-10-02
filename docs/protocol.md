@@ -70,14 +70,18 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   with a new `promptId`: a prompt, a task notification, a scheduled prompt; the turn's tool results
   and an interruption share it). Codex: `turn/started`'s `turn.startedAt` for a thread the daemon
   has loaded, else the rollout's `task_started` (`started_at`, else the record's time).
-  `progress` (`{done, total}`, `total` ≥ 1) is the agent's own task list as of its last change in
-  the current turn, or in the last one while no new turn has started: `total` tasks, `done` of
-  them completed. A new turn clears it until the agent updates its list again. Claude Code: its
-  task list (`TaskCreate` adds a task once its result names the task's id, `TaskUpdate` sets a
-  task's `status`, `deleted` removes it; `TodoWrite` replaces the whole list with its `todos[]`);
-  the list itself carries over into later turns. Codex: the steps of the turn's latest
+  `progress` (`{done, total, current?}`, `total` ≥ 1) is the agent's own task list as of its last
+  change in the current turn, or in the last one while no new turn has started: `total` tasks,
+  `done` of them completed. A new turn clears it until the agent updates its list again. Claude
+  Code: its task list (`TaskCreate` adds a task once its result names the task's id, `TaskUpdate`
+  sets a task's `status`, `deleted` removes it; `TodoWrite` replaces the whole list with its
+  `todos[]`); the list itself carries over into later turns. Codex: the steps of the turn's latest
   `update_plan` (`turn/plan/updated` for a thread the daemon has loaded, else the rollout's
   `update_plan` call). Absent when the turn has not touched the list or the list is empty.
+  `progress.current` is the title of the first task in progress that has one (its first line, at
+  most 80 code units): Claude Code: a `TaskCreate`/`TaskUpdate` task's `subject` (else its
+  `title`, else its `description`), a `TodoWrite` todo's `content`; Codex: a plan step's `step`
+  (status `in_progress`, or `inProgress` from the app-server). Absent when no task is in progress.
 - **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
@@ -295,10 +299,10 @@ While the watch app is not on screen it only needs what should wake the wearer. 
 
 - `request` and `resolved`,
 - `alert`,
-- `session` events whose `status`, `turnStartedAt` or `progress` changed (compared with what the
-  bridge last sent for that session, so a session's first event always counts), still throttled
-  to one per session per 2 s: enough to keep the watch's running and waiting counts and a turn's
-  Live Update right,
+- `session` events whose `status`, `turnStartedAt` or `progress` (`current` included) changed
+  (compared with what the bridge last sent for that session, so a session's first event always
+  counts), still throttled to one per session per 2 s: enough to keep the watch's running and
+  waiting counts and a turn's Live Update right,
 - every `session_removed` (a session that ended or left the list changes those counts).
 
 Nothing else: no `usage` (removals included: `GET /api/usage` has the current entries), no

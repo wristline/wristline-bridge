@@ -274,13 +274,14 @@ const toolUses = (ts: string, uses: { id: string; name: string; input: object }[
 const result = (promptId: string, ts: string, toolUseId: string, text: string, toolUseResult?: object): string =>
   user(promptId, ts, [{ type: 'tool_result', tool_use_id: toolUseId, content: text }], toolUseResult && { toolUseResult });
 
-test('task list (TaskCreate/TaskUpdate): progress counts completed tasks; a new turn starts with none until the list is touched again', () => {
+test('task list (TaskCreate/TaskUpdate): progress counts completed tasks and names the task in progress; a new turn starts with none until the list is touched again', () => {
   const meta = new ClaudeMetaScan();
   meta.line(user('p1', '2026-09-29T10:00:00.000Z', 'Port the build to the new CI'));
   assert.equal(meta.turnStartedAt, '2026-09-29T10:00:00.000Z');
   assert.equal(meta.progress, undefined);
 
-  const creates = Array.from({ length: 7 }, (_, i) => ({ id: `toolu_c${i + 1}`, name: 'TaskCreate', input: { subject: `Step ${i + 1}`, description: 'd' } }));
+  // Task 5 has no subject: its title is its description's first line.
+  const creates = Array.from({ length: 7 }, (_, i) => ({ id: `toolu_c${i + 1}`, name: 'TaskCreate', input: i === 4 ? { description: '\nUpdate the deploy docs\nwith details' } : { subject: `Step ${i + 1}`, description: 'd' } }));
   meta.line(toolUses('2026-09-29T10:00:05.000Z', creates));
   assert.equal(meta.progress, undefined, 'a task exists once its result names its id');
   for (let i = 1; i <= 7; i++) {
@@ -292,26 +293,33 @@ test('task list (TaskCreate/TaskUpdate): progress counts completed tasks; a new 
   const update = (n: number, ts: string, input: object): string => toolUses(ts, [{ id: `toolu_u${n}`, name: 'TaskUpdate', input }]);
   meta.line(update(1, '2026-09-29T10:01:00.000Z', { taskId: '1', status: 'completed' }));
   meta.line(update(2, '2026-09-29T10:02:00.000Z', { taskId: '2', status: 'completed' }));
+  assert.deepEqual(meta.progress, { done: 2, total: 7 }, 'no task in progress: no current');
   meta.line(update(3, '2026-09-29T10:03:00.000Z', { taskId: '4', status: 'in_progress' }));
-  assert.deepEqual(meta.progress, { done: 2, total: 7 });
+  assert.deepEqual(meta.progress, { done: 2, total: 7, current: 'Step 4' });
   meta.line(update(4, '2026-09-29T10:04:00.000Z', { taskId: '3', status: 'completed' }));
   meta.line(update(5, '2026-09-29T10:04:01.000Z', { taskId: '5', owner: 'me' }));
   meta.line(result('p1', '2026-09-29T10:04:02.000Z', 'toolu_u4', 'Updated task #3 status'));
   meta.line(user('p1', '2026-09-29T10:04:03.000Z', [{ type: 'text', text: '[Request interrupted by user]' }]));
-  assert.deepEqual(meta.progress, { done: 3, total: 7 }, 'an update without a status, tool results and an interruption change nothing');
+  assert.deepEqual(meta.progress, { done: 3, total: 7, current: 'Step 4' }, 'an update without a status, tool results and an interruption change nothing');
   assert.equal(meta.turnStartedAt, '2026-09-29T10:00:00.000Z', 'records of the same turn keep its start');
   meta.line(toolUses('2026-09-29T10:04:04.000Z', [{ id: 'toolu_s1', name: 'TaskCreate', input: { subject: 'Side', description: 'd' } }], { isSidechain: true }));
   meta.line(toolUses('2026-09-29T10:04:05.000Z', [{ id: 'toolu_s2', name: 'TaskUpdate', input: { taskId: '6', status: 'completed' } }], { isSidechain: true }));
-  assert.deepEqual(meta.progress, { done: 3, total: 7 }, 'a sub-agent\'s task calls are its own');
+  assert.deepEqual(meta.progress, { done: 3, total: 7, current: 'Step 4' }, 'a sub-agent\'s task calls are its own');
 
   // The next turn (here a task notification) starts without progress; the list itself carries on.
   meta.line(user('p2', '2026-09-29T11:00:00.000Z', '<task-notification>\n<summary>Agent "Review" finished</summary>\n</task-notification>'));
   assert.equal(meta.turnStartedAt, '2026-09-29T11:00:00.000Z');
   assert.equal(meta.progress, undefined);
   meta.line(update(6, '2026-09-29T11:00:10.000Z', { taskId: '4', status: 'completed' }));
-  assert.deepEqual(meta.progress, { done: 4, total: 7 });
+  assert.deepEqual(meta.progress, { done: 4, total: 7 }, 'the task in progress completed and none other is: no current');
   meta.line(update(7, '2026-09-29T11:00:11.000Z', { taskId: '7', status: 'deleted' }));
   assert.deepEqual(meta.progress, { done: 4, total: 6 });
+  meta.line(update(8, '2026-09-29T11:00:12.000Z', { taskId: '5', status: 'in_progress' }));
+  assert.deepEqual(meta.progress, { done: 4, total: 6, current: 'Update the deploy docs' });
+  meta.line(update(9, '2026-09-29T11:00:13.000Z', { taskId: '5', subject: `Rename  ${'x'.repeat(90)}` }));
+  assert.deepEqual(meta.progress, { done: 4, total: 6, current: `Rename ${'x'.repeat(72)}…` }, 'a new subject renames the task, clipped to 80');
+  meta.line(update(10, '2026-09-29T11:00:14.000Z', { taskId: '5', status: 'completed' }));
+  assert.deepEqual(meta.progress, { done: 5, total: 6 });
 
   meta.reset();
   assert.deepEqual([meta.turnStartedAt, meta.turnId, meta.progress], [undefined, undefined, undefined]);
@@ -324,17 +332,17 @@ test('task list (TodoWrite): each call replaces the list; without promptId a typ
   meta.line(user(undefined, '2026-09-29T10:00:00.000Z', 'Refactor the parser'));
   assert.equal(meta.turnStartedAt, '2026-09-29T10:00:00.000Z');
   meta.line(todos('2026-09-29T10:00:01.000Z', ['in_progress', 'pending', 'pending']));
-  assert.deepEqual(meta.progress, { done: 0, total: 3 });
+  assert.deepEqual(meta.progress, { done: 0, total: 3, current: 'Task 0' });
   meta.line(result('x', '2026-09-29T10:00:02.000Z', 'toolu_2026-09-29T10:00:01.000Z', 'Todos have been modified successfully.').replace(/"promptId":"x",/, ''));
   meta.line(user(undefined, '2026-09-29T10:00:03.000Z', 'Caveat: the messages below were generated by the user while running local commands.', { isMeta: true }));
   meta.line(user(undefined, '2026-09-29T10:00:04.000Z', '<command-name>/login</command-name>'));
   meta.line(todos('2026-09-29T10:01:00.000Z', ['completed', 'completed', 'in_progress', 'pending']));
-  assert.deepEqual(meta.progress, { done: 2, total: 4 });
+  assert.deepEqual(meta.progress, { done: 2, total: 4, current: 'Task 2' });
   assert.equal(meta.turnStartedAt, '2026-09-29T10:00:00.000Z');
   meta.line(todos('2026-09-29T10:02:00.000Z', []));
   assert.equal(meta.progress, undefined, 'an emptied list is no progress');
   meta.line(todos('2026-09-29T10:03:00.000Z', ['completed', 'completed', 'completed']));
-  assert.deepEqual(meta.progress, { done: 3, total: 3 });
+  assert.deepEqual(meta.progress, { done: 3, total: 3 }, 'all done: no current');
   meta.line(user(undefined, '2026-09-29T10:10:00.000Z', 'Now the docs'));
   assert.deepEqual([meta.turnStartedAt, meta.progress], ['2026-09-29T10:10:00.000Z', undefined]);
 });

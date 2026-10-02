@@ -6,8 +6,8 @@
 
 import type { ItemDraft, ItemSink, LineHandler, LineParser } from '../../jsonl.ts';
 import type { LimitHit } from '../../provider.ts';
-import { DETAIL_MAX, TEXT_MAX, type Account, type LimitReset, type Progress, type Usage, type UsageWindow } from '../../protocol.ts';
-import { clip, clipTail, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
+import { CURRENT_MAX, DETAIL_MAX, TEXT_MAX, type Account, type LimitReset, type Progress, type Usage, type UsageWindow } from '../../protocol.ts';
+import { clip, clipTail, headline, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 import type {
   CommandExecutionStatus,
   FileUpdateChange,
@@ -321,11 +321,16 @@ export function usageOf(snapshot: RateLimitSnapshot, updatedAt: string, account?
 /**
  * The progress of a plan the agent keeps with `update_plan` (`plan: [{step, status}]`, status
  * `pending` | `in_progress` | `completed`; the app-server's `turn/plan/updated` writes `inProgress`):
- * undefined for an empty plan.
+ * undefined for an empty plan. `current` names the first step in progress.
  */
 export function planProgress(plan: unknown[]): Progress | undefined {
   const steps = plan.filter(isObject);
-  return steps.length > 0 ? { done: steps.filter((step) => step.status === 'completed').length, total: steps.length } : undefined;
+  if (steps.length === 0) return undefined;
+  const current = steps
+    .filter((s) => s.status === 'in_progress' || s.status === 'inProgress')
+    .map((s) => headline(str(s.step), CURRENT_MAX))
+    .find(Boolean);
+  return { done: steps.filter((s) => s.status === 'completed').length, total: steps.length, ...(current && { current }) };
 }
 
 /**
