@@ -27,6 +27,13 @@ watch ([Quick Ask](#quick-ask)).
 Verified with Claude Code 2.1.285 and Codex CLI 0.159.2 on Linux (WSL2). Requires Node.js 22 or
 newer, and `curl` for the Claude Code hooks (`hooks install` refuses without it).
 
+### Supported platforms
+
+- Linux with systemd user services, including WSL2 (enable systemd in `/etc/wsl.conf` for
+  `service install`; `setup` finds the Windows Tailscale client from inside WSL).
+- macOS (launchd) is planned but not supported yet: `service install` writes a systemd unit only.
+  Native Windows is not supported; use WSL2.
+
 ## Install
 
 ```sh
@@ -310,7 +317,7 @@ login change while the bridge was not running, count for no account. For Claude 
 the bridge keeps a timeline of which account each home was logged into (`claudeLogins` in
 `config.json`; ids and emails only) and attributes a session to the login in effect at its last
 activity; a session whose status line the bridge has seen since its process started is attributed
-for certain. Anything else is marked `estimated` (shown with `~` on the watch), in particular after
+for certain. Anything else is marked `estimated` (shown with `(est.)` on the watch), in particular after
 you switch accounts inside one home with `/login`: that works, but stays an estimate and shares one
 usage entry per login, and the plan usage of a process that switched shows only once a Claude Code
 process started after the switch has reported (until then it counts for the account the process
