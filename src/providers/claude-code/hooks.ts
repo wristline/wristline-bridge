@@ -201,7 +201,7 @@ function notification(input: JsonObject, ctx: HookContext): void {
 }
 
 /**
- * Same rule as the user's Slack Stop hook: nothing for an empty, short or "No response requested."
+ * Same rule as a typical notifier Stop hook: nothing for an empty, short or "No response requested."
  * answer; otherwise the answer's head, titled by the prompt of a human-typed turn, else the session title.
  */
 async function stop(input: JsonObject, ctx: HookContext): Promise<void> {

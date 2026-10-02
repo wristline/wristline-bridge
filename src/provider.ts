@@ -63,7 +63,7 @@ export function sessionKey(provider: ProviderId, nativeId: string): string {
   return `${provider}:${nativeId}`;
 }
 
-/** The text of a turn's `done` alert, by the rule of the user's Slack Stop hook: undefined (no alert) for an empty, short or "No response requested." answer. */
+/** The text of a turn's `done` alert, by the same rule as a typical notifier Stop hook: undefined (no alert) for an empty, short or "No response requested." answer. */
 export function doneText(answer: string | undefined): string | undefined {
   const text = (answer ?? '').trim();
   const min = CJK.test(text) ? DONE_MIN_CJK : DONE_MIN;

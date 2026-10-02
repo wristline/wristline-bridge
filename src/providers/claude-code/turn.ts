@@ -1,5 +1,5 @@
 // The prompt that started the current turn of a Claude Code transcript, for the `done` alert's
-// title. Mirrors the user's Slack Stop hook: the turn starts at the newest non-tool_result user
+// title. Mirrors a typical notifier Stop hook: the turn starts at the newest non-tool_result user
 // line; a line without `origin` (skill expansion, reminder) belongs to the `origin` line of the
 // same promptId; a turn without such a line (scheduled task, local command) is not a human turn.
 
