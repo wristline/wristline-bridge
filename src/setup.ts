@@ -133,6 +133,10 @@ function hookTargets(config: Config, settings: string | undefined): HookTarget[]
 
 /** Shows each settings.json diff, asks, backs the file up and installs hooks and the home's statusLine relay. */
 export async function hooksInstall(flags: Flags, options: HooksOptions): Promise<boolean> {
+  // hook.sh, statusline.sh and the async hook commands all post to the bridge with curl.
+  if (!(await which('curl'))) {
+    throw new CliError('curl is not on PATH; the Claude Code hooks and statusLine relay need it. Install curl (e.g. `sudo apt install curl`) and run this again.');
+  }
   const dir = configDir();
   const config = await hookConfig(flags);
   let all = true;
@@ -332,6 +336,7 @@ export async function setup(flags: Flags, yes: boolean): Promise<void> {
   const extraCodexHomes = await proposeHomes('codex', detected.codex, config.codexHomes, stored.extraCodexHomes ?? [], yes);
   console.log('Tools');
   for (const name of ['claude', 'codex', 'tmux', 'tailscale'] as const) console.log(`  ${name.padEnd(10)} ${bins[name] ?? 'not found'}`);
+  console.log(`  ${'curl'.padEnd(10)} ${(await which('curl')) ?? 'not found (the Claude Code hooks need it)'}`);
 
   let publicUrl = config.publicUrl;
   if (!publicUrl && tailscale) {

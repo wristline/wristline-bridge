@@ -25,7 +25,7 @@ Context and plan usage are shown for both, and either CLI answers one-off questi
 watch ([Quick Ask](#quick-ask)).
 
 Verified with Claude Code 2.1.285 and Codex CLI 0.159.2 on Linux (WSL2). Requires Node.js 22 or
-newer.
+newer, and `curl` for the Claude Code hooks (`hooks install` refuses without it).
 
 ## Install
 

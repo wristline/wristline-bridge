@@ -7,6 +7,7 @@ import { after, test } from 'node:test';
 import { accountsAdd, accountsList, accountsRemove } from '../src/accounts.ts';
 import { readStored, resolveConfig, updateStored } from '../src/config.ts';
 import { detectHomes, hooksInstall, proposeHomes } from '../src/setup.ts';
+import { CliError } from '../src/util.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'wristline-accounts-cli-'));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -128,4 +129,17 @@ test('hooks install creates the primary home\'s settings.json as before, but ski
   assert.ok(existsSync(join(primary, 'settings.json')));
   assert.equal(existsSync(gone), false);
   assert.ok(out.lines.includes(`Skipped ${join(gone, 'settings.json')}: the home does not exist.`), out.lines.join('\n'));
+});
+
+test('hooks install refuses without curl on PATH and leaves settings.json alone', async () => {
+  const primary = join(root, 'hooks-nocurl');
+  await updateStored(dir, { claudeHome: primary, extraClaudeHomes: [] });
+  const path = process.env.PATH;
+  process.env.PATH = join(root, 'empty-bin');
+  try {
+    await assert.rejects(hooksInstall({}, { yes: true }), (err: Error) => err instanceof CliError && /curl is not on PATH/.test(err.message));
+  } finally {
+    process.env.PATH = path;
+  }
+  assert.equal(existsSync(join(primary, 'settings.json')), false);
 });
