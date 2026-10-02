@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import { JsonlTail, Transcript, TranscriptCache, type JsonlHead } from '../../jsonl.ts';
-import type { Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
+import type { Item, ItemKind, ItemPage, Progress, PromptBlock, ProviderHealth, Session, SessionStatus, Usage } from '../../protocol.ts';
 import { LimitAlerts, PromptBlocked, doneText, doneTitle, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
-import { isObject, str } from '../../util.ts';
+import { isObject, str, toIso } from '../../util.ts';
 import { CodexAccounts, type AccountsOptions } from './account.ts';
 import { codexAsk } from './ask.ts';
 import { LoadedThreads, daemonStatus, loadedThreadIds, type Ask } from './daemon.ts';
@@ -17,6 +17,7 @@ import {
   normalizeItem,
   normalizeItemCompleted,
   normalizeRateLimits,
+  planProgress,
   usageOf,
 } from './parse.ts';
 import type { CodexRpc, ItemCompletedNotification, RateLimitSnapshot, RequestId, ServerRequest, ThreadStatus } from './rpc.ts';
@@ -37,6 +38,14 @@ interface TurnText {
   prompt?: string;
   /** The last agent message. */
   answer?: string;
+}
+
+/** A loaded thread's turn as the daemon reports it (`turn/started`, `turn/plan/updated`), ahead of its rollout. */
+interface LiveTurn {
+  turnId: string;
+  /** Unknown for a turn that started before the connection. */
+  startedAt?: string;
+  progress?: Progress;
 }
 
 interface Meta {
@@ -95,6 +104,8 @@ export class CodexProvider implements SessionProvider {
   readonly #itemText = new Map<string, string>();
   /** Per loaded thread. */
   readonly #turns = new Map<string, TurnText>();
+  /** Per loaded thread: its current (or last) turn's start and plan; the plan stays after the turn until the next one starts. */
+  readonly #liveTurns = new Map<string, LiveTurn>();
   /** Threads that began waiting on an approval, until NEEDS_INPUT_DELAY_MS tells whether the watch was asked. */
   readonly #waiting = new Map<string, NodeJS.Timeout>();
   #sessions = new Map<string, Session>();
@@ -367,6 +378,12 @@ export class CodexProvider implements SessionProvider {
       lastActivity: new Date(file.mtimeMs).toISOString(),
     };
     if (promptBlock) session.promptBlock = promptBlock;
+    // The daemon's view of a turn it reported is newer than the rollout's.
+    const live = loaded ? this.#liveTurns.get(id) : undefined;
+    const turnStartedAt = live?.startedAt ?? meta.turnStartedAt;
+    if (status === 'running' && turnStartedAt) session.turnStartedAt = turnStartedAt;
+    const progress = live ? live.progress : meta.progress;
+    if (progress) session.progress = progress;
     if (meta.context) session.context = meta.context;
     // A thread runs under whichever login runs it now, not the one that created it: the daemon's for
     // a thread it has loaded (null: an API key), the home's for another live one. An ended thread,
@@ -412,6 +429,7 @@ export class CodexProvider implements SessionProvider {
     this.#loaded.clear();
     this.#itemText.clear();
     this.#turns.clear();
+    this.#liveTurns.clear();
     for (const timer of this.#waiting.values()) clearTimeout(timer);
     this.#waiting.clear();
     // Request ids belong to the lost connection; the agent can no longer take these answers.
@@ -507,6 +525,7 @@ export class CodexProvider implements SessionProvider {
         if (!threadId) return;
         this.#loaded.forget(threadId);
         this.#turns.delete(threadId);
+        this.#liveTurns.delete(threadId);
         this.#abortWhere((a) => a.threadId === threadId);
         this.#publish();
         return;
@@ -519,10 +538,28 @@ export class CodexProvider implements SessionProvider {
         if (typeof id === 'string' || typeof id === 'number') this.#abortWhere((_, key) => key === id);
         return;
       }
+      case 'turn/started': {
+        const turn = isObject(params.turn) ? params.turn : undefined;
+        const turnId = str(turn?.id);
+        if (!threadId || !turnId || !this.#loaded.has(threadId)) return;
+        this.#liveTurns.set(threadId, { turnId, startedAt: toIso(turn?.startedAt) ?? new Date(this.#now()).toISOString() });
+        this.#publish();
+        return;
+      }
+      case 'turn/plan/updated': {
+        const turnId = str(params.turnId);
+        if (!threadId || !turnId || !this.#loaded.has(threadId) || !Array.isArray(params.plan)) return;
+        const live = this.#liveTurns.get(threadId);
+        this.#liveTurns.set(threadId, { ...(live?.turnId === turnId && live), turnId, progress: planProgress(params.plan) });
+        this.#publish();
+        return;
+      }
       case 'turn/completed': {
         const turn = isObject(params.turn) ? params.turn : undefined;
         const turnId = str(turn?.id);
         this.#abortWhere((a) => a.threadId === threadId && a.turnId === turnId);
+        // The plan stays until the next turn; the start time is the rollout's from now on (none once it is complete).
+        if (threadId) delete this.#liveTurns.get(threadId)?.startedAt;
         if (threadId && turnId) this.#turnCompleted(threadId, turnId, turn?.status === 'completed');
         return;
       }

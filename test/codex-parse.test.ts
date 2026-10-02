@@ -11,6 +11,7 @@ import {
   normalizeRateLimits,
   normalizeTokenUsage,
   parseCodexLine,
+  planProgress,
   usageOf,
 } from '../src/providers/codex/parse.ts';
 
@@ -135,4 +136,33 @@ test('session_index: the last name per thread wins', () => {
   index.line('{"id":"a","thread_name":"renamed","updated_at":"2026-09-29T00:01:00Z"}');
   index.line('not json');
   assert.equal(index.titles.get('a'), 'renamed');
+});
+
+test('meta scan: a turn\'s start time and its update_plan progress; the plan stays after the turn until the next one starts', () => {
+  const meta = new CodexMetaScan();
+  const event = (ts: string, payload: object): string => JSON.stringify({ timestamp: ts, type: 'event_msg', payload });
+  const plan = (ts: string, statuses: string[]): string =>
+    JSON.stringify({
+      timestamp: ts,
+      type: 'response_item',
+      payload: { type: 'function_call', name: 'update_plan', arguments: JSON.stringify({ explanation: 'x', plan: statuses.map((status, i) => ({ step: `Step ${i}`, status })) }), call_id: `call-${ts}` },
+    });
+  meta.line(event('2026-09-29T09:00:01.500Z', { type: 'task_started', turn_id: 't1', started_at: 1790672401 }));
+  assert.equal(meta.turnStartedAt, '2026-09-29T09:00:01.000Z', 'started_at (epoch seconds) wins over the record time');
+  assert.equal(meta.progress, undefined);
+  meta.line(plan('2026-09-29T09:00:02.000Z', ['completed', 'completed', 'in_progress', 'pending', 'pending', 'pending', 'pending']));
+  assert.deepEqual(meta.progress, { done: 2, total: 7 });
+  meta.line(plan('2026-09-29T09:00:03.000Z', ['completed', 'completed', 'completed', 'in_progress', 'pending', 'pending', 'pending']));
+  assert.deepEqual(meta.progress, { done: 3, total: 7 });
+  meta.line(JSON.stringify({ timestamp: '2026-09-29T09:00:04.000Z', type: 'response_item', payload: { type: 'function_call', name: 'update_plan', arguments: '{not json' } }));
+  assert.deepEqual(meta.progress, { done: 3, total: 7 }, 'unreadable arguments change nothing');
+  meta.line(event('2026-09-29T09:00:05.000Z', { type: 'task_complete', turn_id: 't1' }));
+  assert.deepEqual([meta.turnOpen, meta.turnStartedAt, meta.progress], [false, undefined, { done: 3, total: 7 }]);
+  meta.line(event('2026-09-29T09:10:00.000Z', { type: 'task_started', turn_id: 't2' }));
+  assert.deepEqual([meta.turnStartedAt, meta.progress], ['2026-09-29T09:10:00.000Z', undefined], 'without started_at, the record time');
+  meta.line(plan('2026-09-29T09:10:01.000Z', []));
+  assert.equal(meta.progress, undefined);
+  meta.reset();
+  assert.deepEqual([meta.turnStartedAt, meta.progress], [undefined, undefined]);
+  assert.deepEqual(planProgress([{ step: 'a', status: 'completed' }, { step: 'b', status: 'inProgress' }, 'junk']), { done: 1, total: 2 }, 'app-server steps (camelCase status)');
 });

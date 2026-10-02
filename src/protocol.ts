@@ -38,6 +38,10 @@ export interface Session {
   lastActivity: string;
   /** Present when `POST /api/sessions/:sid/prompt` would be refused. */
   promptBlock?: PromptBlock;
+  /** While `running`: when the current turn started (ISO 8601), when known. */
+  turnStartedAt?: string;
+  /** The agent's own task list as of its last update in the current or last turn (cleared when the next turn starts); `total` > 0. */
+  progress?: Progress;
   context?: { used: number; window: number };
   /** Absent for a single or unknown account. */
   account?: Account;
@@ -45,6 +49,12 @@ export interface Session {
   model?: string;
   /** Reasoning effort, e.g. `xhigh`, `high`, `medium`, `low`; absent when unset or unsupported by the model. */
   effort?: string;
+}
+
+/** Claude Code: its task list (TaskCreate/TaskUpdate, TodoWrite); Codex: its plan (`update_plan`). `done`: tasks completed. */
+export interface Progress {
+  done: number;
+  total: number;
 }
 
 export const ITEM_KINDS = ['user', 'assistant', 'tool', 'notice'] as const;

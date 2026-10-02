@@ -1051,3 +1051,52 @@ test('codex provider: a completed turn raises done by the Stop hook rule; an app
   await waitFor(() => hub.alerts.length > 1);
   assert.deepEqual(hub.alerts.slice(1), [[`codex:${named}`, 'needs_input', undefined, undefined]]);
 });
+
+test('codex provider: turn/started and turn/plan/updated give a loaded thread its turn start and plan progress ahead of the rollout; the plan stays until the next turn', async (t) => {
+  const home = join(root, 'codex-plan');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const id = '019a0000-0000-7000-8000-000000000050';
+  writeFileSync(join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`), rollout(id, 0, 'low', [['first prompt', 'reply one']]).join(''));
+  const { rpc, log } = fakeRpc('plan', { loaded: [id], threads: { [id]: { status: { type: 'idle' } } } });
+  const provider = new CodexProvider({ home, historyDays: 3650, rpc });
+  const published: Session[] = [];
+  const hub: Hub = { ...recordingHub(), session: (s) => void published.push(s) };
+  t.after(() => provider.stop());
+  const up = ready(rpc);
+  await provider.start(hub);
+  await up;
+  await waitFor(() => log().some((m) => m.method === 'thread/resume'));
+  const notify = (method: string, params: unknown): Promise<unknown> => rpc.request('fake/notify', { method, params });
+  const shown = (): unknown[] => {
+    const s = provider.listSessions().find((x) => x.id === `codex:${id}`);
+    return [s?.status, s?.turnStartedAt, s?.progress];
+  };
+  const plan = (turnId: string, statuses: string[]): Promise<unknown> =>
+    notify('turn/plan/updated', { threadId: id, turnId, explanation: null, plan: statuses.map((status, i) => ({ step: `s${i}`, status })) });
+  const seven = (done: number): string[] => Array.from({ length: 7 }, (_, i) => (i < done ? 'completed' : i === done ? 'inProgress' : 'pending'));
+
+  await notify('turn/started', { threadId: id, turn: { id: 't2', items: [], status: 'inProgress', startedAt: 1790672401 } });
+  await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: [] } });
+  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', undefined]);
+  await plan('t2', seven(2));
+  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', { done: 2, total: 7 }]);
+  await plan('t2', seven(3));
+  assert.deepEqual(published.at(-1)?.progress, { done: 3, total: 7 }, 'published at once');
+  await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: ['waitingOnApproval'] } });
+  assert.deepEqual(shown(), ['needs_input', undefined, { done: 3, total: 7 }], 'the start time is a running session\'s');
+  await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: [] } });
+  assert.deepEqual(shown(), ['running', '2026-09-29T09:00:01.000Z', { done: 3, total: 7 }]);
+
+  await notify('turn/completed', { threadId: id, turn: { id: 't2', items: [], status: 'completed' } });
+  await notify('thread/status/changed', { threadId: id, status: { type: 'idle' } });
+  assert.deepEqual(shown(), ['idle', undefined, { done: 3, total: 7 }], 'the plan stays after the turn');
+  await provider.refresh();
+  assert.deepEqual(shown(), ['idle', undefined, { done: 3, total: 7 }], 'a rollout without the plan does not clear what the daemon said');
+
+  await notify('turn/started', { threadId: id, turn: { id: 't3', items: [], status: 'inProgress' } });
+  await notify('thread/status/changed', { threadId: id, status: { type: 'active', activeFlags: [] } });
+  const [status, startedAt, progress] = shown();
+  assert.deepEqual([status, progress], ['running', undefined], 'the next turn starts without a plan');
+  assert.ok(typeof startedAt === 'string' && Date.now() - Date.parse(startedAt) < 60_000, 'without startedAt, when the bridge heard of it');
+});

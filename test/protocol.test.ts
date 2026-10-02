@@ -37,6 +37,8 @@ const running: Session = {
   cwd: '/home/dev/app',
   status: 'running',
   lastActivity: '2026-09-29T09:59:30.000Z',
+  turnStartedAt: '2026-09-29T09:58:00.000Z',
+  progress: { done: 3, total: 7 },
   context: { used: 86000, window: 200000 },
   account: { id: 'acc-school', label: 'school', estimated: true },
   model: 'Fable 5.1',
@@ -214,7 +216,9 @@ test('requests: open and list', async () => {
     { timeoutMs: 60_000 },
   );
   fixture('event-request-permission', await ws.next());
-  assert.deepEqual(await ws.next(), { type: 'session', session: { ...running, status: 'needs_input', promptBlock: 'awaiting_input' } });
+  // A session waiting on an answer is not running: it reports no turn start.
+  const { turnStartedAt: _t, ...waiting } = running;
+  assert.deepEqual(await ws.next(), { type: 'session', session: { ...waiting, status: 'needs_input', promptBlock: 'awaiting_input' } });
 
   question = bridge.hub.pending.open(
     {

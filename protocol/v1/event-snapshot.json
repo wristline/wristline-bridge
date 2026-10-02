@@ -9,6 +9,10 @@
       "cwd": "/home/dev/app",
       "status": "needs_input",
       "lastActivity": "2026-09-29T09:59:30.000Z",
+      "progress": {
+        "done": 3,
+        "total": 7
+      },
       "context": {
         "used": 86000,
         "window": 200000

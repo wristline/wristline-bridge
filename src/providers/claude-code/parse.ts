@@ -1,9 +1,10 @@
 // Pure parsing of Claude Code transcripts (~/.claude/projects/<slug>/<sessionId>.jsonl) and
-// statusLine input. Verified against Claude Code 2.1.284 (ExitPlanMode, API error records: 2.1.286).
+// statusLine input. Verified against Claude Code 2.1.284 (ExitPlanMode, API error records: 2.1.286;
+// TaskCreate/TaskUpdate inputs and results, `promptId`: 2.1.287).
 
 import type { ItemDraft, ItemSink, LineHandler } from '../../jsonl.ts';
 import type { LimitHit } from '../../provider.ts';
-import { DETAIL_MAX, TEXT_MAX, type LimitReset, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
+import { DETAIL_MAX, TEXT_MAX, type LimitReset, type Progress, type Session, type Usage, type UsageWindow } from '../../protocol.ts';
 import { clip, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 
 const TITLE_MAX = 40;
@@ -238,6 +239,24 @@ export class ClaudeMetaScan implements LineHandler {
   effort: string | undefined;
   /** The last usage limit the session hit (an API error record with `error: "rate_limit"`). */
   limit: LimitHit | undefined;
+  /** `promptId` of the user record that opened the current (or last) turn; the turn's tool results carry it too. */
+  turnId: string | undefined;
+  /** When that record was written (ISO 8601). */
+  turnStartedAt: string | undefined;
+  /** The task list: task id (TodoWrite: its position) -> `pending` | `in_progress` | `completed`. */
+  readonly #tasks = new Map<string, string>();
+  /** TaskCreate calls whose result (it names the new task's id) has not been read yet. */
+  readonly #creates = new Set<string>();
+  /** Whether the task list was written in the current turn. */
+  #touched = false;
+
+  /** The task list as of its last change in the current turn; undefined when the turn has not touched it, or it is empty. */
+  get progress(): Progress | undefined {
+    if (!this.#touched || this.#tasks.size === 0) return undefined;
+    let done = 0;
+    for (const status of this.#tasks.values()) if (status === 'completed') done++;
+    return { done, total: this.#tasks.size };
+  }
 
   line(line: string): void {
     if (line.includes('"custom-title"')) {
@@ -261,20 +280,74 @@ export class ClaudeMetaScan implements LineHandler {
       if (rec.isApiErrorMessage === true && rec.error === 'rate_limit' && at && text) {
         this.limit = { at, text, ...usageLimit(rec) };
       }
+      if (Array.isArray(rec.message.content)) for (const block of rec.message.content) if (isObject(block) && block.type === 'tool_use') this.#taskTool(block);
     } else if (line.includes('"subtype":"compact_boundary"')) {
       // /compact writes no assistant usage; the boundary carries the size the context shrank to.
       const rec = parseJson(line);
       if (rec?.type !== 'system' || rec.subtype !== 'compact_boundary') return;
       this.contextUsed = isObject(rec.compactMetadata) ? num(rec.compactMetadata.postTokens) : undefined;
       this.compactedAt = Date.parse(str(rec.timestamp) ?? '') || this.compactedAt;
-    } else if ((this.firstPrompt === undefined || this.cwd === undefined) && line.includes('"type":"user"')) {
-      const rec = parseJson(line);
-      if (rec?.type !== 'user' || rec.isSidechain === true) return;
-      this.cwd ??= str(rec.cwd);
-      if (this.firstPrompt !== undefined || rec.isMeta === true || !isObject(rec.message)) return;
-      const user = classifyUserText(textOf(rec.message.content));
-      if (user?.kind === 'prompt') this.firstPrompt = clip(oneLine(user.text), TITLE_MAX);
+    } else if (line.includes('"type":"user"')) {
+      this.#user(line);
     }
+  }
+
+  /** A user record is parsed only when it may open a turn, carry a TaskCreate result, or give the first prompt or cwd. */
+  #user(line: string): void {
+    const promptId = /"promptId":"([^"]*)"/.exec(line)?.[1];
+    // Without a promptId (older Claude Code, local commands such as /login), a record of tool results never opens a turn.
+    const opens = promptId !== undefined ? promptId !== this.turnId : !line.includes('"tool_result"');
+    const created = [...this.#creates].find((id) => line.includes(`"${id}"`));
+    if (!opens && created === undefined && this.firstPrompt !== undefined && this.cwd !== undefined) return;
+    const rec = parseJson(line);
+    if (rec?.type !== 'user' || rec.isSidechain === true) return;
+    this.cwd ??= str(rec.cwd);
+    const user = isObject(rec.message) ? classifyUserText(textOf(rec.message.content)) : undefined;
+    // A prompt, a task notification, a scheduled (meta) prompt: each starts a turn with a new promptId.
+    if (opens && (promptId !== undefined || (rec.isMeta !== true && (user?.kind === 'prompt' || user?.kind === 'notice') && !user.text.startsWith('[Request interrupted')))) {
+      this.turnId = promptId;
+      this.turnStartedAt = toIso(rec.timestamp);
+      this.#touched = false;
+    }
+    if (created !== undefined) this.#created(created, rec);
+    if (this.firstPrompt === undefined && rec.isMeta !== true && user?.kind === 'prompt') this.firstPrompt = clip(oneLine(user.text), TITLE_MAX);
+  }
+
+  /**
+   * TodoWrite (`todos[]` with `status`) rewrites the whole list; TaskUpdate (`taskId`, `status`;
+   * `deleted` removes the task) changes one task; TaskCreate adds one once its result names its id.
+   */
+  #taskTool(block: JsonObject): void {
+    const input = isObject(block.input) ? block.input : {};
+    if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
+      this.#tasks.clear();
+      input.todos.forEach((todo: unknown, i) => this.#tasks.set(String(i), (isObject(todo) && str(todo.status)) || 'pending'));
+      this.#touched = true;
+    } else if (block.name === 'TaskCreate') {
+      const id = str(block.id);
+      if (id) this.#creates.add(id);
+    } else if (block.name === 'TaskUpdate') {
+      const id = str(input.taskId);
+      const status = str(input.status);
+      if (!id || !status) return;
+      if (status === 'deleted') this.#tasks.delete(id);
+      else this.#tasks.set(id, status);
+      this.#touched = true;
+    }
+  }
+
+  /** TaskCreate's result: `toolUseResult.task.id`, else its text `Task #<id> created successfully: …`. */
+  #created(toolUseId: string, rec: JsonObject): void {
+    const content = isObject(rec.message) ? rec.message.content : undefined;
+    const block = Array.isArray(content) ? content.find((b: unknown) => isObject(b) && b.type === 'tool_result' && b.tool_use_id === toolUseId) : undefined;
+    if (!isObject(block)) return;
+    this.#creates.delete(toolUseId);
+    if (block.is_error === true) return;
+    const result = isObject(rec.toolUseResult) && isObject(rec.toolUseResult.task) ? str(rec.toolUseResult.task.id) : undefined;
+    const id = result ?? /^Task #(\S+) created successfully/.exec(textOf(block.content))?.[1];
+    if (!id) return;
+    this.#tasks.set(id, 'pending');
+    this.#touched = true;
   }
 
   reset(): void {
@@ -282,6 +355,10 @@ export class ClaudeMetaScan implements LineHandler {
     this.contextUsed = this.compactedAt = undefined;
     this.model = this.effort = undefined;
     this.limit = undefined;
+    this.turnId = this.turnStartedAt = undefined;
+    this.#tasks.clear();
+    this.#creates.clear();
+    this.#touched = false;
   }
 }
 

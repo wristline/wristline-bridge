@@ -1,11 +1,12 @@
 // Pure parsing of Codex rollouts ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl) and
 // session_index.jsonl. Rollouts use snake_case and PascalCase item types while the app-server
 // uses camelCase; everything is normalized to the app-server shapes in rpc.ts first, so the same
-// code will serve `item/completed` notifications. Verified against codex-cli 0.159.0.
+// code will serve `item/completed` notifications. Verified against codex-cli 0.159.0 (`update_plan`,
+// `task_started.started_at`: 0.160.0).
 
 import type { ItemDraft, ItemSink, LineHandler, LineParser } from '../../jsonl.ts';
 import type { LimitHit } from '../../provider.ts';
-import { DETAIL_MAX, TEXT_MAX, type Account, type LimitReset, type Usage, type UsageWindow } from '../../protocol.ts';
+import { DETAIL_MAX, TEXT_MAX, type Account, type LimitReset, type Progress, type Usage, type UsageWindow } from '../../protocol.ts';
 import { clip, clipTail, isObject, num, oneLine, parseJson, str, toIso, type JsonObject } from '../../util.ts';
 import type {
   CommandExecutionStatus,
@@ -318,6 +319,16 @@ export function usageOf(snapshot: RateLimitSnapshot, updatedAt: string, account?
 }
 
 /**
+ * The progress of a plan the agent keeps with `update_plan` (`plan: [{step, status}]`, status
+ * `pending` | `in_progress` | `completed`; the app-server's `turn/plan/updated` writes `inProgress`):
+ * undefined for an empty plan.
+ */
+export function planProgress(plan: unknown[]): Progress | undefined {
+  const steps = plan.filter(isObject);
+  return steps.length > 0 ? { done: steps.filter((step) => step.status === 'completed').length, total: steps.length } : undefined;
+}
+
+/**
  * Collects what the session list needs from a rollout. Lines are filtered by substring before
  * JSON.parse; escaped quotes inside string values never match.
  */
@@ -331,6 +342,10 @@ export class CodexMetaScan implements LineHandler {
   subagent = false;
   firstPrompt: string | undefined;
   turnOpen = false;
+  /** While a turn is open: when it started (`task_started.started_at`, else the record's time). */
+  turnStartedAt: string | undefined;
+  /** The plan of the current (or last) turn's latest `update_plan` call; a new turn clears it. */
+  progress: Progress | undefined;
   context: { used: number; window: number } | undefined;
   rateLimits: { at: string; snapshot: RateLimitSnapshot } | undefined;
   /** Model and reasoning effort of the last turn (`turn_context`); effort is null there when unset. */
@@ -356,8 +371,14 @@ export class CodexMetaScan implements LineHandler {
       const rec = parseJson(line);
       const payload = rec?.payload;
       const type = isObject(payload) ? payload.type : undefined;
-      if (type === 'task_started') this.turnOpen = true;
-      else if (type === 'task_complete' || type === 'turn_aborted') this.turnOpen = false;
+      if (type === 'task_started') {
+        this.turnOpen = true;
+        this.turnStartedAt = (isObject(payload) ? toIso(payload.started_at) : undefined) ?? toIso(rec?.timestamp);
+        this.progress = undefined;
+      } else if (type === 'task_complete' || type === 'turn_aborted') {
+        this.turnOpen = false;
+        this.turnStartedAt = undefined;
+      }
       const error = type === 'task_complete' && isObject(payload) ? turnError(payload.error, this.rateLimits?.snapshot, this.limitReached) : undefined;
       if (type === 'task_complete') this.limitReached = undefined;
       const at = str(rec?.timestamp);
@@ -377,6 +398,11 @@ export class CodexMetaScan implements LineHandler {
       this.version = str(payload.cli_version);
       this.accountId = str(payload.creator_account_id);
       this.subagent = isObject(payload.source) && isObject(payload.source.subagent);
+    } else if (line.includes('"name":"update_plan"')) {
+      const payload = parseJson(line)?.payload;
+      if (!isObject(payload) || payload.type !== 'function_call' || payload.name !== 'update_plan') return;
+      const args = parseJson(str(payload.arguments) ?? '');
+      if (Array.isArray(args?.plan)) this.progress = planProgress(args.plan);
     } else if (this.firstPrompt === undefined && line.includes('"UserMessage"')) {
       const payload = parseJson(line)?.payload;
       const n = isObject(payload) && payload.type === 'item_completed' ? normalizeItemCompleted(payload) : undefined;
@@ -389,6 +415,7 @@ export class CodexMetaScan implements LineHandler {
   reset(): void {
     this.id = this.cwd = this.version = this.accountId = this.firstPrompt = undefined;
     this.subagent = this.turnOpen = false;
+    this.turnStartedAt = this.progress = undefined;
     this.context = this.rateLimits = this.limit = this.limitReached = undefined;
     this.model = this.effort = undefined;
   }

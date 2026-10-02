@@ -788,3 +788,69 @@ test('claude-code: model and effort follow the transcript\'s last turn; a status
   await provider.refresh();
   assert.equal(hub.sessions.length, published, 'a refresh rebuilds the same session');
 });
+
+test('claude-code: a running session reports its turn\'s start and task-list progress; once idle the progress stays and the start time goes; the next prompt clears the progress', async () => {
+  const home = join(root, 'claude-progress');
+  const sid = 'eeeeeeee-0000-4000-8000-000000000003';
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  mkdirSync(join(home, 'projects', '-w'), { recursive: true });
+  const transcript = join(home, 'projects', '-w', `${sid}.jsonl`);
+  const record = (r: object): string => `${JSON.stringify({ cwd: '/w', sessionId: sid, ...r })}\n`;
+  const todos = (ts: string, done: number): string =>
+    record({
+      type: 'assistant',
+      uuid: `a-${ts}`,
+      timestamp: ts,
+      message: { role: 'assistant', model: 'claude-fable-5-1', content: [{ type: 'tool_use', id: `toolu-${ts}`, name: 'TodoWrite', input: { todos: Array.from({ length: 7 }, (_, i) => ({ content: `t${i}`, status: i < done ? 'completed' : 'pending' })) } }] },
+    });
+  writeFileSync(transcript, record({ type: 'user', uuid: 'u1', promptId: 'p1', timestamp: '2026-09-29T10:00:00.000Z', message: { role: 'user', content: 'Do the seven things' } }) + todos('2026-09-29T10:00:05.000Z', 3));
+  const registry = (status: string): void =>
+    writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, cwd: '/w', status, updatedAt: Date.now() }));
+  registry('busy');
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7 });
+  const hub = recordingHub();
+  await provider.start(hub);
+  provider.stop();
+  const latest = (): unknown[] => [hub.sessions.at(-1)?.status, hub.sessions.at(-1)?.turnStartedAt, hub.sessions.at(-1)?.progress];
+  assert.deepEqual(latest(), ['running', '2026-09-29T10:00:00.000Z', { done: 3, total: 7 }]);
+  const published = hub.sessions.length;
+  await provider.refresh();
+  assert.equal(hub.sessions.length, published, 'a re-read keeps the start time: nothing to publish');
+  appendFileSync(transcript, todos('2026-09-29T10:01:00.000Z', 4));
+  await provider.refresh();
+  assert.deepEqual(latest(), ['running', '2026-09-29T10:00:00.000Z', { done: 4, total: 7 }], 'a progress change is a session change');
+  registry('idle');
+  await provider.refresh();
+  assert.deepEqual(latest(), ['idle', undefined, { done: 4, total: 7 }]);
+  appendFileSync(transcript, record({ type: 'user', uuid: 'u2', promptId: 'p2', timestamp: '2026-09-29T10:30:00.000Z', message: { role: 'user', content: 'Next' } }));
+  registry('busy');
+  await provider.refresh();
+  assert.deepEqual(latest(), ['running', '2026-09-29T10:30:00.000Z', undefined]);
+});
+
+test('codex without the daemon: a running turn reports its start and update_plan progress from the rollout', async () => {
+  const home = join(root, 'codex-progress');
+  const day = join(home, 'sessions', '2026', '09', '29');
+  mkdirSync(day, { recursive: true });
+  const id = '019a0000-0000-7000-8000-0000000000c3';
+  const plan = (done: number): object => ({
+    timestamp: '2026-09-29T09:00:03.000Z',
+    type: 'response_item',
+    payload: { type: 'function_call', name: 'update_plan', call_id: `c${done}`, arguments: JSON.stringify({ plan: Array.from({ length: 7 }, (_, i) => ({ step: `s${i}`, status: i < done ? 'completed' : 'pending' })) }) },
+  });
+  const file = join(day, `rollout-2026-09-29T09-00-00-${id}.jsonl`);
+  const lines = [
+    { timestamp: '2026-09-29T09:00:00.000Z', type: 'session_meta', payload: { id, cwd: '/w', cli_version: '0.160.0' } },
+    { timestamp: '2026-09-29T09:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 't1', started_at: 1790672401 } },
+    plan(3),
+  ];
+  writeFileSync(file, lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
+  const provider = new CodexProvider({ home, historyDays: 3650 });
+  await provider.start(recordingHub());
+  provider.stop();
+  const session = (): Session | undefined => provider.listSessions().find((s) => s.id === `codex:${id}`);
+  assert.deepEqual([session()?.status, session()?.turnStartedAt, session()?.progress], ['running', '2026-09-29T09:00:01.000Z', { done: 3, total: 7 }]);
+  appendFileSync(file, `${JSON.stringify({ timestamp: '2026-09-29T09:00:09.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1' } })}\n`);
+  await provider.refresh();
+  assert.deepEqual([session()?.status, session()?.turnStartedAt, session()?.progress], ['idle', undefined, { done: 3, total: 7 }]);
+});

@@ -463,6 +463,9 @@ export class ClaudeCodeProvider implements SessionProvider {
     };
     const block = promptBlock(status, this.#panes.has(id));
     if (block) session.promptBlock = block;
+    if (status === 'running' && meta?.turnStartedAt) session.turnStartedAt = meta.turnStartedAt;
+    const progress = meta?.progress;
+    if (progress) session.progress = progress;
     const context = this.#context(id, meta);
     if (context) session.context = context;
     const known = this.#sessionAccounts.get(id);

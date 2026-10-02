@@ -64,6 +64,20 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   `effort`). Codex: the model slug (e.g. `gpt-6-astra`) and effort the daemon reports for a thread
   it has loaded (`thread/read`, `thread/started`, `thread/settings/updated`), else the rollout's
   last `turn_context`. A change is sent as a `session` event like any other.
+  `turnStartedAt` (ISO 8601), only while `running` (not on a `needs_input` session; it comes back
+  unchanged when the turn goes on), is when the current turn started; it stays the same for the
+  whole turn. Claude Code: the time of the transcript's user record that opened the turn (the first
+  with a new `promptId`: a prompt, a task notification, a scheduled prompt; the turn's tool results
+  and an interruption share it). Codex: `turn/started`'s `turn.startedAt` for a thread the daemon
+  has loaded, else the rollout's `task_started` (`started_at`, else the record's time).
+  `progress` (`{done, total}`, `total` ≥ 1) is the agent's own task list as of its last change in
+  the current turn, or in the last one while no new turn has started: `total` tasks, `done` of
+  them completed. A new turn clears it until the agent updates its list again. Claude Code: its
+  task list (`TaskCreate` adds a task once its result names the task's id, `TaskUpdate` sets a
+  task's `status`, `deleted` removes it; `TodoWrite` replaces the whole list with its `todos[]`);
+  the list itself carries over into later turns. Codex: the steps of the turn's latest
+  `update_plan` (`turn/plan/updated` for a thread the daemon has loaded, else the rollout's
+  `update_plan` call). Absent when the turn has not touched the list or the list is empty.
 - **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
