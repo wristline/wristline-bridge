@@ -334,6 +334,12 @@ reconnecting watch posts the notifications for the ones it has not shown and rem
 10 minutes, and `id` is what makes it one alert. Older bridges send a `snapshot` without
 `alerts` (treat it as empty). The buffer is gone after a bridge restart.
 
+Not kept: a `done` alert raised while `GET /local/presence` answers `watch: false` (no watch
+connected, the 90 s grace after a disconnect, or a watch that stopped answering pings). That is
+when a Stop hook such as a Slack notifier posts the turn instead (see the Local API), and a watch
+that connects a few seconds later (often woken by that very notification) would show it a second
+time. No hook stands in for `needs_input` and `limit`: they are kept either way.
+
 ### Codex alerts
 
 Codex alerts come from the app-server daemon, for threads it has loaded and the bridge has
@@ -401,7 +407,8 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   ends. `since` is when `watch` last changed (ISO; the first connect of the run, the last
   disconnect, or when the last pong got too old), `null` before any watch connected. Other Stop
   hooks (e.g. a Slack notifier) stay quiet only while `watch` is true: an alert raised in the
-  grace reaches no watch. `?codexThread=<thread id>` adds `covered`: true only while the Codex
+  grace reaches no watch, and a `done` raised while `watch` is false is not replayed to a watch
+  that connects later (see "Missed alerts"). `?codexThread=<thread id>` adds `covered`: true only while the Codex
   app-server daemon is connected and the bridge has rejoined that thread, the only case in which a
   finished turn of it raises a `done` alert (not for a TUI with its own embedded server, nor while
   the bridge reconnects to the daemon). A Codex `notify` script stays quiet only when `watch` and

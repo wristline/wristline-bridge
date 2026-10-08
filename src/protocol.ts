@@ -146,7 +146,7 @@ export interface Usage {
 export type ResolvedBy = 'watch' | 'terminal' | 'timeout';
 export type AlertKind = 'needs_input' | 'done' | 'limit';
 
-/** A session finished, waits for input, or hit a usage limit. Sent as an `alert` event and replayed in the `snapshot` (the last 10 of the past 10 minutes) for a watch that was offline. */
+/** A session finished, waits for input, or hit a usage limit. Sent as an `alert` event and replayed in the `snapshot` (the last 10 of the past 10 minutes) for a watch that was offline, except a `done` raised while no watch was present (a Stop hook posted it). */
 export interface Alert {
   /** uuid; a watch shows each id once (an event, then the snapshots that replay it). */
   id: string;

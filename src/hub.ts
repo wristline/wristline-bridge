@@ -157,7 +157,7 @@ export class BridgeHub implements Hub {
   readonly #usageThrottles = new Map<string, UsageThrottle>();
   readonly #usageThrottleMs: number;
   readonly #ping: NodeJS.Timeout;
-  /** Oldest first, at most ALERT_KEEP. */
+  /** Oldest first, at most ALERT_KEEP; without the `done` alerts raised while no watch was present (see `alert`). */
   readonly #alerts: Alert[] = [];
   /** Status, turn start and progress as last broadcast per session (see `backgroundKey`): a background client hears of a session only when one of them changes. */
   readonly #lastShown = new Map<string, string>();
@@ -367,8 +367,12 @@ export class BridgeHub implements Hub {
       ...(reset?.resetsEstimated === undefined ? {} : { resetsEstimated: reset.resetsEstimated }),
       ...(reset?.limitKind === undefined ? {} : { limitKind: reset.limitKind }),
     };
-    this.#alerts.push(alert);
-    if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();
+    // A `done` raised while no watch is present is posted by a Stop hook instead (e.g. to Slack, see
+    // `presence`): replayed to a watch that connects later, it would arrive twice. No hook stands in for the other kinds.
+    if (kind !== 'done' || this.presence().watch) {
+      this.#alerts.push(alert);
+      if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();
+    }
     this.#broadcast({ type: 'alert', ...alert });
     const { clients, bg } = this.#reach();
     this.#log(`wristline: alert ${kind} id=${alert.id} clients=${clients} bg=${bg}`);

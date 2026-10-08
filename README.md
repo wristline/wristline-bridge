@@ -242,7 +242,7 @@ alert as for Claude Code: up to 500 characters of the turn's last answer, titled
 (or the thread title when the turn had none). Short answers (under 20 characters, or under 8 when
 they contain Korean, Chinese or Japanese), "No response requested.", interrupted turns, sub-agents
 and Quick Asks raise none. A thread waiting on an approval that is not on the watch as a request
-raises `needs_input` instead. The watch shows these only while it is connected; alerts of the last 10 minutes are replayed when it reconnects.
+raises `needs_input` instead. The watch shows these only while it is connected; alerts of the last 10 minutes are replayed when it reconnects, except a `done` raised while no watch was connected (the `notify` program below posts that one).
 Sessions of a TUI with its own embedded server (see Limits) raise no alerts.
 
 For when the watch is away, Codex's own `notify` program can post elsewhere (e.g. Slack). Codex

@@ -1,8 +1,9 @@
-// Missed done/needs_input alerts: the hub buffers the last few and the snapshot replays them.
+// Missed alerts: the hub buffers the last few and the snapshot replays them, except a `done` alert
+// raised while no watch was present (a Stop hook such as a Slack notifier posted that one).
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import type { Alert, ServerEvent } from '../src/protocol.ts';
-import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
+import { FakeProvider, TestSocket, startBridge, waitFor, type Bridge } from './helpers.ts';
 
 const T = Date.parse('2026-09-29T10:00:00Z');
 let clock = T;
@@ -19,6 +20,18 @@ async function snapshotAlerts(): Promise<Alert[]> {
   ws.close();
   assert.equal(snapshot.type, 'snapshot');
   return snapshot.type === 'snapshot' ? snapshot.alerts : [];
+}
+
+/** A watch connected now (so `presence` says `watch: true`), past its snapshot. */
+async function connect(): Promise<TestSocket> {
+  const ws = await new TestSocket(`${bridge.base.replace('http', 'ws')}/api/ws`, bridge.token).open();
+  assert.equal((await ws.next()).type, 'snapshot');
+  return ws;
+}
+
+/** Until the bridge has seen every earlier socket close. */
+async function noWatch(): Promise<void> {
+  await waitFor(() => (bridge.hub.presence().watch ? undefined : true));
 }
 
 test('an alert event carries a stable id and time; the snapshot replays it unchanged, oldest first', async () => {
@@ -41,7 +54,9 @@ test('an alert event carries a stable id and time; the snapshot replays it uncha
 });
 
 test('the buffer keeps the last 10', async () => {
+  const watch = await connect();
   for (let i = 1; i <= 11; i++) bridge.hub.alert(`claude-code:s${i}`, 'done', `answer ${i}`);
+  watch.close();
   const alerts = await snapshotAlerts();
   assert.equal(alerts.length, 10);
   assert.deepEqual(
@@ -54,7 +69,9 @@ test('the buffer keeps the last 10', async () => {
 
 test('alerts older than 10 minutes are not replayed', async () => {
   clock = T + 5 * 60_000;
+  const watch = await connect();
   bridge.hub.alert('claude-code:late', 'done', 'answer 12');
+  watch.close();
   assert.equal((await snapshotAlerts()).length, 10);
   clock = T + 11 * 60_000;
   assert.deepEqual(
@@ -64,4 +81,49 @@ test('alerts older than 10 minutes are not replayed', async () => {
   );
   clock = T + 16 * 60_000;
   assert.deepEqual(await snapshotAlerts(), []);
+});
+
+test('a done alert raised while no watch is connected is not replayed: a Stop hook posted it (e.g. to Slack)', async () => {
+  clock = T + 30 * 60_000;
+  await noWatch();
+  bridge.hub.alert('claude-code:away', 'done', 'answer while away');
+  bridge.hub.alert('claude-code:away', 'needs_input', 'Claude is waiting for your input');
+  bridge.hub.alert('claude-code:away', 'limit', "You've hit your session limit");
+  clock += 5000;
+  assert.deepEqual(
+    (await snapshotAlerts()).map((a) => a.alert),
+    ['needs_input', 'limit'],
+    'no Stop hook stands in for these: a reconnecting watch still shows them',
+  );
+});
+
+test('nor is one raised in the grace after a disconnect, or into a socket whose watch stopped answering pings', async () => {
+  clock = T + 45 * 60_000;
+  (await connect()).close();
+  await noWatch();
+  assert.ok(bridge.hub.presence().graceUntil, 'within the 90 s grace');
+  bridge.hub.alert('claude-code:grace', 'done', 'answer in the grace');
+  const silent = await connect();
+  clock += 36_000;
+  assert.equal(bridge.hub.presence().watch, false, 'no pong for 36 s');
+  bridge.hub.alert('claude-code:stale', 'done', 'answer into a dead socket');
+  assert.equal((await silent.next()).type, 'alert', 'still sent: the socket may yet deliver it');
+  silent.close();
+  await noWatch();
+  assert.deepEqual(await snapshotAlerts(), []);
+});
+
+test('an alert sent to a connected watch is replayed with the same id when it reconnects within 10 minutes', async () => {
+  clock = T + 60 * 60_000;
+  const watch = await connect();
+  bridge.hub.alert('claude-code:here', 'done', 'answer while connected');
+  const live = await watch.next();
+  assert.equal(live.type, 'alert');
+  // E.g. the socket died right after the send: the watch may never have got it.
+  watch.close();
+  await noWatch();
+  clock += 9 * 60_000;
+  const first = await snapshotAlerts();
+  assert.deepEqual(first.map((a) => a.id), [live.type === 'alert' ? live.id : '']);
+  assert.deepEqual(await snapshotAlerts(), first, 'the same id on every reconnect: the watch shows it once');
 });
