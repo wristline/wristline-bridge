@@ -1,4 +1,17 @@
 {
   "provider": "claude-code",
-  "text": "Reply with the single word OK"
+  "text": "Reply with the single word OK",
+  "context": {
+    "time": "2026-09-29T19:00:00+09:00",
+    "tz": "Asia/Seoul",
+    "locale": "ko-KR",
+    "units": "metric",
+    "place": "서울 성북구 돈암동",
+    "location": {
+      "lat": 37.5912,
+      "lon": 127.0187,
+      "accuracyM": 50
+    },
+    "device": "watch"
+  }
 }

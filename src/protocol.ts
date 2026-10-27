@@ -273,6 +273,23 @@ export interface UsageList {
   usage: Usage[];
 }
 
+/** Where and when the watch asks from; sent with each ask (a follow-up resends the current one), never stored, logged or echoed. */
+export interface AskContext {
+  /** The watch's local time, ISO 8601 with its offset (`2026-10-27T14:05:00+09:00`). */
+  time: string;
+  /** IANA time zone (`Asia/Seoul`). */
+  tz: string;
+  /** BCP 47 (`ko-KR`). */
+  locale: string;
+  units: 'metric' | 'imperial';
+  /** A coarse place name (`서울 성북구 돈암동`), at most ASK_PLACE_MAX code units, no control characters. */
+  place?: string;
+  location?: { lat: number; lon: number; accuracyM: number };
+  device: 'watch';
+}
+
+export const ASK_PLACE_MAX = 100;
+
 export interface AskBody {
   provider: ProviderId;
   text: string;
@@ -280,6 +297,7 @@ export interface AskBody {
   model?: string;
   /** Continues that thread (a `threadId` of this device's asks); absent for a new thread. */
   threadId?: string;
+  context?: AskContext;
 }
 
 export interface AskAccepted {

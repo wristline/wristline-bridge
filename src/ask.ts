@@ -13,7 +13,7 @@ import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AskConfig, Bins } from './config.ts';
-import { TEXT_MAX, type Ask, type AskBody, type ProviderId, type ServerEvent } from './protocol.ts';
+import { ASK_PLACE_MAX, TEXT_MAX, type Ask, type AskBody, type AskContext, type ProviderId, type ServerEvent } from './protocol.ts';
 import { isDefaultClaudeHome } from './providers/claude-code/account.ts';
 import { projectSlug } from './providers/claude-code/home.ts';
 import { claudeModelName } from './providers/claude-code/parse.ts';
@@ -280,7 +280,9 @@ export class AskRunner {
       ...['--permission-prompts', 'none'],
       '--strict-mcp-config',
       ...(thread.started ? ['--resume', sessionId] : ['--session-id', sessionId]),
-      ...['--append-system-prompt', ASK_SYSTEM_PROMPT],
+      ...['--append-system-prompt', askSystemPrompt(body.context)],
+      // A resumed conversation would otherwise keep its first ask's system prompt, i.e. its time and place.
+      ...['--system-prompt-snapshot', 'off'],
       '--safe-mode',
       '--',
       body.text,
@@ -293,7 +295,7 @@ export class AskRunner {
   /** `codex exec resume` takes no `-s`/`-C`: the sandbox goes in as a config override and the cwd is the process's. */
   #codexArgs(body: AskBody, thread: Thread): { args: string[]; env: NodeJS.ProcessEnv } {
     const model = body.model || this.#o.ask.codexModel;
-    const prompt = `${ASK_SYSTEM_PROMPT}\n\n${body.text}`;
+    const prompt = `${askSystemPrompt(body.context)}\n\n${body.text}`;
     const args =
       thread.started && thread.sessionId
         ? ['exec', 'resume', thread.sessionId, '--json', ...['-c', 'sandbox_mode="read-only"'], '--skip-git-repo-check', ...(model ? ['-m', model] : []), '--', prompt]
@@ -507,6 +509,60 @@ function codexDelete(bin: string, id: string, spawn: AskSpawn, env: NodeJS.Proce
       resolve(code === 0);
     });
   });
+}
+
+/** The system prompt of an ask: the watch's context, when sent, then ASK_SYSTEM_PROMPT. */
+export function askSystemPrompt(context: AskContext | undefined): string {
+  if (!context) return ASK_SYSTEM_PROMPT;
+  const [, date = '', clock = '', offset = ''] = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::[\d.]+)?(Z|[+-]\d{2}:\d{2})$/.exec(context.time) ?? [];
+  const weekday = new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
+  const parts = [`local time ${weekday} ${date} ${clock} (UTC${offset === 'Z' ? '' : offset}, ${context.tz})`, `locale ${context.locale}`, `${context.units} units`];
+  const { place, location } = context;
+  // About 1 km: as coarse as the place name.
+  const coords = location && `${location.lat.toFixed(2)}, ${location.lon.toFixed(2)}, ±${Math.round(location.accuracyM)} m`;
+  if (place || coords) parts.push(`approximate location: ${place && coords ? `${place} (${coords})` : (place ?? coords)}`);
+  return `The user is asking from a smartwatch; ${parts.join('; ')}. Answer concisely for a small round screen; use the location and time only when relevant.\n\n${ASK_SYSTEM_PROMPT}`;
+}
+
+/** The `context` of an ask body, or undefined when it is not a valid one. Unknown keys are ignored. */
+export function parseAskContext(raw: unknown): AskContext | undefined {
+  if (!isObject(raw)) return undefined;
+  const { time, tz, locale, units, place, location, device } = raw;
+  if (typeof time !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/.test(time) || Number.isNaN(Date.parse(time))) return undefined;
+  if (typeof tz !== 'string' || tz.length > 64 || !validTimeZone(tz)) return undefined;
+  const canonicalLocale = typeof locale === 'string' && locale.length <= 35 ? canonicalLocaleOf(locale) : undefined;
+  if (!canonicalLocale || (units !== 'metric' && units !== 'imperial') || device !== 'watch') return undefined;
+  const context: AskContext = { time, tz, locale: canonicalLocale, units, device };
+  if (place !== undefined) {
+    const name = typeof place === 'string' ? place.trim() : '';
+    if (!name || name.length > ASK_PLACE_MAX || /\p{Cc}/u.test(name)) return undefined;
+    context.place = name;
+  }
+  if (location !== undefined) {
+    const lat = isObject(location) ? num(location.lat) : undefined;
+    const lon = isObject(location) ? num(location.lon) : undefined;
+    const accuracyM = isObject(location) ? num(location.accuracyM) : undefined;
+    if (lat === undefined || lon === undefined || accuracyM === undefined || Math.abs(lat) > 90 || Math.abs(lon) > 180 || accuracyM < 0 || accuracyM > 100_000) return undefined;
+    context.location = { lat, lon, accuracyM };
+  }
+  return context;
+}
+
+function validTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canonicalLocaleOf(locale: string): string | undefined {
+  try {
+    return Intl.getCanonicalLocales(locale)[0];
+  } catch {
+    return undefined;
+  }
 }
 
 /** `claude -p --output-format json` prints one result object. */

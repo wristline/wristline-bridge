@@ -151,11 +151,12 @@ What runs, in an empty scratch directory (`~/.config/wristline/ask-cwd`, so no p
 # first question of a thread
 claude -p --output-format json --model haiku --max-turns 1 --tools "" --permission-prompts none \
   --strict-mcp-config --session-id <thread uuid> \
-  --append-system-prompt "<answer briefly, in the user's language>" --safe-mode -- "<question>"
+  --append-system-prompt "[<watch context>] <answer briefly, in the user's language>" \
+  --system-prompt-snapshot off --safe-mode -- "<question>"
 # follow-up: the same with --resume <thread uuid> instead of --session-id
 
-codex exec --json -s read-only --skip-git-repo-check -C <scratch dir> [-m <codexModel>] -- "<instruction + question>"
-codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' --skip-git-repo-check [-m <codexModel>] -- "<instruction + question>"
+codex exec --json -s read-only --skip-git-repo-check -C <scratch dir> [-m <codexModel>] -- "[<watch context>] <instruction> <question>"
+codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' --skip-git-repo-check [-m <codexModel>] -- "[<watch context>] <instruction> <question>"
 ```
 
 - **No tools.** Claude Code runs with every tool disabled and permission prompts auto-denied;
@@ -176,6 +177,10 @@ codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' --skip-git-re
 - **Limits.** One question at a time per watch (`busy` otherwise), 90 s timeout, answers cut
   at 4000 characters, the last 10 questions kept in memory for 24 hours (or until the bridge
   restarts; a thread from before the restart can still be continued while its session exists).
+- **Context from the watch.** The watch may send its local time, time zone, locale, units and a
+  coarse place (and rounded coordinates) with each question; the bridge puts them in one line
+  ahead of the instructions (see `context` in [docs/protocol.md](docs/protocol.md)), so answers
+  can use "now" and "here". It is not stored, logged, or shown back.
 
 `config.json` defaults, all optional:
 

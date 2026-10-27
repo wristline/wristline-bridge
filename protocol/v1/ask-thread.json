@@ -1,5 +1,18 @@
 {
   "provider": "claude-code",
   "text": "And in French?",
-  "threadId": "ask-3f6a1c2e-0000-4000-8000-000000000001"
+  "threadId": "ask-3f6a1c2e-0000-4000-8000-000000000001",
+  "context": {
+    "time": "2026-09-29T19:01:00+09:00",
+    "tz": "Asia/Seoul",
+    "locale": "ko-KR",
+    "units": "metric",
+    "place": "서울 성북구 돈암동",
+    "location": {
+      "lat": 37.5912,
+      "lon": 127.0187,
+      "accuracyM": 50
+    },
+    "device": "watch"
+  }
 }

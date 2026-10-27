@@ -2,7 +2,7 @@ import { createServer, STATUS_CODES, type IncomingMessage, type Server, type Ser
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
-import type { AskRunner } from './ask.ts';
+import { parseAskContext, type AskRunner } from './ask.ts';
 import { safeEqual, type Auth } from './auth.ts';
 import type { Device } from './config.ts';
 import type { BridgeHub } from './hub.ts';
@@ -231,7 +231,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // The CLI cannot take an argument with a NUL byte.
       if (text.includes('\0') || model?.includes('\0')) return fail(res, 400, 'bad_request');
       if (text.length > TEXT_MAX) return fail(res, 413, 'payload_too_large');
-      const ask: AskBody = { provider, text, ...(model ? { model } : {}), ...(threadId ? { threadId } : {}) };
+      // Never logged: it may hold where the user is.
+      const context = input.context === undefined ? undefined : parseAskContext(input.context);
+      if (input.context !== undefined && !context) return fail(res, 400, 'bad_request');
+      const ask: AskBody = { provider, text, ...(model ? { model } : {}), ...(threadId ? { threadId } : {}), ...(context ? { context } : {}) };
       const started = asks.start(device.id, ask);
       if (started === 'busy') return fail(res, 409, 'busy');
       if (started === 'unavailable') return fail(res, 503, 'ask_unavailable');

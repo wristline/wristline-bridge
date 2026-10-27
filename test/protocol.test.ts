@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
-import type { Answers, AskBody, ClientEvent, Item, Session, Usage } from '../src/protocol.ts';
+import type { Answers, AskBody, AskContext, ClientEvent, Item, Session, Usage } from '../src/protocol.ts';
 import { FakeProvider, TestSocket, fakeAskRunner, startBridge, type Bridge } from './helpers.ts';
 
 const DIR = new URL('../protocol/v1/', import.meta.url);
@@ -387,7 +387,8 @@ test('Quick Ask: request, events, list and its errors', async () => {
   const fixed = (value: unknown): unknown => JSON.parse([...ids].reduce((text, [id, shown]) => text.replaceAll(id, shown), JSON.stringify(value)));
   const del = (id: string): Promise<Response> => fetch(`${bridge.base}/api/asks/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${bridge.token}` } });
 
-  const ask: AskBody = { provider: 'claude-code', text: 'Reply with the single word OK' };
+  const context: AskContext = { time: '2026-09-29T19:00:00+09:00', tz: 'Asia/Seoul', locale: 'ko-KR', units: 'metric', place: '서울 성북구 돈암동', location: { lat: 37.5912, lon: 127.0187, accuracyM: 50 }, device: 'watch' };
+  const ask: AskBody = { provider: 'claude-code', text: 'Reply with the single word OK', context };
   fixture('ask', ask);
   const accepted = await post('/api/ask', ask);
   assert.equal(accepted.status, 202);
@@ -397,7 +398,8 @@ test('Quick Ask: request, events, list and its errors', async () => {
   fixture('event-ask-running', fixed(await ws.next()));
   fixture('event-ask-done', fixed(await ws.next()));
   // A follow-up in the same thread: the first ask's id is the thread id.
-  const followUp: AskBody = { provider: 'claude-code', text: 'And in French?', threadId: 'ask-3f6a1c2e-0000-4000-8000-000000000001' };
+  // It resends the context, with the time it is asked at.
+  const followUp: AskBody = { provider: 'claude-code', text: 'And in French?', threadId: 'ask-3f6a1c2e-0000-4000-8000-000000000001', context: { ...context, time: '2026-09-29T19:01:00+09:00' } };
   fixture('ask-thread', followUp);
   const continued = await post('/api/ask', { ...followUp, threadId: askId });
   assert.equal(continued.status, 202);

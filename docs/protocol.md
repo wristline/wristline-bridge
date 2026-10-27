@@ -221,7 +221,7 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
-| `POST /api/ask` `{provider, text, model?, threadId?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, a NUL character in `text` or `model`, non-string or empty `threadId`, a `threadId` of the other provider), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
+| `POST /api/ask` `{provider, text, model?, threadId?, context?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, a NUL character in `text` or `model`, non-string or empty `threadId`, a `threadId` of the other provider, an invalid `context`), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
 | `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first, each with its `threadId` | `401` | `asks.json` |
 | `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
 | `DELETE /api/asks/thread/:threadId` | `204`: the thread is forgotten, its asks leave `GET /api/asks`, and its CLI session is deleted (a running ask of it is cancelled first) | `404` (not this device's thread) | |
@@ -247,6 +247,29 @@ page>`. Bridges that predate `kinds` ignore it (here and in `subscribe`) and sen
 Code: `claude -p --model haiku …`, Codex: `codex exec -s read-only …`; the exact commands are in
 the README). `provider` may be omitted by older clients; the bridge then uses its configured
 default. `model` overrides the bridge's configured model for that ask.
+
+**Context.** `context` (optional, on every ask of a thread) tells the model where and when the
+user asks from, so "do I need an umbrella?" or "what's open now?" can be answered:
+
+```json
+{"time": "2026-10-27T14:05:00+09:00", "tz": "Asia/Seoul", "locale": "ko-KR", "units": "metric",
+ "place": "서울 성북구 돈암동", "location": {"lat": 37.5912, "lon": 127.0187, "accuracyM": 50}, "device": "watch"}
+```
+
+`time` (the watch's local time, ISO 8601 with its offset or `Z`), `tz` (an IANA zone), `locale`
+(BCP 47, at most 35 characters), `units` (`metric` or `imperial`) and `device` (`watch`) are
+required; `place` (a coarse place name, 1–100 code units after trimming, no control characters)
+and `location` (`lat` −90…90, `lon` −180…180, `accuracyM` 0…100000, all numbers) are optional.
+Unknown keys are ignored; anything else invalid is `400`. The bridge turns it into one paragraph
+ahead of its own instructions in the system prompt, e.g. `The user is asking from a smartwatch;
+local time Tuesday 2026-10-27 14:05 (UTC+09:00, Asia/Seoul); locale ko-KR; metric units;
+approximate location: 서울 성북구 돈암동 (37.59, 127.02, ±50 m). Answer concisely for a small round
+screen; use the location and time only when relevant.` (coordinates rounded to 2 decimals, about
+1 km). Claude Code gets it as `--append-system-prompt` with `--system-prompt-snapshot off`, so a
+follow-up's context replaces the first ask's; Codex gets it at the head of the prompt text. A
+follow-up should resend the current context (the time has moved on); an ask without one runs with
+none. The context is never stored by the bridge, logged, or returned (`GET /api/asks`, events);
+Codex keeps the prompt in its rollout, which goes with the thread.
 
 **Threads.** Every ask belongs to a thread, a conversation the CLI can continue. Without
 `threadId` the ask starts a new thread whose id is the ask's own id; with the `threadId` of one
