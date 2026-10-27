@@ -4,9 +4,9 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LoginEntry } from '../../config.ts';
 import { JsonlTail, Transcript, TranscriptCache } from '../../jsonl.ts';
-import type { Account, Item, ItemKind, ItemPage, PromptBlock, ProviderHealth, Session, SessionStatus } from '../../protocol.ts';
+import { SUGGESTION_MAX, type Account, type Item, type ItemKind, type ItemPage, type PromptBlock, type ProviderHealth, type Session, type SessionStatus } from '../../protocol.ts';
 import { LimitAlerts, PromptBlocked, sessionKey, type Hub, type SessionProvider } from '../../provider.ts';
-import { isNotFound, isObject, own, str } from '../../util.ts';
+import { clip, isNotFound, isObject, own, str } from '../../util.ts';
 import { appendLogin, claudeJsonPath, isEstimated, loginAt, readClaudeAccount, statuslineFingerprint } from './account.ts';
 import { ClaudeMetaScan, claudeModelName, parseClaudeLine, sessionTitle, statuslineContext, statuslineModel, statuslineUsage } from './parse.ts';
 import {
@@ -95,6 +95,8 @@ export class ClaudeCodeProvider implements SessionProvider {
   readonly #fingerprints = new Map<string, string>();
   /** Session id → account id known for certain (via a learned fingerprint). */
   readonly #sessionAccounts = new Map<string, string>();
+  /** Claude Code's suggested next prompt by session id (POST /hooks/prompt-suggestion); `at` is when it arrived. */
+  readonly #suggestions = new Map<string, { text: string; at: number }>();
   #logins: LoginEntry[];
   /** Path, mtime, ctime and size of `.claude.json` as last read; it is re-parsed only when these change. */
   #loginStat: string | undefined;
@@ -209,6 +211,21 @@ export class ClaudeCodeProvider implements SessionProvider {
     if (synchronized === '1') throw new PromptBlocked('busy');
     // Stopped with Ctrl-Z, or put in the background: the pane's shell would read the keys and run them.
     if (!inForeground(pane.pid)) throw new PromptBlocked('busy');
+  }
+
+  /**
+   * Receives the prompt Claude Code suggests after a turn (shown in its prompt box). It arrives a
+   * second or so after the turn ended, possibly before a refresh saw the session go idle: it is
+   * kept and shown while the session is idle, until the session moves on (see `#refresh`).
+   */
+  suggestion(nativeId: string, text: string): void {
+    const session = this.#sessions.get(nativeId);
+    if (!session) return;
+    const shown = clip(text, SUGGESTION_MAX);
+    this.#suggestions.set(nativeId, { text: shown, at: this.#now() });
+    if (session.status !== 'idle' || session.suggestion === shown) return;
+    session.suggestion = shown;
+    this.#hub?.session(session);
   }
 
   /** Receives the statusLine JSON relayed to the local listener. Never rejects. */
@@ -384,6 +401,7 @@ export class ClaudeCodeProvider implements SessionProvider {
     for (const id of this.#statusContext.keys()) if (!ids.has(id)) this.#statusContext.delete(id);
     for (const id of this.#statusModel.keys()) if (!ids.has(id)) this.#statusModel.delete(id);
     for (const id of this.#sessionAccounts.keys()) if (!ids.has(id)) this.#sessionAccounts.delete(id);
+    for (const id of this.#suggestions.keys()) if (!ids.has(id)) this.#suggestions.delete(id);
     const next = new Map<string, Session>();
     for (const id of ids) {
       const file = this.#files.get(id);
@@ -397,6 +415,7 @@ export class ClaudeCodeProvider implements SessionProvider {
           this.#unreadable.add(file.path);
         }
       }
+      this.#expireSuggestion(id, live.get(id), meta);
       const session = this.#build(id, live.get(id), newest.get(id), file, meta);
       next.set(id, session);
       this.#limitAlerts.check(this.#hub, session, meta?.limit);
@@ -410,6 +429,15 @@ export class ClaudeCodeProvider implements SessionProvider {
     }
     for (const id of previous.keys()) if (!next.has(id)) this.#hub?.removed(sessionKey(this.id, id));
     this.#dismissAnswered(newest, live);
+  }
+
+  /** A suggestion is dropped once the session ends, changes status after it arrived (a turn, a dialog) or starts a new turn (a prompt typed in between two refreshes). */
+  #expireSuggestion(id: string, live: RegistryEntry | undefined, meta: ClaudeMetaScan | undefined): void {
+    const suggestion = this.#suggestions.get(id);
+    if (!suggestion) return;
+    const moved = live !== undefined && mapStatus(live.status) !== 'idle' && live.statusUpdatedAt > suggestion.at;
+    const turn = Date.parse(meta?.turnStartedAt ?? '') > suggestion.at;
+    if (!live || moved || turn) this.#suggestions.delete(id);
   }
 
   /**
@@ -476,6 +504,8 @@ export class ClaudeCodeProvider implements SessionProvider {
       if (login) session.account = this.#account(login.id, isEstimated(this.#logins, newest?.startedAt));
     }
     setModel(session, this.#model(id, meta));
+    const suggestion = this.#suggestions.get(id);
+    if (suggestion && status === 'idle') session.suggestion = suggestion.text;
     return session;
   }
 

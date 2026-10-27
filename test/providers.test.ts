@@ -848,6 +848,76 @@ test('claude-code: a running session reports its turn\'s start and task-list pro
   assert.deepEqual(latest(), ['running', '2026-09-29T10:30:00.000Z', undefined]);
 });
 
+test('claude-code: a suggested next prompt shows while the session is idle and goes once it moves on, a new turn starts or it ends', async () => {
+  const home = join(root, 'claude-suggest');
+  const sid = 'eeeeeeee-0000-4000-8000-000000000004';
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  mkdirSync(join(home, 'projects', '-w'), { recursive: true });
+  const transcript = join(home, 'projects', '-w', `${sid}.jsonl`);
+  const prompt = (id: string, at: number): string =>
+    `${JSON.stringify({ type: 'user', cwd: '/w', sessionId: sid, uuid: id, promptId: id, timestamp: new Date(at).toISOString(), message: { role: 'user', content: 'Do it' } })}\n`;
+  let clock = Date.parse('2026-09-29T10:00:00Z');
+  writeFileSync(transcript, prompt('p1', clock - 60_000));
+  const registry = (status: string, statusUpdatedAt: number): void =>
+    writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, cwd: '/w', status, updatedAt: clock, statusUpdatedAt }));
+  // The turn ended a moment ago, but the last refresh still saw it running.
+  registry('busy', clock - 5000);
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7, now: () => clock });
+  const hub = recordingHub();
+  await provider.start(hub);
+  provider.stop();
+  const shown = (): string | undefined => provider.listSessions()[0]?.suggestion;
+  registry('idle', clock - 1000);
+  provider.suggestion(sid, 'run the tests');
+  assert.equal(shown(), undefined, 'not on a running session');
+  await provider.refresh();
+  assert.equal(shown(), 'run the tests', 'kept until a refresh sees the session idle');
+  assert.equal(hub.sessions.at(-1)?.suggestion, 'run the tests');
+
+  const published = hub.sessions.length;
+  provider.suggestion(sid, 'run the tests');
+  assert.equal(hub.sessions.length, published, 'the same text again is no change');
+  provider.suggestion(sid, 'commit it');
+  assert.equal(hub.sessions.at(-1)?.suggestion, 'commit it', 'on an idle session it is published at once');
+  provider.suggestion('ffffffff-0000-4000-8000-000000000000', 'x');
+  assert.equal(hub.sessions.length, published + 1, 'a session this home does not list is ignored');
+
+  // A prompt typed in the terminal: the next refresh sees it running.
+  clock += 5000;
+  registry('busy', clock);
+  await provider.refresh();
+  assert.equal(shown(), undefined);
+  registry('idle', clock + 1000);
+  await provider.refresh();
+  assert.equal(shown(), undefined, 'gone for good, not back when idle again');
+
+  // A whole turn between two refreshes: only the transcript tells.
+  clock += 5000;
+  provider.suggestion(sid, 'deploy');
+  assert.equal(shown(), 'deploy');
+  appendFileSync(transcript, prompt('p2', clock + 500));
+  clock += 3000;
+  registry('idle', clock);
+  await provider.refresh();
+  assert.equal(shown(), undefined);
+
+  // A dialog (needs_input), then the session ends.
+  provider.suggestion(sid, 'yes');
+  clock += 1000;
+  registry('waiting', clock);
+  await provider.refresh();
+  assert.equal(shown(), undefined);
+  registry('idle', clock + 1);
+  await provider.refresh();
+  provider.suggestion(sid, 'next');
+  assert.equal(shown(), 'next');
+  rmSync(join(home, 'sessions', `${process.pid}.json`));
+  await provider.refresh();
+  assert.equal(provider.listSessions()[0]?.status, 'ended');
+  assert.equal(shown(), undefined);
+  assert.equal(provider.listSessions()[0]?.suggestion, undefined);
+});
+
 test('codex without the daemon: a running turn reports its start and update_plan progress from the rollout', async () => {
   const home = join(root, 'codex-progress');
   const day = join(home, 'sessions', '2026', '09', '29');

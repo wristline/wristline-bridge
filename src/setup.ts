@@ -177,8 +177,9 @@ async function installInto(dir: string, config: Config & { hookToken: string }, 
   console.log(lineDiff(plan.before ?? '', plan.after));
   console.log(
     '\nAdds hooks for PermissionRequest, Notification and Stop that call the bridge on' +
-      `\n127.0.0.1:${config.hookPort}, and routes the statusLine through ${hookFiles(dir, target.suffix).script}` +
-      '\n(it relays plan usage to the bridge and still runs your statusLine command).',
+      `\n127.0.0.1:${config.hookPort}, routes the statusLine through ${hookFiles(dir, target.suffix).script}` +
+      '\n(it relays plan usage to the bridge and still runs your statusLine command), and loads' +
+      `\nthe mod ${hookFiles(dir).mod} (it relays Claude Code's suggested next prompt).`,
   );
   if (!(await approve(`Apply these changes to ${plan.path}?`, yes, 'wristline-bridge hooks install'))) return false;
   const saved = await applyInstall(plan, install);

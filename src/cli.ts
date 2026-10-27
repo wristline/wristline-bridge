@@ -133,7 +133,12 @@ async function run(flags: Flags): Promise<void> {
     apiPort: config.apiPort,
     hookPort: config.hookPort,
     onStatusline: statuslineRouter(claudes),
-    hooks: hookHandlers(hub, config.permissionWaitSec * 1000, (id) => asks.ownsClaudeSession(id)),
+    hooks: hookHandlers(
+      hub,
+      config.permissionWaitSec * 1000,
+      (id) => asks.ownsClaudeSession(id),
+      (id, text) => claudes.find((c) => c.hasSession(id))?.suggestion(id, text),
+    ),
     asks,
   }).catch((err: unknown) => {
     for (const p of providers) p.stop();

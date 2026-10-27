@@ -1,0 +1,1 @@
+{ "name": "wristline-suggest", "version": "0.1.0", "description": "Sends Claude Code's suggested next prompt to the Wristline bridge" }

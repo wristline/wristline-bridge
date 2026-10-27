@@ -104,9 +104,20 @@ reorders your entries):
   that moment, so the bridge merges them per account: a window it omits keeps its last value until
   its reset time passes. The watch gets usage updates at most once a minute per account.
 
-Restart running Claude Code sessions to pick the hooks up. `wristline-bridge hooks uninstall`
-removes exactly these entries, restores your status line and deletes the generated files; the
-result is the same JSON as before the install. Both accept `--yes` and `--settings <file>` (for
+- `env.CLAUDE_CODE_PLUGIN_DIRS`: `~/.config/wristline/wristline-suggest`, a copy of the
+  `wristline-suggest` mod (`mods/` in this package), appended to any folders you list there. After
+  each turn Claude Code may suggest a next prompt (the dim text in its prompt box); the mod sends it
+  to the bridge through `hook.sh prompt-suggestion`, and the watch shows it while the session is
+  idle. The terminal shows it as before. Claude Code reads this variable only from the `env` block
+  of your own `~/.claude/settings.json` (or each home's), never from a project's settings, and
+  makes suggestions only while `promptSuggestionEnabled` is not `false`. It suggests nothing
+  after a session's first turn and skips some turns; sending the suggested text unchanged counts
+  as using it, so it does not slow suggestions down.
+
+Restart running Claude Code sessions to pick the hooks and the mod up (the mod's folder is read at
+start, so `/reload-plugins` does not load it). `wristline-bridge hooks uninstall`
+removes exactly these entries, restores your status line and deletes the generated files and the
+mod; the result is the same JSON as before the install. Both accept `--yes` and `--settings <file>` (for
 another settings file, e.g. a project's `.claude/settings.json`).
 
 How requests behave:

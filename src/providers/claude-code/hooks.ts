@@ -9,7 +9,7 @@ import { clip, isObject, oneLine, str, type JsonObject } from '../../util.ts';
 import { toolSummary } from './parse.ts';
 import { humanPrompt } from './turn.ts';
 
-export const HOOK_NAMES = ['permission-request', 'pre-tool-use', 'notification', 'stop'] as const;
+export const HOOK_NAMES = ['permission-request', 'pre-tool-use', 'notification', 'stop', 'prompt-suggestion'] as const;
 export type HookName = (typeof HOOK_NAMES)[number];
 
 /** Longest tool description shown on a permission request; an ExitPlanMode plan may use TEXT_MAX. */
@@ -31,11 +31,15 @@ export interface HookContext {
   signal: AbortSignal;
   /** True for a session id that is a Quick Ask thread (src/ask.ts), whose hooks must not reach the watch: no decision, no alert. */
   isAsk?: (sessionId: string) => boolean;
+  /** Hands Claude Code's suggested next prompt to the provider that lists the session (native id). */
+  suggest?: (sessionId: string, text: string) => void;
 }
 
 /** Handlers for the local listener's `/hooks/<name>` routes. */
-export function hookHandlers(hub: HookContext['hub'], waitMs: number, isAsk?: HookContext['isAsk']): Map<string, HookHandler> {
-  return new Map(HOOK_NAMES.map((name) => [name, (input, signal) => handleHook(name, input, { hub, waitMs, signal, ...(isAsk ? { isAsk } : {}) })]));
+export function hookHandlers(hub: HookContext['hub'], waitMs: number, isAsk?: HookContext['isAsk'], suggest?: HookContext['suggest']): Map<string, HookHandler> {
+  return new Map(
+    HOOK_NAMES.map((name) => [name, (input, signal) => handleHook(name, input, { hub, waitMs, signal, ...(isAsk ? { isAsk } : {}), ...(suggest ? { suggest } : {}) })]),
+  );
 }
 
 /** Resolves the hook's JSON output, or undefined for "no decision" (an empty 200). */
@@ -50,6 +54,9 @@ export async function handleHook(name: HookName, input: JsonObject, ctx: HookCon
       return undefined;
     case 'stop':
       await stop(input, ctx);
+      return undefined;
+    case 'prompt-suggestion':
+      promptSuggestion(input, ctx);
       return undefined;
   }
 }
@@ -198,6 +205,17 @@ function notification(input: JsonObject, ctx: HookContext): void {
   if (ctx.hub.pending.hasSession(sessionId)) return;
   const message = str(input.message);
   ctx.hub.alert(sessionId, 'needs_input', message ? clip(oneLine(message), ALERT_TEXT_MAX) : undefined);
+}
+
+/**
+ * `{session_id, text, shown}` from the wristline-suggest mod (mods/), a second or so after Stop:
+ * the dim suggestion Claude Code put in the prompt box. One it could not show is ignored.
+ */
+function promptSuggestion(input: JsonObject, ctx: HookContext): void {
+  const id = str(input.session_id);
+  const text = str(input.text)?.trim();
+  if (!id || !text || input.shown !== true) return;
+  ctx.suggest?.(id, text);
 }
 
 /**

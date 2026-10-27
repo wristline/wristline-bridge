@@ -49,6 +49,25 @@ test('two instances of one provider: resolve picks the one listing the session, 
   }
 });
 
+test('a session with an open request is sent without its suggested next prompt', async () => {
+  const p = new FakeProvider();
+  p.sessions = [{ ...session('s1'), suggestion: 'run the tests' }];
+  const bridge = await startBridge(p);
+  const listed = async (): Promise<Session | undefined> =>
+    ((await (await fetch(`${bridge.base}/api/sessions`, { headers: { authorization: `Bearer ${bridge.token}` } })).json()) as { sessions: Session[] }).sessions[0];
+  try {
+    assert.equal((await listed())?.suggestion, 'run the tests');
+    const ctrl = new AbortController();
+    const open = bridge.hub.pending.open({ sessionId: 'claude-code:s1', kind: 'permission', title: 'Bash', questions: [] }, { signal: ctrl.signal });
+    const waiting = await listed();
+    assert.deepEqual([waiting?.status, waiting?.suggestion], ['needs_input', undefined]);
+    ctrl.abort();
+    await open;
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('snapshot and GET /api/sessions list live sessions only; a session that ends is sent as session_removed and its items stay readable', async () => {
   const p = new FakeProvider();
   const running: Session = { ...session('run'), status: 'running' };

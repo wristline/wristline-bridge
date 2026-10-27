@@ -75,6 +75,7 @@ test('install appends our handlers after existing ones and wraps only the status
     },
     statusLine: { type: 'command', command: '/home/dev/.config/wristline/statusline.sh', padding: 0, refreshInterval: 10 },
     theme: 'dark',
+    env: { CLAUDE_CODE_PLUGIN_DIRS: '/home/dev/.config/wristline/wristline-suggest' },
   });
   assert.equal(statuslineOrig, 'npx -y ccstatusline@latest');
   assert.equal(existing.statusLine.command, 'npx -y ccstatusline@latest', 'the input is not mutated');
@@ -151,7 +152,19 @@ test('a statusLine already pointing at a relay of ours (a settings file copied f
   assert.equal((relay('/home/dev/statusline.sh') as { statuslineOrig: unknown }).statuslineOrig, '/home/dev/statusline.sh');
 });
 
+test('the mod joins plugin folders the user lists and leaves only them on uninstall', () => {
+  const mine = { ...existing, env: { FOO: '1', CLAUDE_CODE_PLUGIN_DIRS: '/home/dev/mods/a:/home/dev/mods/b' } };
+  const installed = withHooks(mine, opts).settings as { env: Record<string, string> };
+  assert.deepEqual(installed.env, { FOO: '1', CLAUDE_CODE_PLUGIN_DIRS: '/home/dev/mods/a:/home/dev/mods/b:/home/dev/.config/wristline/wristline-suggest' });
+  assert.deepEqual(withHooks(installed, opts).settings, installed, 'not listed twice');
+  assert.deepEqual(withoutHooks(installed, { ...opts, statuslineOrig: 'npx -y ccstatusline@latest' }), mine);
+  const alone = withHooks({ env: { FOO: '1' } }, opts).settings;
+  assert.deepEqual(withoutHooks(alone, { ...opts, statuslineOrig: null }), { env: { FOO: '1' } });
+});
+
 test('malformed settings are refused instead of rewritten', () => {
+  assert.throws(() => withHooks({ env: [] }, opts), /"env" .* not an object/);
+  assert.throws(() => withHooks({ env: { CLAUDE_CODE_PLUGIN_DIRS: 1 } }, opts), /CLAUDE_CODE_PLUGIN_DIRS.* not a string/);
   assert.throws(() => withHooks({ hooks: [] }, opts), /"hooks" .* not an object/);
   assert.throws(() => withHooks({ hooks: { Stop: {} } }, opts), /"hooks.Stop" .* not an array/);
   assert.throws(() => withHooks({ statusLine: 'x' }, opts), /statusLine/);
@@ -188,6 +201,13 @@ test('install and uninstall on disk: backup, file modes, semantic round trip, on
   assert.ok(!readFileSync(settingsPath, 'utf8').includes('hook-token-1'), 'the token stays out of the settings file');
   assert.match(readFileSync(files.hook, 'utf8'), /-m 600 .*127\.0\.0\.1:47771\/hooks\/\$1/);
   assert.equal(readFileSync(files.orig, 'utf8'), 'npx -y ccstatusline@latest');
+  assert.equal(files.mod, join(configDir, 'wristline-suggest'));
+  for (const f of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts']) {
+    assert.equal(readFileSync(join(files.mod, f), 'utf8'), readFileSync(new URL(`../mods/wristline-suggest/${f}`, import.meta.url), 'utf8'));
+  }
+  // Claude Code lays types beside a mod it loads; uninstall removes the folder with them.
+  mkdirSync(join(files.mod, '.claude-plugin', 'types'));
+  writeFileSync(join(files.mod, 'tsconfig.json'), '{}');
 
   chmodSync(settingsPath, 0o600);
   const again = await planInstall(install);

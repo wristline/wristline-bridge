@@ -95,6 +95,15 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   Codex sends no `agents` progress: its sub-agents (`spawn_agent`) are long-lived, take follow-up
   tasks (`followup_task`) and mostly report completing them in later turns, so they do not map onto
   a turn's launches.
+  `suggestion` (Claude Code only, [`event-session-suggestion.json`](../protocol/v1/event-session-suggestion.json))
+  is the next prompt Claude Code suggests after a turn, the dim text in its prompt box, trimmed and
+  at most 300 code units. It comes from the wristline-suggest mod that `hooks install` sets up
+  (`POST /hooks/prompt-suggestion`), about a second after the turn ends, and only for a suggestion
+  the prompt box showed. It is present only while the session is `idle` and goes away for good
+  once the session changes status (a turn, a dialog; also while a request is open), a new turn
+  starts in its transcript, or the session ends; a later turn may bring a new one. Claude Code
+  makes none for the first turn of a session, and skips some turns (e.g. after a large cache
+  write); sending the same text as a prompt counts as using it.
 - **Account** — `id` is Claude Code's `oauthAccount.accountUuid` or Codex's `chatgpt_account_id`;
   `label` is a short name for people (a label set with `accounts add --label`, else the email,
   else the organization, else the first 8 characters of `id`) and is never empty. `estimated`
@@ -307,7 +316,7 @@ Server events (JSON text frames):
 | `type` | Fields | When | Fixture |
 |---|---|---|---|
 | `snapshot` | `apiVersion, sessions, requests, usage, alerts` | right after connecting; `sessions` as in `GET /api/sessions` (live only); `alerts`: the last 10 alerts of the past 10 minutes, oldest first (see "Missed alerts") | `event-snapshot.json` |
-| `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json`, `event-session-agents.json` |
+| `session` | `session` | a live session was added or changed; at most one per session every 2 s | `event-session.json`, `event-session-agents.json`, `event-session-suggestion.json` |
 | `session_removed` | `sessionId` | a session ended or left the list; may name a session the watch does not list (ignore it) | `event-session-removed.json` |
 | `item` | `sessionId, item` | new or updated item, only for the subscribed session | `event-item.json`, `event-item-plan.json`, `event-item-limit.json`, `event-item-limit-credits.json` |
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
@@ -484,3 +493,7 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   same `promptId`, with `origin.kind` `human` and no `isMeta`; reminders, pasted content and
   command wrappers stripped); otherwise (task notification, peer message, scheduled task, local
   command, unreadable transcript) the session title, omitted when there is none.
+- `POST /hooks/prompt-suggestion` — `{session_id, text, shown}` from the wristline-suggest mod
+  (`mods/wristline-suggest`, run as `hook.sh prompt-suggestion`); empty `200`. A `text` that is
+  blank or was not `shown` is ignored; otherwise the Claude Code home that lists `session_id` sets
+  it as the session's `suggestion` (see Session).

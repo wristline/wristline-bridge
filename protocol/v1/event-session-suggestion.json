@@ -1,0 +1,28 @@
+{
+  "type": "session",
+  "session": {
+    "id": "claude-code:6f1c2d3e-0000-4000-8000-000000000004",
+    "provider": "claude-code",
+    "title": "Fix failing CI build",
+    "cwd": "/home/dev/app",
+    "status": "idle",
+    "lastActivity": "2026-09-29T09:59:30.000Z",
+    "progress": {
+      "done": 3,
+      "total": 7,
+      "current": "Fix the build script"
+    },
+    "context": {
+      "used": 86000,
+      "window": 200000
+    },
+    "account": {
+      "id": "acc-school",
+      "label": "school",
+      "estimated": true
+    },
+    "model": "Fable 5.1",
+    "effort": "xhigh",
+    "suggestion": "Run the tests again"
+  }
+}

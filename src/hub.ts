@@ -517,8 +517,8 @@ export class BridgeHub implements Hub {
     const session = this.#stamp(raw);
     if (!this.pending.hasSession(session.id)) return session;
     const lasting = session.promptBlock !== undefined && session.promptBlock !== 'busy';
-    // `turnStartedAt` is a running session's only; it comes back with the same value once the answer lets the turn go on.
-    const { turnStartedAt: _t, ...rest } = session;
+    // `turnStartedAt` is a running session's only; it comes back with the same value once the answer lets the turn go on. `suggestion` is an idle one's.
+    const { turnStartedAt: _t, suggestion: _s, ...rest } = session;
     return { ...rest, status: 'needs_input', promptBlock: lasting ? session.promptBlock : 'awaiting_input' };
   }
 

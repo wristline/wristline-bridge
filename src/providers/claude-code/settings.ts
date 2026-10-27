@@ -1,8 +1,10 @@
 // Claude Code settings.json: the merge that installs the hooks of hooks.ts, the generated
-// statusLine relay script and the install/uninstall steps on disk. Verified against Claude Code 2.1.284.
+// statusLine relay script, the wristline-suggest mod and the install/uninstall steps on disk.
+// Verified against Claude Code 2.1.284 (the mod against 2.1.309).
 
-import { chmod, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { chmod, copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CliError, isNotFound, isObject, parseJson, str, type JsonObject } from '../../util.ts';
 
 const EVENTS = [
@@ -40,6 +42,15 @@ export function hookUrlPrefix(hookPort: number): string {
 /** Ours at any port: an installed handler keeps the port the bridge used at the time. */
 const OUR_URL = /(?:^|\s)http:\/\/127\.0\.0\.1:\d+\/hooks\/(\S+)/;
 
+/**
+ * Claude Code loads each folder this lists (path-list separated) as a plugin, read from the
+ * process environment or the `env` block of the user's own settings.json, never a project's.
+ */
+const PLUGIN_DIRS = 'CLAUDE_CODE_PLUGIN_DIRS';
+/** The mod as shipped in the package; `hooks install` copies MOD_FILES of it to `hookFiles().mod`. */
+const MOD_SOURCE = fileURLToPath(new URL('../../../mods/wristline-suggest/', import.meta.url));
+const MOD_FILES = ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.ts'];
+
 /** `<hook.sh> <name>` as ourHandler writes it; the script may be shell-quoted. */
 const HOOK_SCRIPT_COMMAND = /^('(?:[^']|'\\'')*'|[^\s']+) ([a-z-]+)$/s;
 
@@ -72,6 +83,20 @@ function ourHandler(event: (typeof EVENTS)[number][0], name: string, url: string
   return { type: 'command', command, async: true };
 }
 
+function envObject(settings: JsonObject): JsonObject {
+  if (settings.env === undefined) settings.env = {};
+  if (!isObject(settings.env)) throw new Error('"env" in the settings file is not an object; fix it first');
+  return settings.env;
+}
+
+/** The folders `env.CLAUDE_CODE_PLUGIN_DIRS` lists. */
+function pluginDirs(env: JsonObject): string[] {
+  const value = env[PLUGIN_DIRS];
+  if (value === undefined) return [];
+  if (typeof value !== 'string') throw new Error(`"env.${PLUGIN_DIRS}" in the settings file is not a string; fix it first`);
+  return value.split(delimiter).filter((dir) => dir !== '');
+}
+
 function hooksObject(settings: JsonObject): JsonObject {
   if (settings.hooks === undefined) settings.hooks = {};
   if (!isObject(settings.hooks)) throw new Error('"hooks" in the settings file is not an object; fix it first');
@@ -95,6 +120,11 @@ export function withHooks(original: JsonObject, opts: HookSettings): Merged {
     if (isObject(group) && Array.isArray(group.hooks)) group.hooks = group.hooks.map((h: unknown) => (mine(h) ? handler : h));
     else groups.push({ hooks: [handler] });
   }
+  // The mod that relays Claude Code's suggested next prompt, added to the folders the user may list already.
+  const mod = hookFiles(opts.configDir).mod;
+  const env = envObject(settings);
+  const dirs = pluginDirs(env);
+  if (!dirs.some((dir) => resolve(dir) === mod)) env[PLUGIN_DIRS] = [...dirs, mod].join(delimiter);
 
   let statuslineOrig: string | null | undefined;
   const line = settings.statusLine;
@@ -150,6 +180,16 @@ export function withoutHooks(original: JsonObject, opts: { statuslineCommand: st
     }
     if (removed && Object.keys(hooks).length === 0) delete settings.hooks;
   }
+  if (isObject(settings.env) && typeof settings.env[PLUGIN_DIRS] === 'string') {
+    const env = settings.env;
+    const dirs = pluginDirs(env);
+    const kept = dirs.filter((dir) => resolve(dir) !== resolve(hookFiles(opts.configDir).mod));
+    if (kept.length < dirs.length) {
+      if (kept.length > 0) env[PLUGIN_DIRS] = kept.join(delimiter);
+      else delete env[PLUGIN_DIRS];
+      if (Object.keys(env).length === 0) delete settings.env;
+    }
+  }
   const line = settings.statusLine;
   if (isObject(line) && line.command === opts.statuslineCommand) {
     if (opts.statuslineOrig) line.command = opts.statuslineOrig;
@@ -171,6 +211,8 @@ export interface HookFiles {
   header: string;
   /** The PermissionRequest command: `hook.sh <name>` posts stdin to the bridge and prints its answer. */
   hook: string;
+  /** The wristline-suggest mod (a Claude Code plugin folder), which runs `hook.sh prompt-suggestion` beside it. */
+  mod: string;
 }
 
 /** The relay files of one Claude home: `statusline<suffix>.*` (no suffix for the primary home); `hook-header` and `hook.sh` are shared. */
@@ -181,6 +223,7 @@ export function hookFiles(configDir: string, suffix = ''): HookFiles {
     owner: join(configDir, `statusline${suffix}.owner`),
     header: join(configDir, 'hook-header'),
     hook: join(configDir, 'hook.sh'),
+    mod: resolve(configDir, 'wristline-suggest'),
   };
 }
 
@@ -333,13 +376,22 @@ export async function applyInstall(plan: InstallPlan, opts: InstallOptions, now 
   await writePrivate(files.script, statuslineScript(opts.configDir, opts.hookPort, opts.suffix), 0o700);
   if (plan.statuslineOrig !== undefined) await writePrivate(files.orig, plan.statuslineOrig ?? '', 0o600);
   await writePrivate(files.owner, resolve(opts.settingsPath), 0o600);
+  await copyMod(files.mod);
   if (plan.after === plan.before) return undefined;
   const saved = plan.before === undefined ? undefined : await backup(opts.configDir, plan.before, now);
   await replaceFile(plan.path, plan.after);
   return saved;
 }
 
-/** Removes this home's relay files; the shared header and hook.sh go once no relay script of another home remains. */
+/** Copies the mod's files over the installed ones; Claude Code adds files of its own there (types for an editor), which stay. */
+async function copyMod(dir: string): Promise<void> {
+  for (const file of MOD_FILES) {
+    await mkdir(dirname(join(dir, file)), { recursive: true });
+    await copyFile(join(MOD_SOURCE, file), join(dir, file));
+  }
+}
+
+/** Removes this home's relay files; the shared header, hook.sh and the mod go once no relay script of another home remains. */
 export async function applyUninstall(change: SettingsChange, configDir: string, suffix = '', now = new Date()): Promise<string | undefined> {
   await assertUnchanged(change.path, change.before);
   let saved: string | undefined;
@@ -350,7 +402,7 @@ export async function applyUninstall(change: SettingsChange, configDir: string, 
   const files = hookFiles(configDir, suffix);
   await Promise.all([files.script, files.orig, files.owner].map((f) => rm(f, { force: true })));
   const left = await readdir(configDir).catch(() => []);
-  if (!left.some((name) => /^statusline.*\.sh$/.test(name))) await Promise.all([files.header, files.hook].map((f) => rm(f, { force: true })));
+  if (!left.some((name) => /^statusline.*\.sh$/.test(name))) await Promise.all([files.header, files.hook, files.mod].map((f) => rm(f, { recursive: true, force: true })));
   return saved;
 }
 

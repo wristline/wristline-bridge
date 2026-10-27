@@ -9,7 +9,9 @@
   },
   "files": [
     "dist",
-    "protocol"
+    "protocol",
+    "mods/*/.claude-plugin/plugin.json",
+    "mods/*/hooks/*"
   ],
   "engines": {
     "node": ">=22"

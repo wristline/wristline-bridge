@@ -11,6 +11,8 @@ export const TEXT_MAX = 4000;
 export const DETAIL_MAX = 600;
 /** `Progress.current`: at most this many code units. */
 export const CURRENT_MAX = 80;
+/** `Session.suggestion`: at most this many code units. */
+export const SUGGESTION_MAX = 300;
 
 export type ProviderId = 'claude-code' | 'codex';
 export type SessionStatus = 'running' | 'idle' | 'needs_input' | 'ended';
@@ -51,6 +53,8 @@ export interface Session {
   model?: string;
   /** Reasoning effort, e.g. `xhigh`, `high`, `medium`, `low`; absent when unset or unsupported by the model. */
   effort?: string;
+  /** Claude Code, while `idle`: the next prompt it suggests (its dim prompt-box text), up to SUGGESTION_MAX code units. */
+  suggestion?: string;
 }
 
 /**

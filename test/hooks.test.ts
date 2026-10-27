@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import type { PendingRequest, ServerEvent, Session } from '../src/protocol.ts';
-import { FakeProvider, TestSocket, startBridge, type Bridge } from './helpers.ts';
+import { handleHook, hookHandlers } from '../src/providers/claude-code/hooks.ts';
+import { FakeProvider, TestSocket, recordingHub, startBridge, type Bridge } from './helpers.ts';
 
 const SID = '6f1c2d3e-0000-4000-8000-000000000001';
 const session: Session = {
@@ -359,4 +360,21 @@ test('stop: up to 500 characters of the answer, titled by the human prompt or el
   await emptyOk(await hook(bridge, 'stop', { session_id: 'unknown-session', hook_event_name: 'Stop', last_assistant_message: answer, transcript_path: join(dir, 'missing.jsonl') }));
   done = await nextOf(ws, 'alert');
   assert.deepEqual(bare(done), { type: 'alert', sessionId: 'claude-code:unknown-session', alert: 'done', text: `${'Done.\n\n' + 'y'.repeat(492)}…` }, 'no title without a session or prompt');
+});
+
+test('prompt-suggestion: needs the hook token, answers an empty 200, and hands a shown suggestion to the provider of the session', async () => {
+  const body = { session_id: SID, text: 'run the tests', shown: true };
+  const res = await fetch(`${bridge.local}/hooks/prompt-suggestion`, { method: 'POST', body: JSON.stringify(body) });
+  assert.equal(res.status, 401);
+  await emptyOk(await hook(bridge, 'prompt-suggestion', body));
+
+  const got: [string, string][] = [];
+  const hub = recordingHub();
+  const ctx = { hub: { ...hub, sessions: () => [] }, waitMs: 1000, signal: new AbortController().signal, suggest: (id: string, text: string) => void got.push([id, text]) };
+  assert.equal(await handleHook('prompt-suggestion', { ...body, text: '  run the tests \n' }, ctx), undefined);
+  for (const ignored of [{ ...body, shown: false }, { ...body, shown: undefined }, { ...body, text: '  ' }, { ...body, text: 7 }, { text: 'x', shown: true }]) {
+    await handleHook('prompt-suggestion', ignored, ctx);
+  }
+  assert.deepEqual(got, [[SID, 'run the tests']], 'trimmed; one the box could not show, a blank one or one without a session is ignored');
+  assert.ok(hookHandlers(ctx.hub, 1000).has('prompt-suggestion'));
 });

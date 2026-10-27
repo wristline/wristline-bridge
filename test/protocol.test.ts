@@ -374,6 +374,13 @@ test('WebSocket events', async () => {
   bridge.hub.session(agents);
   fixture('event-session-agents', await ws.next());
   bridge.hub.removed(agents.id);
+  assert.deepEqual(await ws.next(), { type: 'session_removed', sessionId: agents.id });
+  // An idle Claude Code session with the next prompt it suggests.
+  const suggested: Session = { ...running, id: 'claude-code:6f1c2d3e-0000-4000-8000-000000000004', status: 'idle', suggestion: 'Run the tests again' };
+  delete suggested.turnStartedAt;
+  bridge.hub.session(suggested);
+  fixture('event-session-suggestion', await ws.next());
+  bridge.hub.removed(suggested.id);
   ws.close();
   other.close();
 });
