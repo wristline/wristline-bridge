@@ -59,11 +59,11 @@ export function descendsFrom(pid: number, ancestor: number): boolean {
   return false;
 }
 
+/** `shell` is an idle session with a background shell still running (no turn): it waits for a prompt like `idle`. */
 export function mapStatus(status: string | undefined): SessionStatus {
   switch (status) {
     case 'busy':
     case 'running':
-    case 'shell':
       return 'running';
     case 'waiting':
     case 'needs_input':

@@ -103,7 +103,9 @@ and "Chat about this" choices are not offered on the watch.
 | `!` command running | `busy` | — |
 
 - `shell` never appeared with 2.1.284; it occurs only in old entries (versions 2.1.178–2.1.198).
-  It stays mapped to `running`.
+  It stays mapped to `running`. Revised (2.1.300): `shell` is `idle` with a background shell
+  (`run_in_background` Bash) still running; no turn runs, so it maps to `idle`. As `running` it
+  kept the last turn's `turnStartedAt` for days (a 5817m Live Update).
 - `tmux` is `"<session>:@<window>.%<pane>"`, e.g. `"wristline-spike:@11.%22"` for the pane
   `tmux list-panes` reported as `%22`. Entries stay on disk after the process exits; this
   machine had several dead entries naming the same pane (`HookShift:@2.%4` five times). Only

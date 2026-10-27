@@ -659,6 +659,26 @@ test('claude-code: an alive session stays live however old its registry entry is
   assert.equal(status(unguarded), undefined, 'an old entry without a pid-reuse guard is not trusted');
 });
 
+test('claude-code: `shell` (idle, a background shell still running) is idle, without the last turn\'s turnStartedAt', async () => {
+  const home = join(root, 'claude-shell');
+  const sid = 'dddddddd-0000-4000-8000-000000000003';
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  mkdirSync(join(home, 'projects', '-w'), { recursive: true });
+  copyFileSync(new URL('./fixtures/claude/transcript.jsonl', import.meta.url), join(home, 'projects', '-w', `${sid}.jsonl`));
+  const entry = (status: string): void =>
+    writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, cwd: '/w', status, updatedAt: Date.now() }));
+  entry('busy');
+  const provider = new ClaudeCodeProvider({ home, historyDays: 7 });
+  await provider.start(recordingHub());
+  provider.stop();
+  assert.equal(provider.listSessions()[0]?.status, 'running');
+  assert.ok(provider.listSessions()[0]?.turnStartedAt);
+  entry('shell');
+  await provider.refresh();
+  assert.equal(provider.listSessions()[0]?.status, 'idle');
+  assert.equal(provider.listSessions()[0]?.turnStartedAt, undefined);
+});
+
 test('claude-code: a dialog that opened since the last refresh blocks the prompt', async () => {
   const sid = 'cccccccc-0000-4000-8000-000000000002';
   const { provider, typed, entry, file } = await tmuxProvider('claude-stale', sid, process.pid, 'busy');
