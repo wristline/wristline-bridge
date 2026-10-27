@@ -149,20 +149,24 @@ What runs, in an empty scratch directory (`~/.config/wristline/ask-cwd`, so no p
 
 ```sh
 # first question of a thread
-claude -p --output-format json --model haiku --max-turns 1 --tools "" --permission-prompts none \
-  --strict-mcp-config --session-id <thread uuid> \
+claude -p --output-format json --model haiku --max-turns 5 --tools WebSearch --allowedTools WebSearch \
+  --permission-prompts none --strict-mcp-config --session-id <thread uuid> \
   --append-system-prompt "[<watch context>] <answer briefly, in the user's language>" \
   --system-prompt-snapshot off --safe-mode -- "<question>"
 # follow-up: the same with --resume <thread uuid> instead of --session-id
+# without web search: --max-turns 1 --tools "" (no --allowedTools)
 
-codex exec --json -s read-only --skip-git-repo-check -C <scratch dir> [-m <codexModel>] -- "[<watch context>] <instruction> <question>"
-codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' --skip-git-repo-check [-m <codexModel>] -- "[<watch context>] <instruction> <question>"
+codex exec --json -s read-only -c 'web_search="live"' --skip-git-repo-check -C <scratch dir> [-m <codexModel>] -- "[<watch context>] <instruction> <question>"
+codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' -c 'web_search="live"' --skip-git-repo-check [-m <codexModel>] -- "[<watch context>] <instruction> <question>"
 ```
 
-- **No tools.** Claude Code runs with every tool disabled and permission prompts auto-denied;
-  Codex runs in its read-only sandbox (`codex exec` cannot ask for approval; `exec resume` takes
-  no `-s`, so the sandbox goes in as a config override). `--safe-mode` also leaves your hooks,
-  MCP servers and CLAUDE.md out.
+- **No tools but web search.** Claude Code runs with every tool disabled except WebSearch
+  (allowed outright; any other permission prompt is auto-denied); Codex runs in its read-only
+  sandbox (`codex exec` cannot ask for approval; `exec resume` takes no `-s`, so the sandbox goes
+  in as a config override). `--safe-mode` also leaves your hooks,
+  MCP servers and CLAUDE.md out. With web search off (`"search": false` in the request or in
+  `config.json`), Claude Code gets `--max-turns 1 --tools ""` and Codex `-c web_search="disabled"`.
+  A searched answer takes longer (about 14 s instead of 2 s for a Haiku weather question).
 - **Temporary sessions.** Each thread is a CLI session of its own (a Claude Code transcript under
   `~/.claude/projects/-…-wristline-ask-cwd/`, or a Codex rollout; the Codex thread id is taken
   from `codex exec`'s `thread.started` line). The bridge never lists it, reads its items, opens a
@@ -185,13 +189,14 @@ codex exec resume <thread id> --json -c 'sandbox_mode="read-only"' --skip-git-re
 `config.json` defaults, all optional:
 
 ```json
-"ask": { "provider": "claude-code", "claudeModel": "haiku", "codexModel": "gpt-6-astra" }
+"ask": { "provider": "claude-code", "claudeModel": "haiku", "codexModel": "gpt-6-astra", "search": true }
 ```
 
 `provider` is used only when a watch names none; the watch chooses per question. `claudeModel`
 is any `--model` value Claude Code accepts (`haiku`, `sonnet`, a full model id). `codexModel`,
 when set, is passed as `-m` and shown on the watch; otherwise Codex uses its own configured model
-and the watch shows none.
+and the watch shows none. `search` (default `true`) is whether a question the watch does not mark
+may search the web.
 
 ## Codex
 

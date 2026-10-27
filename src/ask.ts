@@ -1,11 +1,12 @@
-// Quick Ask: one headless, tool-less run of `claude -p` or `codex exec` per question, in an empty
-// scratch directory. Asks form threads: the first ask of a thread starts a CLI session (Claude
-// Code: `--session-id`; Codex: a persisted `codex exec`), follow-ups resume it (`--resume`,
-// `codex exec resume`), and the session files are deleted when the thread expires (24 h after its
-// last ask) or the watch deletes it. Threads are persisted in `<dir>/ask-threads.json` so a bridge
+// Quick Ask: one headless run of `claude -p` or `codex exec` per question, with no tools but web
+// search (unless the ask or the config turns it off), in an empty scratch directory. Asks form
+// threads: the first ask of a thread starts a CLI session (Claude Code: `--session-id`; Codex: a
+// persisted `codex exec`), follow-ups resume it (`--resume`, `codex exec resume`), and the session
+// files are deleted when the thread expires (24 h after its last ask) or the watch deletes it. Threads are persisted in `<dir>/ask-threads.json` so a bridge
 // restart still excludes and expires them; asks themselves live in memory only. Verified against
 // Claude Code 2.1.285 and codex-cli 0.159.2 (the JSON shapes parsed here are the ones those
-// printed; see docs/protocol.md). Prompt and answer text are never logged.
+// printed; see docs/protocol.md); the web search and system prompt flags against Claude Code 2.1.309
+// and codex-cli 0.164.0. Prompt and answer text are never logged.
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -30,8 +31,12 @@ const KILL_GRACE_MS = 5000;
 const DELETE_TIMEOUT_MS = 30_000;
 const ERROR_MAX = 200;
 const THREADS_FILE = 'ask-threads.json';
+/** `--max-turns` of a Claude Code ask that may search. */
+export const ASK_SEARCH_TURNS = 5;
 export const ASK_SYSTEM_PROMPT =
   "You are answering a quick question from a smartwatch: answer directly in the user's language, in at most ~80 words, no markdown headings or code fences unless essential.";
+/** Follows ASK_SYSTEM_PROMPT when the ask may search: the watch cannot open links. */
+export const ASK_SEARCH_PROMPT = 'You may search the web for current facts; give the answer itself, without a list of sources or links.';
 
 export type AskSpawn = (bin: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcess;
 
@@ -148,9 +153,10 @@ export class AskRunner {
       this.#threads.set(id, thread);
     } else thread.lastAskAt = createdAt;
     this.#saveThreads();
-    const ask: Ask = { id, provider: body.provider, threadId: thread.id, question: body.text, status: 'running', createdAt };
+    const search = body.search ?? this.#o.ask.search;
+    const ask: Ask = { id, provider: body.provider, threadId: thread.id, question: body.text, status: 'running', search, createdAt };
     const entry: Entry = { deviceId, ask };
-    const { args, env } = body.provider === 'claude-code' ? this.#claudeArgs(body, thread) : this.#codexArgs(body, thread);
+    const { args, env } = body.provider === 'claude-code' ? this.#claudeArgs(body, thread, search) : this.#codexArgs(body, thread, search);
     entries.unshift(entry);
     this.#byDevice.set(deviceId, entries.slice(0, ASK_KEEP));
     this.#launch(entry, thread, bin, args, env, body);
@@ -269,18 +275,20 @@ export class AskRunner {
     return env;
   }
 
-  #claudeArgs(body: AskBody, thread: Thread): { args: string[]; env: NodeJS.ProcessEnv } {
+  #claudeArgs(body: AskBody, thread: Thread, search: boolean): { args: string[]; env: NodeJS.ProcessEnv } {
     const sessionId = thread.sessionId ?? '';
     const args = [
       '-p',
       ...['--output-format', 'json'],
       ...['--model', body.model || this.#o.ask.claudeModel],
-      ...['--max-turns', '1'],
-      ...['--tools', ''],
+      // A search takes turns of its own: one or two searches, then the answer.
+      ...['--max-turns', search ? String(ASK_SEARCH_TURNS) : '1'],
+      // WebSearch alone, allowed outright: with no one to answer prompts it would otherwise be denied.
+      ...(search ? ['--tools', 'WebSearch', '--allowedTools', 'WebSearch'] : ['--tools', '']),
       ...['--permission-prompts', 'none'],
       '--strict-mcp-config',
       ...(thread.started ? ['--resume', sessionId] : ['--session-id', sessionId]),
-      ...['--append-system-prompt', askSystemPrompt(body.context)],
+      ...['--append-system-prompt', askSystemPrompt(body.context, search)],
       // A resumed conversation would otherwise keep its first ask's system prompt, i.e. its time and place.
       ...['--system-prompt-snapshot', 'off'],
       '--safe-mode',
@@ -292,14 +300,18 @@ export class AskRunner {
     return { args, env: isDefaultClaudeHome(this.#o.claudeHome) ? env : { ...env, CLAUDE_CONFIG_DIR: this.#o.claudeHome } };
   }
 
-  /** `codex exec resume` takes no `-s`/`-C`: the sandbox goes in as a config override and the cwd is the process's. */
-  #codexArgs(body: AskBody, thread: Thread): { args: string[]; env: NodeJS.ProcessEnv } {
+  /**
+   * `codex exec resume` takes no `-s`/`-C`: the sandbox goes in as a config override and the cwd is the process's.
+   * `codex exec` has no `--search` (the TUI's flag sets `web_search="live"`): the config key is set either way, so the ask decides whatever the user's config.toml says.
+   */
+  #codexArgs(body: AskBody, thread: Thread, search: boolean): { args: string[]; env: NodeJS.ProcessEnv } {
     const model = body.model || this.#o.ask.codexModel;
-    const prompt = `${askSystemPrompt(body.context)}\n\n${body.text}`;
+    const prompt = `${askSystemPrompt(body.context, search)}\n\n${body.text}`;
+    const web = ['-c', `web_search="${search ? 'live' : 'disabled'}"`];
     const args =
       thread.started && thread.sessionId
-        ? ['exec', 'resume', thread.sessionId, '--json', ...['-c', 'sandbox_mode="read-only"'], '--skip-git-repo-check', ...(model ? ['-m', model] : []), '--', prompt]
-        : ['exec', '--json', ...['-s', 'read-only'], '--skip-git-repo-check', ...['-C', this.#cwd], ...(model ? ['-m', model] : []), '--', prompt];
+        ? ['exec', 'resume', thread.sessionId, '--json', ...['-c', 'sandbox_mode="read-only"'], ...web, '--skip-git-repo-check', ...(model ? ['-m', model] : []), '--', prompt]
+        : ['exec', '--json', ...['-s', 'read-only'], ...web, '--skip-git-repo-check', ...['-C', this.#cwd], ...(model ? ['-m', model] : []), '--', prompt];
     return { args, env: { ...this.#env(), CODEX_HOME: this.#o.codexHome } };
   }
 
@@ -381,11 +393,11 @@ export class AskRunner {
   /** Records how the ask ended, restarts or purges its thread's files as needed, and reports it. */
   #end(entry: Entry, thread: Thread, outcome: Outcome, elapsedMs: number): void {
     const durationMs = outcome.durationMs ?? elapsedMs;
-    const { id, provider, threadId, question, createdAt } = entry.ask;
+    const { id, provider, threadId, question, search, createdAt } = entry.ask;
     entry.ask =
       outcome.answer === undefined
-        ? { id, provider, threadId, question, status: 'error', durationMs, error: outcome.error ?? 'bad_output', createdAt }
-        : { id, provider, threadId, question, status: 'done', answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
+        ? { id, provider, threadId, question, status: 'error', search, durationMs, error: outcome.error ?? 'bad_output', createdAt }
+        : { id, provider, threadId, question, status: 'done', search, answer: outcome.answer, ...(outcome.model ? { model: outcome.model } : {}), durationMs, createdAt };
     if (provider === 'claude-code' && !thread.started && this.#threads.get(threadId) === thread) {
       if (outcome.answer !== undefined) thread.started = true;
       else {
@@ -511,9 +523,10 @@ function codexDelete(bin: string, id: string, spawn: AskSpawn, env: NodeJS.Proce
   });
 }
 
-/** The system prompt of an ask: the watch's context, when sent, then ASK_SYSTEM_PROMPT. */
-export function askSystemPrompt(context: AskContext | undefined): string {
-  if (!context) return ASK_SYSTEM_PROMPT;
+/** The system prompt of an ask: the watch's context, when sent, then ASK_SYSTEM_PROMPT, then ASK_SEARCH_PROMPT when it may search. */
+export function askSystemPrompt(context: AskContext | undefined, search = false): string {
+  const instructions = search ? `${ASK_SYSTEM_PROMPT} ${ASK_SEARCH_PROMPT}` : ASK_SYSTEM_PROMPT;
+  if (!context) return instructions;
   const [, date = '', clock = '', offset = ''] = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::[\d.]+)?(Z|[+-]\d{2}:\d{2})$/.exec(context.time) ?? [];
   const weekday = new Date(`${date}T00:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
   const parts = [`local time ${weekday} ${date} ${clock} (UTC${offset === 'Z' ? '' : offset}, ${context.tz})`, `locale ${context.locale}`, `${context.units} units`];
@@ -521,7 +534,7 @@ export function askSystemPrompt(context: AskContext | undefined): string {
   // About 1 km: as coarse as the place name.
   const coords = location && `${location.lat.toFixed(2)}, ${location.lon.toFixed(2)}, ±${Math.round(location.accuracyM)} m`;
   if (place || coords) parts.push(`approximate location: ${place && coords ? `${place} (${coords})` : (place ?? coords)}`);
-  return `The user is asking from a smartwatch; ${parts.join('; ')}. Answer concisely for a small round screen; use the location and time only when relevant.\n\n${ASK_SYSTEM_PROMPT}`;
+  return `The user is asking from a smartwatch; ${parts.join('; ')}. Answer concisely for a small round screen; use the location and time only when relevant.\n\n${instructions}`;
 }
 
 /** The `context` of an ask body, or undefined when it is not a valid one. Unknown keys are ignored. */

@@ -224,8 +224,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!input) return;
       const provider = input.provider ?? asks.defaultProvider;
       const text = str(input.text)?.trim();
-      const { model, threadId } = input;
-      if ((provider !== 'claude-code' && provider !== 'codex') || !text || (model !== undefined && typeof model !== 'string') || (threadId !== undefined && (typeof threadId !== 'string' || !threadId))) {
+      const { model, threadId, search } = input;
+      if (
+        (provider !== 'claude-code' && provider !== 'codex') ||
+        !text ||
+        (model !== undefined && typeof model !== 'string') ||
+        (threadId !== undefined && (typeof threadId !== 'string' || !threadId)) ||
+        (search !== undefined && typeof search !== 'boolean')
+      ) {
         return fail(res, 400, 'bad_request');
       }
       // The CLI cannot take an argument with a NUL byte.
@@ -234,7 +240,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // Never logged: it may hold where the user is.
       const context = input.context === undefined ? undefined : parseAskContext(input.context);
       if (input.context !== undefined && !context) return fail(res, 400, 'bad_request');
-      const ask: AskBody = { provider, text, ...(model ? { model } : {}), ...(threadId ? { threadId } : {}), ...(context ? { context } : {}) };
+      const ask: AskBody = { provider, text, ...(model ? { model } : {}), ...(threadId ? { threadId } : {}), ...(context ? { context } : {}), ...(search === undefined ? {} : { search }) };
       const started = asks.start(device.id, ask);
       if (started === 'busy') return fail(res, 409, 'busy');
       if (started === 'unavailable') return fail(res, 503, 'ask_unavailable');

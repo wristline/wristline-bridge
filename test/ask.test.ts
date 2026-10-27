@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { ASK_SYSTEM_PROMPT, askSystemPrompt, parseAskContext, parseClaude, parseCodex, type AskSpawn } from '../src/ask.ts';
+import { ASK_SEARCH_PROMPT, ASK_SYSTEM_PROMPT, askSystemPrompt, parseAskContext, parseClaude, parseCodex, type AskSpawn } from '../src/ask.ts';
 import type { Ask, ServerEvent } from '../src/protocol.ts';
 import { projectSlug } from '../src/providers/claude-code/home.ts';
 import { FAKE_CLI, FakeProvider, TestSocket, fakeAskRunner, startBridge, waitFor, type Bridge } from './helpers.ts';
@@ -37,6 +37,8 @@ const asks = async (token = bridge.token): Promise<Ask[]> =>
   ((await (await fetch(`${bridge.base}/api/asks`, { headers: { authorization: `Bearer ${token}` } })).json()) as { asks: Ask[] }).asks;
 const cancel = (id: string, token = bridge.token): Promise<Response> => fetch(`${bridge.base}/api/asks/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${token}` } });
 const argv = (): string[] => JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+/** The instructions of an ask that may search (the default). */
+const SEARCHING = `${ASK_SYSTEM_PROMPT} ${ASK_SEARCH_PROMPT}`;
 
 async function askEvent(socket: TestSocket, status: string): Promise<ServerEvent & { type: 'ask' }> {
   const event = await socket.next();
@@ -61,19 +63,20 @@ test('Claude: the verified argv, then running and done events with the answer, m
   const sessionId = args[args.indexOf('--session-id') + 1] ?? '';
   assert.match(sessionId, /^[0-9a-f-]{36}$/);
   assert.equal(sessionId, id.slice('ask-'.length), 'the session id is the thread id’s uuid');
+  // Web search is on by default: WebSearch is the one tool, allowed outright, with turns for it.
   assert.deepEqual(args, [
-    ...['-p', '--output-format', 'json', '--model', 'haiku', '--max-turns', '1', '--tools', '', '--permission-prompts', 'none', '--strict-mcp-config'],
-    ...['--session-id', sessionId, '--append-system-prompt', ASK_SYSTEM_PROMPT, '--system-prompt-snapshot', 'off', '--safe-mode', '--', 'Reply with the single word OK'],
+    ...['-p', '--output-format', 'json', '--model', 'haiku', '--max-turns', '5', '--tools', 'WebSearch', '--allowedTools', 'WebSearch', '--permission-prompts', 'none', '--strict-mcp-config'],
+    ...['--session-id', sessionId, '--append-system-prompt', SEARCHING, '--system-prompt-snapshot', 'off', '--safe-mode', '--', 'Reply with the single word OK'],
   ]);
   const [ask] = await asks();
-  assert.deepEqual(ask, { id, provider: 'claude-code', threadId: id, question: 'Reply with the single word OK', status: 'done', answer: 'OK', model: 'Haiku 4.5', durationMs: 1389, createdAt: '2026-09-29T10:00:00.000Z' });
+  assert.deepEqual(ask, { id, provider: 'claude-code', threadId: id, question: 'Reply with the single word OK', status: 'done', search: true, answer: 'OK', model: 'Haiku 4.5', durationMs: 1389, createdAt: '2026-09-29T10:00:00.000Z' });
 
   // A follow-up in the thread resumes that session; both asks carry the thread id.
   const followUp = await accepted(await post({ provider: 'claude-code', text: 'And in French?', threadId: id }));
   await askEvent(ws, 'running');
   await askEvent(ws, 'done');
   const resumed = argv();
-  assert.deepEqual(resumed.slice(12, 14), ['--resume', sessionId]);
+  assert.deepEqual(resumed.slice(14, 16), ['--resume', sessionId]);
   assert.ok(!resumed.includes('--session-id') && !resumed.includes('--no-session-persistence'));
   assert.deepEqual(
     (await asks()).map((a) => [a.id, a.threadId]),
@@ -102,12 +105,12 @@ test('Codex: the last agent_message is the answer, the system prompt heads the p
   const args = argv();
   const cwd = args[args.indexOf('-C') + 1] ?? '';
   assert.match(cwd, /ask-cwd$/);
-  assert.deepEqual(args, ['exec', '--json', '-s', 'read-only', '--skip-git-repo-check', '-C', cwd, '-m', 'gpt-6-astra', '--', `${ASK_SYSTEM_PROMPT}\n\nReply with the single word OK`]);
+  assert.deepEqual(args, ['exec', '--json', '-s', 'read-only', '-c', 'web_search="live"', '--skip-git-repo-check', '-C', cwd, '-m', 'gpt-6-astra', '--', `${SEARCHING}\n\nReply with the single word OK`]);
   // A model in the request beats the configured one.
   await accepted(await post({ provider: 'codex', text: 'again', model: 'gpt-6-mini' }));
   await askEvent(ws, 'running');
   assert.equal((await askEvent(ws, 'done')).model, 'gpt-6-mini');
-  assert.deepEqual(argv().slice(7, 9), ['-m', 'gpt-6-mini']);
+  assert.deepEqual(argv().slice(9, 11), ['-m', 'gpt-6-mini']);
 
   // The thread id printed by `thread.started` names the Codex session; a follow-up resumes it (`exec resume` takes no -s/-C).
   const codexId = '01a0f1f1-b81c-72c0-b5d8-3ac445edb941';
@@ -116,7 +119,7 @@ test('Codex: the last agent_message is the answer, the system prompt heads the p
   await accepted(await post({ provider: 'codex', text: 'more', threadId: id }));
   await askEvent(ws, 'running');
   await askEvent(ws, 'done');
-  assert.deepEqual(argv(), ['exec', 'resume', codexId, '--json', '-c', 'sandbox_mode="read-only"', '--skip-git-repo-check', '-m', 'gpt-6-astra', '--', `${ASK_SYSTEM_PROMPT}\n\nmore`]);
+  assert.deepEqual(argv(), ['exec', 'resume', codexId, '--json', '-c', 'sandbox_mode="read-only"', '-c', 'web_search="live"', '--skip-git-repo-check', '-m', 'gpt-6-astra', '--', `${SEARCHING}\n\nmore`]);
 });
 
 test('threads expire 24 h after their last ask or on DELETE: the CLI session files go, other files stay, and the registry survives a restart', async () => {
@@ -276,7 +279,7 @@ test('one running ask per device: a second POST is 409 busy, another device may 
   await accepted(await post({ provider: 'claude-code', text: 'more', threadId: id }));
   await askEvent(ws, 'running');
   await askEvent(ws, 'done');
-  assert.deepEqual(argv().slice(12, 14), ['--resume', fresh]);
+  assert.deepEqual(argv().slice(14, 16), ['--resume', fresh]);
 });
 
 test('context: the watch’s time, locale and place head the system prompt of every ask, a follow-up’s with its own time', async () => {
@@ -285,7 +288,7 @@ test('context: the watch’s time, locale and place head the system prompt of ev
   const expected =
     'The user is asking from a smartwatch; local time Tuesday 2026-10-27 14:05 (UTC+09:00, Asia/Seoul); locale ko-KR; metric units; ' +
     'approximate location: 서울 성북구 돈암동 (37.59, 127.02, ±49 m). Answer concisely for a small round screen; use the location and time only when relevant.' +
-    `\n\n${ASK_SYSTEM_PROMPT}`;
+    `\n\n${SEARCHING}`;
   const id = await accepted(await post({ provider: 'claude-code', text: '우산 필요해?', context }));
   await askEvent(ws, 'running');
   await askEvent(ws, 'done');
@@ -293,7 +296,7 @@ test('context: the watch’s time, locale and place head the system prompt of ev
   assert.equal(args[args.indexOf('--append-system-prompt') + 1], expected);
   assert.deepEqual(args.slice(args.indexOf('--system-prompt-snapshot'), args.indexOf('--system-prompt-snapshot') + 2), ['--system-prompt-snapshot', 'off']);
   // Nothing of it is kept or echoed.
-  assert.deepEqual(Object.keys((await asks())[0] ?? {}).sort(), ['answer', 'createdAt', 'durationMs', 'id', 'model', 'provider', 'question', 'status', 'threadId']);
+  assert.deepEqual(Object.keys((await asks())[0] ?? {}).sort(), ['answer', 'createdAt', 'durationMs', 'id', 'model', 'provider', 'question', 'search', 'status', 'threadId']);
 
   // A follow-up resends the context: the resumed session gets the new time.
   await accepted(await post({ provider: 'claude-code', text: '내일은?', threadId: id, context: { ...context, time: '2026-10-27T14:20:00+09:00' } }));
@@ -309,7 +312,7 @@ test('context: the watch’s time, locale and place head the system prompt of ev
   await askEvent(ws, 'done');
   assert.equal(
     argv().at(-1),
-    `The user is asking from a smartwatch; local time Tuesday 2026-10-27 05:05 (UTC, Europe/London); locale en-GB; imperial units. Answer concisely for a small round screen; use the location and time only when relevant.\n\n${ASK_SYSTEM_PROMPT}\n\nweather?`,
+    `The user is asking from a smartwatch; local time Tuesday 2026-10-27 05:05 (UTC, Europe/London); locale en-GB; imperial units. Answer concisely for a small round screen; use the location and time only when relevant.\n\n${SEARCHING}\n\nweather?`,
   );
 
   // Place or coordinates alone; no context at all is the plain system prompt.
@@ -317,6 +320,39 @@ test('context: the watch’s time, locale and place head the system prompt of ev
   assert.match(askSystemPrompt({ ...base, place: 'Seoul' }), /; approximate location: Seoul\. /);
   assert.match(askSystemPrompt({ ...base, location: { lat: -33.8688, lon: 151.2093, accuracyM: 1200 } }), /; approximate location: -33\.87, 151\.21, ±1200 m\. /);
   assert.equal(askSystemPrompt(undefined), ASK_SYSTEM_PROMPT);
+  assert.equal(askSystemPrompt(undefined, true), SEARCHING);
+});
+
+test('search: false runs Claude Code without tools in one turn and Codex with web search disabled; the ask says which', async () => {
+  fakeEnv.FAKE_MODE = 'ok';
+  const id = await accepted(await post({ provider: 'claude-code', text: 'offline', search: false }));
+  await askEvent(ws, 'running');
+  await askEvent(ws, 'done');
+  const args = argv();
+  assert.deepEqual(args.slice(0, 12), ['-p', '--output-format', 'json', '--model', 'haiku', '--max-turns', '1', '--tools', '', '--permission-prompts', 'none', '--strict-mcp-config']);
+  assert.ok(!args.includes('--allowedTools') && !args.includes('WebSearch'));
+  assert.equal(args[args.indexOf('--append-system-prompt') + 1], ASK_SYSTEM_PROMPT);
+  assert.equal((await asks()).find((a) => a.id === id)?.search, false);
+  // Per ask: a follow-up in the same thread may search.
+  await accepted(await post({ provider: 'claude-code', text: 'now look it up', threadId: id, search: true }));
+  await askEvent(ws, 'running');
+  await askEvent(ws, 'done');
+  assert.deepEqual(argv().slice(7, 11), ['--tools', 'WebSearch', '--allowedTools', 'WebSearch']);
+
+  await accepted(await post({ provider: 'codex', text: 'offline', search: false }));
+  await askEvent(ws, 'running');
+  await askEvent(ws, 'done');
+  assert.deepEqual(argv().slice(4, 6), ['-c', 'web_search="disabled"']);
+  assert.equal(argv().at(-1), `${ASK_SYSTEM_PROMPT}\n\noffline`);
+
+  // The bridge's config decides for an ask that does not say.
+  const events: [string, ServerEvent][] = [];
+  const quiet = fakeAskRunner((d, e) => events.push([d, e]), fakeEnv, { ask: { provider: 'claude-code', claudeModel: 'haiku', search: false } });
+  const ask = quiet.start('dev', { provider: 'claude-code', text: 'x' });
+  assert.ok(typeof ask === 'object' && ask.search === false);
+  await waitFor(() => (events.length === 2 ? true : undefined));
+  assert.deepEqual(argv().slice(7, 9), ['--tools', '']);
+  quiet.close();
 });
 
 test('context validation: a bad context is 400 and starts nothing', async () => {
@@ -369,7 +405,7 @@ test('timeout ends the ask with error timeout', async () => {
 
 test('validation: provider, text, size, missing CLI', async () => {
   fakeEnv.FAKE_MODE = 'ok';
-  for (const body of [{ provider: 'gemini', text: 'x' }, { provider: 'codex', text: '' }, { provider: 'codex', text: '   ' }, { provider: 'codex' }, { provider: 'codex', text: 'x', model: 1 }, { provider: 'codex', text: 'x', threadId: '' }, 'text']) {
+  for (const body of [{ provider: 'gemini', text: 'x' }, { provider: 'codex', text: '' }, { provider: 'codex', text: '   ' }, { provider: 'codex' }, { provider: 'codex', text: 'x', model: 1 }, { provider: 'codex', text: 'x', threadId: '' }, { provider: 'codex', text: 'x', search: 'yes' }, 'text']) {
     assert.equal((await post(body)).status, 400, JSON.stringify(body));
   }
   // The CLI cannot take an argument with a NUL byte: refused before anything is started or saved.

@@ -168,7 +168,7 @@ export interface Alert {
 
 export type AskStatus = 'running' | 'done' | 'error';
 
-/** A Quick Ask: one headless, tool-less run of the agent CLI for a short answer. Kept in memory per device; never a session. */
+/** A Quick Ask: one headless run of the agent CLI, with no tools but web search, for a short answer. Kept in memory per device; never a session. */
 export interface Ask {
   /** `ask-<uuid>` */
   id: string;
@@ -178,6 +178,8 @@ export interface Ask {
   /** The watch's text, trimmed. */
   question: string;
   status: AskStatus;
+  /** Whether the model could search the web. */
+  search: boolean;
   /** When `done`; at most TEXT_MAX code units. */
   answer?: string;
   /** When `done`. Claude Code: the model's name for people (e.g. `Haiku 4.5`); Codex: the configured `codexModel`, absent when unset. */
@@ -298,6 +300,8 @@ export interface AskBody {
   /** Continues that thread (a `threadId` of this device's asks); absent for a new thread. */
   threadId?: string;
   context?: AskContext;
+  /** Lets the model search the web; absent: the bridge's `ask.search` (default true). */
+  search?: boolean;
 }
 
 export interface AskAccepted {

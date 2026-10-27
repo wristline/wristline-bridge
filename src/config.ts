@@ -24,6 +24,8 @@ export interface AskConfig {
   provider: ProviderId;
   claudeModel: string;
   codexModel?: string;
+  /** Whether an ask that does not say may search the web. */
+  search: boolean;
 }
 
 /** A login the bridge saw in a Claude Code home; `at` is when the bridge first observed it (not a file mtime). */
@@ -113,7 +115,7 @@ export function resolveConfig(stored: StoredConfig, flags: Flags = {}, env: Env 
     bins: stored.bins ?? {},
     permissionWaitSec: stored.permissionWaitSec ?? 590,
     historyDays: stored.historyDays ?? 7,
-    ask: { provider: 'claude-code', claudeModel: 'haiku', ...stored.ask },
+    ask: { provider: 'claude-code', claudeModel: 'haiku', search: true, ...stored.ask },
   };
 }
 
@@ -219,6 +221,7 @@ function pickStored(raw: JsonObject): StoredConfig {
       const value = str(raw.ask[key]);
       if (value) ask[key] = value;
     }
+    if (typeof raw.ask.search === 'boolean') ask.search = raw.ask.search;
     set('ask', ask);
   }
   return out;

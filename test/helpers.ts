@@ -116,7 +116,7 @@ export function fakeAskRunner(onEvent: AskRunnerOptions['onEvent'], fakeEnv: Rec
     bins: { claude: 'claude', codex: 'codex' },
     claudeHome: join(dir, 'claude'),
     codexHome: join(dir, 'codex'),
-    ask: { provider: 'claude-code', claudeModel: 'haiku', codexModel: 'gpt-6-astra' },
+    ask: { provider: 'claude-code', claudeModel: 'haiku', codexModel: 'gpt-6-astra', search: true },
     onEvent,
     spawn: (bin, args, o) => spawn(process.execPath, [FAKE_CLI, bin, ...args], { cwd: o.cwd, env: { ...o.env, ...fakeEnv }, stdio: ['ignore', 'pipe', 'pipe'] }),
     ...options,

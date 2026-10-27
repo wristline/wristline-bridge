@@ -194,7 +194,8 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
 
 - **Ask** — a Quick Ask (see below): `id` (`ask-<uuid>`), `provider`, `threadId` (the id of the
   first ask of the conversation it belongs to; its own id for a first ask), `question` (the
-  watch's text, trimmed), `status` (`running`, `done`, `error`), `createdAt`; when `done`, `answer` (at
+  watch's text, trimmed), `status` (`running`, `done`, `error`), `search` (whether the model could
+  search the web), `createdAt`; when `done`, `answer` (at
   most 4000 code units) and `model` when known (Claude Code: the model's name for people, e.g.
   `Haiku 4.5`; Codex: the bridge's configured `codexModel`, absent when unset); when `done` or
   `error`, `durationMs` (CLI start to exit); when `error`, `error`: `timeout`, `cancelled`,
@@ -221,7 +222,7 @@ All timestamps are ISO 8601 in UTC.
 | `GET /api/requests` | `200 {requests}` | `401` | `requests.json` |
 | `POST /api/requests/:rid` `{answers}` | `200 {}` | `400` (invalid answers), `409 already_resolved` | `error-409-already-resolved.json` |
 | `GET /api/usage` | `200 {usage}` | `401` | `usage.json` |
-| `POST /api/ask` `{provider, text, model?, threadId?, context?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, a NUL character in `text` or `model`, non-string or empty `threadId`, a `threadId` of the other provider, an invalid `context`), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
+| `POST /api/ask` `{provider, text, model?, threadId?, context?, search?}` | `202 {askId}` | `400` (`provider` not `claude-code`/`codex`, empty `text`, non-string `model`, a NUL character in `text` or `model`, non-string or empty `threadId`, a `threadId` of the other provider, an invalid `context`, a non-boolean `search`), `404` (`threadId` is not a thread of this device, or expired), `409 busy` (this device already has an ask running), `413` (text over 4000), `503 ask_unavailable` (that CLI is not installed on the PC) | `ask.json`, `ask-thread.json`, `ask-accepted.json`, `error-409-ask-busy.json`, `error-503-ask-unavailable.json` |
 | `GET /api/asks` | `200 {asks}`: this device's asks of the last 24 h, at most 10, newest first, each with its `threadId` | `401` | `asks.json` |
 | `DELETE /api/asks/:id` | `204` (a running ask is killed and ends with `error: cancelled`; a finished one is left as it is) | `404` (not this device's ask) | |
 | `DELETE /api/asks/thread/:threadId` | `204`: the thread is forgotten, its asks leave `GET /api/asks`, and its CLI session is deleted (a running ask of it is cancelled first) | `404` (not this device's thread) | |
@@ -243,10 +244,17 @@ page>`. Bridges that predate `kinds` ignore it (here and in `subscribe`) and sen
 
 ### Quick Ask
 
-`POST /api/ask` runs the agent CLI once, headless and without tools, for a short answer (Claude
-Code: `claude -p --model haiku …`, Codex: `codex exec -s read-only …`; the exact commands are in
-the README). `provider` may be omitted by older clients; the bridge then uses its configured
-default. `model` overrides the bridge's configured model for that ask.
+`POST /api/ask` runs the agent CLI once, headless and with no tools but web search, for a short
+answer (Claude Code: `claude -p --model haiku …`, Codex: `codex exec -s read-only …`; the exact
+commands are in the README). `provider` may be omitted by older clients; the bridge then uses its
+configured default. `model` overrides the bridge's configured model for that ask.
+
+**Web search.** `search` (optional, per ask; absent: the bridge's `ask.search`, default `true`)
+lets the model search the web for current facts. Claude Code: `--tools WebSearch --allowedTools
+WebSearch --max-turns 5` instead of `--tools "" --max-turns 1` (WebFetch stays off); Codex:
+`-c web_search="live"`, or `"disabled"` without it. The answer then comes without a source list.
+A searched answer takes longer: about 14 s instead of 2 s for a Haiku weather question in our
+test. Each ask reports `search` in `GET /api/asks`.
 
 **Context.** `context` (optional, on every ask of a thread) tells the model where and when the
 user asks from, so "do I need an umbrella?" or "what's open now?" can be answered:
