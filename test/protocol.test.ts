@@ -125,7 +125,12 @@ const now = (): number => clock;
 const fakeEnv = { FAKE_MODE: 'ok' };
 
 before(async () => {
-  bridge = await startBridge([provider, codexProvider, schoolHome], now, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { bins: { claude: 'claude' }, now }));
+  // A Claude Code `done` alert is held until the next turn of the event loop: a suggestion passed in the same tick goes with it.
+  const schedule = (fn: () => void): (() => void) => {
+    const t = setImmediate(fn);
+    return () => clearImmediate(t);
+  };
+  bridge = await startBridge([provider, codexProvider, schoolHome], now, undefined, undefined, (onEvent) => fakeAskRunner(onEvent, fakeEnv, { bins: { claude: 'claude' }, now }), { schedule });
   bridge.hub.login(provider, 'acc-me');
   bridge.hub.login(schoolHome, 'acc-school');
   bridge.hub.login(codexProvider, usage.account?.id);
@@ -332,6 +337,12 @@ test('WebSocket events', async () => {
   const limitAlert = await ws.next();
   fixture('event-alert-limit', limitAlert);
   assert.deepEqual(await other.next(), limitAlert);
+  // A Claude Code turn's `done` with the next prompt it suggests: held until that arrives (at most 3 s).
+  bridge.hub.alert(running.id, 'done', 'Fixed the build script; all tests pass.', 'Fix the build script');
+  bridge.hub.suggestion(running.id, 'Run the tests again');
+  const suggestedAlert = await ws.next();
+  fixture('event-alert-done-suggestion', suggestedAlert);
+  assert.deepEqual(await other.next(), suggestedAlert);
 
   // The watch allows the command: the request resolves and the session goes back to running.
   assert.equal((await post('/api/requests/req-1', { answers: { decision: ['allow'] } })).status, 200);

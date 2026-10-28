@@ -168,6 +168,8 @@ export interface Alert {
   resetsEstimated?: boolean;
   /** `limit`: as on the item (see Item.limitKind). */
   limitKind?: LimitKind;
+  /** `done` (Claude Code only): the next prompt it suggests, as Session.suggestion, when it arrived within 3 s of the turn's end. */
+  suggestion?: string;
 }
 
 export type AskStatus = 'running' | 'done' | 'error';

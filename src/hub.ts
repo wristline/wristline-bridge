@@ -4,6 +4,7 @@ import { PendingRegistry, type PendingOptions, type Presence } from './pending.t
 import {
   API_VERSION,
   CLOSE_REVOKED,
+  SUGGESTION_MAX,
   type Account,
   type Alert,
   type AlertKind,
@@ -19,7 +20,7 @@ import {
   type UsageWindow,
 } from './protocol.ts';
 import type { Hub, SessionProvider } from './provider.ts';
-import { parseJson } from './util.ts';
+import { clip, parseJson } from './util.ts';
 
 const SESSION_THROTTLE_MS = 2000;
 /** `usage` events per entry: at most one per minute (the first one at once). */
@@ -30,6 +31,11 @@ const PONG_MAX_MS = 35_000;
 /** Alerts replayed in the snapshot: at most this many, none older than ALERT_TTL_MS. */
 const ALERT_KEEP = 10;
 const ALERT_TTL_MS = 10 * 60_000;
+/**
+ * How long a Claude Code `done` alert waits for the session's suggested next prompt, which the
+ * wristline-suggest mod posts about a second after the Stop hook (see `alert`).
+ */
+export const DONE_HOLD_MS = 3000;
 const STATUS_RANK: Record<Session['status'], number> = { needs_input: 0, running: 1, idle: 2, ended: 2 };
 
 interface Client {
@@ -53,6 +59,16 @@ interface Throttle {
 export interface Target {
   provider: SessionProvider;
   nativeId: string;
+}
+
+/** A `done` alert waiting for its session's suggestion (see `alert`). */
+interface HeldDone {
+  fields: Omit<Alert, 'id' | 'at'>;
+  /** Whether it goes into the replay buffer: presence as of the Stop, when a Slack-style Stop hook made the same decision. */
+  keep: boolean;
+  /** The session's `turnStartedAt` when the alert was raised: a running session with another one started a new turn. */
+  turn: string | undefined;
+  cancel: () => void;
 }
 
 interface UsageThrottle {
@@ -133,6 +149,15 @@ export interface HubOptions {
   usageThrottleMs?: number;
   /** Info lines (connections, alert and request delivery; never their text). Defaults to console.log. */
   log?: (line: string) => void;
+  /** Test override of DONE_HOLD_MS; 0 sends a `done` alert at once. */
+  doneHoldMs?: number;
+  /** Runs `fn` after `ms` and returns its cancel function; setTimeout by default (Node timers run on the monotonic clock, unaffected by wall-clock steps). */
+  schedule?: (fn: () => void, ms: number) => () => void;
+}
+
+function schedule(fn: () => void, ms: number): () => void {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
 }
 
 /** Fans provider changes out to connected watches and tracks what each one subscribed to. */
@@ -164,6 +189,10 @@ export class BridgeHub implements Hub {
   readonly #now: () => number;
   readonly #newId: () => string;
   readonly #log: (line: string) => void;
+  /** Claude Code `done` alerts waiting for their session's suggestion, by session id. */
+  readonly #held = new Map<string, HeldDone>();
+  readonly #doneHoldMs: number;
+  readonly #schedule: (fn: () => void, ms: number) => () => void;
 
   constructor(options: HubOptions) {
     this.#providers = options.providers;
@@ -171,9 +200,12 @@ export class BridgeHub implements Hub {
     this.#now = options.alerts?.now ?? Date.now;
     this.#newId = options.alerts?.newId ?? randomUUID;
     this.#usageThrottleMs = options.usageThrottleMs ?? USAGE_THROTTLE_MS;
+    this.#doneHoldMs = options.doneHoldMs ?? DONE_HOLD_MS;
+    this.#schedule = options.schedule ?? schedule;
     this.pending = new PendingRegistry({
       ...options.pending,
       onRequest: (request) => {
+        this.#release(request.sessionId);
         this.#broadcast({ type: 'request', request });
         this.#log(`wristline: request ${request.id} broadcast clients=${this.#reach().clients}`);
         this.#refreshSession(request);
@@ -189,6 +221,11 @@ export class BridgeHub implements Hub {
   // Hub
 
   session(session: Session): void {
+    // A dialog or a new turn while its `done` alert waits for a suggestion: none is coming for that turn.
+    const held = this.#held.get(session.id);
+    if (held && (session.status === 'needs_input' || (session.status === 'running' && session.turnStartedAt !== undefined && session.turnStartedAt !== held.turn))) {
+      this.#release(session.id);
+    }
     // The watch lists live sessions only: one that ends leaves its list (and cancels a throttled update).
     if (this.#overlay(session).status === 'ended') return this.removed(session.id);
     const now = Date.now();
@@ -355,10 +392,16 @@ export class BridgeHub implements Hub {
     return windows.length === 0 ? undefined : windows.length === stored.windows.length ? stored : { ...stored, windows };
   }
 
+  /**
+   * A Claude Code `done` alert waits up to DONE_HOLD_MS for the session's suggested next prompt
+   * (`suggestion`) and goes out with it; at the timeout, or as soon as the session raises another
+   * alert, opens a request, shows a dialog or starts a new turn, it goes out without one. Other
+   * kinds, and Codex (which suggests nothing), go out at once.
+   */
   alert(sessionId: string, kind: AlertKind, text?: string, title?: string, reset?: LimitReset): void {
-    const alert: Alert = {
-      id: this.#newId(),
-      at: new Date(this.#now()).toISOString(),
+    // Whatever else the session raises comes after its held `done`.
+    this.#release(sessionId);
+    const fields: Omit<Alert, 'id' | 'at'> = {
       sessionId,
       alert: kind,
       ...(text === undefined ? {} : { text }),
@@ -369,13 +412,50 @@ export class BridgeHub implements Hub {
     };
     // A `done` raised while no watch is present is posted by a Stop hook instead (e.g. to Slack, see
     // `presence`): replayed to a watch that connects later, it would arrive twice. No hook stands in for the other kinds.
-    if (kind !== 'done' || this.presence().watch) {
+    // Presence counts as of now, when that hook asks, also for a `done` sent after its hold.
+    const keep = kind !== 'done' || this.presence().watch;
+    if (kind === 'done' && this.#doneHoldMs > 0 && sessionId.startsWith('claude-code:')) {
+      const cancel = this.#schedule(() => this.#release(sessionId), this.#doneHoldMs);
+      this.#held.set(sessionId, { fields, keep, turn: this.#turnStartedAt(sessionId), cancel });
+      return;
+    }
+    this.#emit(fields, keep);
+  }
+
+  /** Claude Code's suggested next prompt for a session (POST /hooks/prompt-suggestion): a `done` alert waiting for it goes out with it. */
+  suggestion(sessionId: string, text: string): void {
+    const shown = clip(text.trim(), SUGGESTION_MAX);
+    const held = this.#held.has(sessionId);
+    this.#log(`wristline: suggestion ${sessionId.slice(0, sessionId.indexOf(':') + 9)} len=${shown.length}${held ? ' (done alert)' : ''}`);
+    if (shown) this.#release(sessionId, shown);
+  }
+
+  /** Sends the session's held `done` alert, if any, with `suggestion` when given. */
+  #release(sessionId: string, suggestion?: string): void {
+    const held = this.#held.get(sessionId);
+    if (!held) return;
+    this.#held.delete(sessionId);
+    held.cancel();
+    this.#emit(suggestion === undefined ? held.fields : { ...held.fields, suggestion }, held.keep);
+  }
+
+  /** Stamps the alert with its id and time, buffers it when `keep`, and broadcasts it. */
+  #emit(fields: Omit<Alert, 'id' | 'at'>, keep: boolean): void {
+    const alert: Alert = { id: this.#newId(), at: new Date(this.#now()).toISOString(), ...fields };
+    if (keep) {
       this.#alerts.push(alert);
       if (this.#alerts.length > ALERT_KEEP) this.#alerts.shift();
     }
     this.#broadcast({ type: 'alert', ...alert });
     const { clients, bg } = this.#reach();
-    this.#log(`wristline: alert ${kind} id=${alert.id} clients=${clients} bg=${bg}`);
+    this.#log(`wristline: alert ${alert.alert} id=${alert.id} clients=${clients} bg=${bg}`);
+  }
+
+  /** The session's current turn start as its provider lists it (running sessions only). */
+  #turnStartedAt(sessionId: string): string | undefined {
+    return this.resolve(sessionId)
+      ?.provider.listSessions()
+      .find((s) => s.id === sessionId)?.turnStartedAt;
   }
 
   /** To every foreground connection of one device only (a Quick Ask answer is nobody else's business). */
@@ -476,6 +556,8 @@ export class BridgeHub implements Hub {
     clearInterval(this.#ping);
     for (const t of this.#throttles.values()) clearTimeout(t.timer);
     for (const t of this.#usageThrottles.values()) clearTimeout(t.timer);
+    for (const h of this.#held.values()) h.cancel();
+    this.#held.clear();
     for (const c of this.#clients) c.ws.terminate();
     for (const w of this.#watches.values()) w.stop();
     this.#watches.clear();

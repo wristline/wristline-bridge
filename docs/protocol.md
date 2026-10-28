@@ -213,7 +213,7 @@ Request bodies are limited to 64 KiB (`413 payload_too_large`). Errors have the 
   codes with a generic message.
 
 - **Alert** — a session finished or waits for input: `id` (uuid), `at` (ISO 8601), `sessionId`,
-  `alert` (`needs_input`, `done` or `limit`), `text?`, `title?`, `resetsAt?`, `resetsEstimated?`, `limitKind?` (see the `alert` event). Sent as it happens
+  `alert` (`needs_input`, `done` or `limit`), `text?`, `title?`, `resetsAt?`, `resetsEstimated?`, `limitKind?`, `suggestion?` (see the `alert` event). Sent as it happens
   and replayed in the `snapshot` (see "Missed alerts").
 
 All timestamps are ISO 8601 in UTC.
@@ -322,7 +322,7 @@ Server events (JSON text frames):
 | `request` | `request` | the agent waits for an answer | `event-request-permission.json`, `event-request-question.json` |
 | `resolved` | `requestId, by` | answered from the `watch`, in the `terminal`, or `timeout` | `event-resolved.json` |
 | `usage` | `usage` | plan usage numbers or account changed; the entry's merged windows (see Usage); at most one per entry per minute after its first. Empty `windows`: remove the entry (its last window reset, or its account is no longer logged in; a login change is sent at once) | `event-usage.json`, `event-usage-removed.json` |
-| `alert` | `id, at, sessionId, alert, text?, title?, resetsAt?, resetsEstimated?, limitKind?` | `needs_input` (text: short summary), `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title) or `limit` (text: up to 500 characters of the agent's limit message; title: the session title; `resetsAt`, `resetsEstimated`, `limitKind`: as on its item; see "Limit alerts"); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json`, `event-alert-limit.json` |
+| `alert` | `id, at, sessionId, alert, text?, title?, resetsAt?, resetsEstimated?, limitKind?, suggestion?` | `needs_input` (text: short summary), `done` (text: up to 500 characters of the answer; title: the prompt that started the turn or the session title; `suggestion`: Claude Code only, see "Done alerts and suggestions") or `limit` (text: up to 500 characters of the agent's limit message; title: the session title; `resetsAt`, `resetsEstimated`, `limitKind`: as on its item; see "Limit alerts"); `id` (uuid) and `at` identify it when the `snapshot` replays it | `event-alert.json`, `event-alert-done-suggestion.json`, `event-alert-limit.json` |
 | `ask` | `askId, provider, status, text?, model?, durationMs?, error?` | a Quick Ask of this device changed: `running` once right after the `202`, then `done` (`text` is the answer, `model` when known) or `error` once; sent to the asking device only | `event-ask-running.json`, `event-ask-done.json`, `event-ask-error.json` |
 
 Client events:
@@ -378,7 +378,21 @@ Not kept: a `done` alert raised while `GET /local/presence` answers `watch: fals
 connected, the 90 s grace after a disconnect, or a watch that stopped answering pings). That is
 when a Stop hook such as a Slack notifier posts the turn instead (see the Local API), and a watch
 that connects a few seconds later (often woken by that very notification) would show it a second
-time. No hook stands in for `needs_input` and `limit`: they are kept either way.
+time. No hook stands in for `needs_input` and `limit`: they are kept either way. For a Claude
+Code `done` sent after its hold (see below), presence counts as of the Stop, when such a hook
+asked, not as of the sending; `at` is when it was sent.
+
+### Done alerts and suggestions
+
+A Claude Code `done` alert waits up to 3 s after the Stop hook for the session's suggested next
+prompt (`POST /hooks/prompt-suggestion`, about a second later) and then carries it as
+`suggestion` (as `Session.suggestion`: trimmed, at most 300 code units;
+[`event-alert-done-suggestion.json`](../protocol/v1/event-alert-done-suggestion.json)). Without a
+suggestion in time it is sent without one, and a later suggestion only becomes the session's
+`suggestion`. It is also sent at once, without one, when the session raises another alert, opens
+a request, shows a dialog (`needs_input`) or starts a new turn (running with a new
+`turnStartedAt`) in the meantime. `needs_input` and `limit` alerts, and Codex alerts (Codex
+suggests nothing), are never held.
 
 ### Codex alerts
 
@@ -492,8 +506,11 @@ ports to Windows, where any browser page could otherwise post to it). Bodies up 
   (found in `transcript_path`: the newest non-tool_result user line, or the `origin` line of the
   same `promptId`, with `origin.kind` `human` and no `isMeta`; reminders, pasted content and
   command wrappers stripped); otherwise (task notification, peer message, scheduled task, local
-  command, unreadable transcript) the session title, omitted when there is none.
+  command, unreadable transcript) the session title, omitted when there is none. The alert may
+  go out up to 3 s after the hook answered (see "Done alerts and suggestions").
 - `POST /hooks/prompt-suggestion` — `{session_id, text, shown}` from the wristline-suggest mod
   (`mods/wristline-suggest`, run as `hook.sh prompt-suggestion`); empty `200`. A `text` that is
   blank or was not `shown` is ignored; otherwise the Claude Code home that lists `session_id` sets
-  it as the session's `suggestion` (see Session).
+  it as the session's `suggestion` (see Session), and a `done` alert of the session that waits
+  for it goes out with it (see "Done alerts and suggestions"). The bridge logs each one it takes
+  (session id prefix and length, never the text).

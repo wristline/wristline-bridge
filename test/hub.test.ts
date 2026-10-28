@@ -684,7 +684,7 @@ test('primary marks the current login of the primary home (the first instance) i
   }
 });
 
-test('connections, alerts and requests are logged with ids and client counts, never their text', async () => {
+test('connections, alerts, suggestions and requests are logged with ids, lengths and client counts, never their text', async () => {
   const clock = Date.parse('2026-09-29T10:00:00Z');
   const lines: string[] = [];
   let n = 0;
@@ -701,6 +701,7 @@ test('connections, alerts and requests are logged with ids and client counts, ne
     bg.send({ type: 'mode', mode: 'background' });
     await new Promise((r) => setTimeout(r, 100));
     hub.alert('claude-code:s1', 'done', 'the secret answer', 'secret title');
+    hub.suggestion('claude-code:s1', '  the secret suggestion ');
     const answered = hub.pending.open({ sessionId: 'claude-code:s1', kind: 'question', title: 'secret question', questions: [] });
     hub.pending.dismiss('req-1', 'terminal');
     await answered;
@@ -711,6 +712,7 @@ test('connections, alerts and requests are logged with ids and client counts, ne
     assert.deepEqual(lines, [
       `wristline: watch ${short} connected`,
       `wristline: watch ${short} connected`,
+      'wristline: suggestion claude-code:s1 len=21 (done alert)',
       'wristline: alert done id=alert-1 clients=2 bg=1',
       'wristline: request req-1 broadcast clients=2',
       `wristline: watch ${short} disconnected`,

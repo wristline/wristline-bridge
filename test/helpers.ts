@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import { AskRunner, type AskRunnerOptions } from '../src/ask.ts';
 import { Auth, type AuthOptions } from '../src/auth.ts';
-import { BridgeHub } from '../src/hub.ts';
+import { BridgeHub, type HubOptions } from '../src/hub.ts';
 import { pageItems } from '../src/jsonl.ts';
 import { PendingRegistry } from '../src/pending.ts';
 import type { Item, ItemKind, ItemPage, LimitReset, ProviderHealth, ProviderId, ResolvedBy, ServerEvent, Session, Usage } from '../src/protocol.ts';
@@ -141,6 +141,8 @@ export async function startBridge(
   waitMs = 60_000,
   save: AuthOptions['save'] = async () => {},
   asks?: (onEvent: AskRunnerOptions['onEvent']) => AskRunner,
+  /** The `done` hold: off unless a test asks for it (then with its own `schedule`). */
+  hold: Pick<HubOptions, 'doneHoldMs' | 'schedule'> = { doneHoldMs: 0 },
 ): Promise<Bridge> {
   let n = 0;
   let a = 0;
@@ -149,6 +151,7 @@ export async function startBridge(
     pending: { now, newId: () => `req-${++n}` },
     alerts: { now, newId: () => `a1e47c00-0000-4000-8000-${String(++a).padStart(12, '0')}` },
     log: quiet,
+    ...hold,
   });
   const auth = new Auth({ devices: [], save, now });
   const hookToken = 'hook-token';

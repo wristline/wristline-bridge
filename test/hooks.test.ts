@@ -369,12 +369,14 @@ test('prompt-suggestion: needs the hook token, answers an empty 200, and hands a
   await emptyOk(await hook(bridge, 'prompt-suggestion', body));
 
   const got: [string, string][] = [];
+  const toHub: [string, string][] = [];
   const hub = recordingHub();
-  const ctx = { hub: { ...hub, sessions: () => [] }, waitMs: 1000, signal: new AbortController().signal, suggest: (id: string, text: string) => void got.push([id, text]) };
+  const ctx = { hub: { ...hub, sessions: () => [], suggestion: (id: string, text: string) => void toHub.push([id, text]) }, waitMs: 1000, signal: new AbortController().signal, suggest: (id: string, text: string) => void got.push([id, text]) };
   assert.equal(await handleHook('prompt-suggestion', { ...body, text: '  run the tests \n' }, ctx), undefined);
   for (const ignored of [{ ...body, shown: false }, { ...body, shown: undefined }, { ...body, text: '  ' }, { ...body, text: 7 }, { text: 'x', shown: true }]) {
     await handleHook('prompt-suggestion', ignored, ctx);
   }
   assert.deepEqual(got, [[SID, 'run the tests']], 'trimmed; one the box could not show, a blank one or one without a session is ignored');
+  assert.deepEqual(toHub, [[`claude-code:${SID}`, 'run the tests']], 'the hub hears of it too, by session key (for a held done alert)');
   assert.ok(hookHandlers(ctx.hub, 1000).has('prompt-suggestion'));
 });

@@ -24,7 +24,7 @@ const ALERT_TEXT_MAX = 120;
 const NEEDS_INPUT = new Set(['permission_prompt', 'agent_needs_input']);
 
 export interface HookContext {
-  hub: Pick<Hub, 'pending' | 'alert'> & Pick<BridgeHub, 'sessions'>;
+  hub: Pick<Hub, 'pending' | 'alert'> & Pick<BridgeHub, 'sessions' | 'suggestion'>;
   /** How long to wait for the watch before handing the decision back to the terminal. */
   waitMs: number;
   /** Aborted when Claude Code drops the hook request. */
@@ -209,12 +209,14 @@ function notification(input: JsonObject, ctx: HookContext): void {
 
 /**
  * `{session_id, text, shown}` from the wristline-suggest mod (mods/), a second or so after Stop:
- * the dim suggestion Claude Code put in the prompt box. One it could not show is ignored.
+ * the dim suggestion Claude Code put in the prompt box. One it could not show is ignored. The hub
+ * adds it to the turn's `done` alert while that waits for it.
  */
 function promptSuggestion(input: JsonObject, ctx: HookContext): void {
   const id = str(input.session_id);
   const text = str(input.text)?.trim();
   if (!id || !text || input.shown !== true) return;
+  ctx.hub.suggestion(sessionKey('claude-code', id), text);
   ctx.suggest?.(id, text);
 }
 
